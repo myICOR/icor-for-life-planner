@@ -1,9 +1,9 @@
 # Security Policy
 
-ICOR Planner is an Obsidian plugin that syncs Todoist, ClickUp, starred email and
+ICOR for Life - Planner is an Obsidian plugin that syncs Todoist, ClickUp, starred email and
 Google Calendar into your vault. It holds credentials for those services and it can
 write back to them. That makes it the most sensitive plugin in the ICOR for Life
-suite after ICOR AI Chat, and we would rather hear about a problem early than read
+suite after ICOR for Life - Chat, and we would rather hear about a problem early than read
 about it later.
 
 ## Reporting a vulnerability

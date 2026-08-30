@@ -106,5 +106,5 @@ test('the board and the tray describe the unconnected state with one sentence', 
   assert.equal(hits.length, 1, 'the board notice must reuse the tray constant');
   assert.ok(!/Add API keys in Settings/.test(main),
     'the old board wording said "keys" for a calendar that takes a URL');
-  assert.ok(!/Settings -> ICOR Planner/.test(main), 'stale arrow copy');
+  assert.ok(!/Settings -> ICOR for Life - Planner/.test(main), 'stale arrow copy');
 });

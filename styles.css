@@ -1,5 +1,5 @@
-/* ICOR Planner - INKLINE grammar for the weekly board and the tray.
- * Same design language as myICOR Connect: structure carried by typography,
+/* ICOR for Life - Planner - INKLINE grammar for the weekly board and the tray.
+ * Same design language as ICOR for Life - Connect: structure carried by typography,
  * hairlines and whitespace; surfaces only where interaction needs them; the
  * marker used sparingly. Every color rides an --ink-* token with a stock
  * Obsidian fallback so the plugin degrades gracefully outside INKLINE. */

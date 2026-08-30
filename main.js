@@ -1,4 +1,4 @@
-/* ICOR Planner - the myPKA Cockpit weekly planner, replicated inside Obsidian.
+/* ICOR for Life - Planner - the myPKA Cockpit weekly planner, replicated inside Obsidian.
  *
  * Hand-written CommonJS, no build step. Architecture mirrors the
  * cockpit expansion (REFINE/Expansions/mypka-cockpit) with one structural
@@ -1276,7 +1276,7 @@ function buildCalendarCacheContent(defs, now) {
     '',
     '# Calendar Events',
     '',
-    'Last synced calendar state, written by the ICOR Planner plugin on every',
+    'Last synced calendar state, written by the ICOR for Life - Planner plugin on every',
     'healthy fetch (may be minutes stale). Safe to read for schedule context;',
     'it never contains the calendar feed URL or any secret. Do not edit: the',
     'next sync overwrites this file.',
@@ -1633,7 +1633,7 @@ class IcorPlannerPlugin extends Plugin {
       const wanted = ['.obsidian/plugins/icor-for-life-planner/'];
       const missing = wanted.filter((line) => !text.split('\n').some((l) => l.trim() === line));
       if (missing.length) {
-        const block = `\n# ICOR Planner is its own git repository (and its data.json holds API keys)\n${missing.join('\n')}\n`;
+        const block = `\n# ICOR for Life - Planner is its own git repository (and its data.json holds API keys)\n${missing.join('\n')}\n`;
         await adapter.write(gi, (text.endsWith('\n') || !text ? text : text + '\n') + block);
       }
     } catch { /* never block load on this */ }
@@ -2228,13 +2228,13 @@ class IcorPlannerPlugin extends Plugin {
     try {
       const setting = this.app.setting;
       if (!setting || typeof setting.open !== 'function') {
-        new Notice('Open Settings, Community plugins, ICOR Planner to add a key.');
+        new Notice('Open Settings, Community plugins, ICOR for Life - Planner to add a key.');
         return;
       }
       setting.open();
       if (typeof setting.openTabById === 'function') setting.openTabById(this.manifest.id);
     } catch {
-      new Notice('Open Settings, Community plugins, ICOR Planner to add a key.');
+      new Notice('Open Settings, Community plugins, ICOR for Life - Planner to add a key.');
     }
   }
 

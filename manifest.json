@@ -1,7 +1,7 @@
 {
   "id": "icor-for-life-planner",
-  "name": "ICOR Planner",
-  "version": "0.7.1",
+  "name": "ICOR for Life - Planner",
+  "version": "0.7.2",
   "minAppVersion": "1.4.0",
   "description": "Plan your week on one board inside your vault: Todoist, ClickUp, starred email and Google Calendar sync in as markdown notes you drag onto your days, with two-way sync behind explicit toggles. Part of the ICOR for Life suite.",
   "author": "myICOR",

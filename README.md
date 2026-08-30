@@ -1,8 +1,8 @@
-# ICOR Planner
+# ICOR for Life - Planner
 
 Your week, planned in one place. Right now your tasks live in Todoist, in
 ClickUp, in starred emails, in the calendar, and planning a week means
-re-reading four apps and holding the result in your head. ICOR Planner
+re-reading four apps and holding the result in your head. ICOR for Life - Planner
 syncs all of it into your vault as plain markdown notes and gives you one
 board: drag a card onto a morning or afternoon lane and that part of the
 week is decided.
@@ -139,7 +139,7 @@ Requires Obsidian 1.4.0 or newer.
    release into `.obsidian/plugins/icor-for-life-planner/` in your vault.
 2. Enable the plugin in Settings, Community plugins.
 3. Open the "Planner" entry in the file tree (or run the command
-   "ICOR Planner: Open the board") and start adding tasks in the tray with
+   "ICOR for Life - Planner: Open the board") and start adding tasks in the tray with
    "+ ADD TASK".
 4. When you want your accounts in there too, add the keys in the plugin
    settings and drag the cards that arrive onto your week.
@@ -161,27 +161,27 @@ differences:
 
 ## ICOR for Life Obsidian Edition
 
-ICOR Planner is the planning surface of the **ICOR for Life Obsidian
+ICOR for Life - Planner is the planning surface of the **ICOR for Life Obsidian
 Edition**: ICOR (Input, Control, Output, Refine), the productivity
 methodology by Paperless Movement / myICOR, implemented as a ready-to-use
 Obsidian vault. Best to be used in combination with:
 
-- **[ICOR for Life INKLINE theme](https://community.obsidian.md/themes/icor-for-life-inkline)**,
+- **[ICOR for Life - INKLINE theme](https://community.obsidian.md/themes/icor-for-life-inkline)**,
   the hand-drawn visual system the board is designed against. The
   planner's cards, lanes and tray ride INKLINE's tokens, so the board
   looks native in both light and dark.
-- **[ICOR Focus](https://obsidian.md/plugins?id=icor-for-life-focus)**, the gravity map
+- **[ICOR for Life - Focus](https://obsidian.md/plugins?id=icor-for-life-focus)**, the gravity map
   of your vault: what you touched today sits close, older work ripples
   outward. Focus shows where your attention actually went; the Planner is
   where you decide where it goes next week. Review one, plan on the other.
-- **[myICOR Connect](https://obsidian.md/plugins?id=icor-for-life-connect)**, your
+- **[ICOR for Life - Connect](https://obsidian.md/plugins?id=icor-for-life-connect)**, your
   app.myicor.com account inside the vault. The weekly-planning practice
   this board implements is taught step by step in the ICOR Journey on
   myicor.com; Connect puts those courses one click away.
-- **[ICOR Diagrams](https://obsidian.md/plugins?id=icor-for-life-diagrams)**, a
+- **[ICOR for Life - Diagrams](https://obsidian.md/plugins?id=icor-for-life-diagrams)**, a
   fullscreen viewer with zoom and pan for the mermaid diagrams in your
   notes, for when a plan is easier drawn than listed.
-- **[ICOR AI Chat](https://obsidian.md/plugins?id=icor-for-life-chat)**, your AI team
+- **[ICOR for Life - Chat](https://obsidian.md/plugins?id=icor-for-life-chat)**, your AI team
   in a tab beside your notes, working from your vault's own instructions.
   For the card that needs thinking through before it can be dragged
   anywhere.
