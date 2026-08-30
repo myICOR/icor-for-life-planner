@@ -1,0 +1,3627 @@
+/* ICOR Planner - the myPKA Cockpit weekly planner, replicated inside Obsidian.
+ *
+ * Hand-written CommonJS, no build step. Architecture mirrors the
+ * cockpit expansion (REFINE/Expansions/mypka-cockpit) with one structural
+ * difference: plan state lives in MARKDOWN FRONTMATTER inside the vault
+ * ("02 Planner/"), not in a SQLite sidecar. Every synced task is a note, so
+ * the AI team can read and move items by editing frontmatter, and the board
+ * re-renders live off metadataCache events.
+ *
+ * Connector posture (inherited from the cockpit contract, connectors/types.js):
+ *   - each connector resolves its own secret from plugin settings and emits a
+ *     flat, normalized, SECRET-FREE shape; the board never special-cases a source
+ *   - connectors NEVER throw upward: every failure degrades to a calm
+ *     { ok:false, reason } and the UI renders a quiet notice, never a crash
+ *   - calendar is ALWAYS read-only; task sources are read-only in v1
+ *     (completing a card is a local strike-through, never a source write)
+ *   - calendar events never become per-event notes, but since 0.5.0 the
+ *     parsed defs mirror into ONE cache file ("02 Planner/Calendar Events.md")
+ *     so the board renders instantly on relaunch (pale + pulsing until the
+ *     fresh fetch lands) and the AI team can read the schedule from the vault.
+ *     The cache is SECRET-FREE by contract: event data only, never the ICS
+ *     feed URL or its private key.
+ *   - reconcile semantics: a task absent from a source's FULL open set on a
+ *     healthy fetch is genuinely done -> status: done. On a failed fetch the
+ *     files stay untouched (never prune on a blip).
+ */
+'use strict';
+
+const {
+  Plugin, ItemView, PluginSettingTab, Setting, Notice,
+  TFile, TFolder, requestUrl, setIcon, normalizePath, Menu, Modal, Platform,
+} = require('obsidian');
+
+/* ========================================================================== *
+ * Constants
+ * ========================================================================== */
+
+const PLANNER_FOLDER = '02 Planner';
+// One cache file for ALL calendar events (never per-event notes): frontmatter,
+// a human/AI-readable 14-day list, then a fenced json block for rehydration.
+const CALENDAR_CACHE_FILE = PLANNER_FOLDER + '/Calendar Events.md';
+const BOARD_VIEW_TYPE = 'icor-for-life-planner-board';
+const TRAY_VIEW_TYPE = 'icor-for-life-planner-tray';
+const PLUGIN_VERSION = '0.7.1';
+const DATA_JSON_GITIGNORE_LINE = '.obsidian/plugins/icor-for-life-planner/data.json';
+
+// Source registry. Folder is the subfolder of PLANNER_FOLDER the items land in.
+// The svg paths are the verified single-path monochrome marks from the cockpit
+// (SourceMark.tsx, fetched from simple-icons 2026-06-02).
+const SOURCES = {
+  // 2026-08-30: manual items. No connector, no credential, no write-back target.
+  // It is a first-class source so the board, the tray, the drag logic and the
+  // card menu treat a hand-written task exactly like a synced one; everything
+  // that would reach outward is gated on SYNCED_SOURCES, never on a negation
+  // of 'manual', so a future local source inherits the same protection.
+  manual: {
+    id: 'manual', label: 'Manual', folder: 'Manual',
+    // A pencil, not a brand mark: the meta row's job is to say where this came
+    // from, and "you wrote it" is the answer.
+    svg: 'M2 22l1.5-5.5L14.9 5.1l4 4L7.5 20.5 2 22zM16.3 3.7l1.4-1.4a1.9 1.9 0 0 1 2.7 0l1.3 1.3a1.9 1.9 0 0 1 0 2.7l-1.4 1.4-4-4z',
+  },
+  todoist: {
+    id: 'todoist', label: 'Todoist', folder: 'Todoist',
+    svg: 'M21 0H3C1.35 0 0 1.35 0 3v3.858s3.854 2.24 4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.608 8.136-4.675.279-.161.58-.107.748-.01.164.097.606.348.84.48.232.134.221.502.013.622l-9.712 5.59c-.346.2-.69.204-1.048.002C3.478 10.907.998 9.463 0 8.882v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.008.164.096.606.347.84.48.232.133.221.5.013.62-.208.121-9.288 5.346-9.712 5.59-.346.2-.69.205-1.048.002C3.478 14.951.998 13.506 0 12.926v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.009.164.097.606.348.84.48.232.133.221.502.013.622l-9.712 5.59c-.346.199-.69.204-1.048.001C3.478 18.994.998 17.55 0 16.97V21c0 1.65 1.35 3 3 3h18c1.65 0 3-1.35 3-3V3c0-1.65-1.35-3-3-3z',
+  },
+  clickup: {
+    id: 'clickup', label: 'ClickUp', folder: 'ClickUp',
+    svg: 'M2 18.439l3.69-2.828c1.961 2.56 4.044 3.739 6.363 3.739 2.307 0 4.33-1.166 6.203-3.704L22 18.405C19.298 22.065 15.941 24 12.053 24 8.178 24 4.788 22.078 2 18.439zM12.04 6.15l-6.568 5.66-3.036-3.52L12.055 0l9.543 8.296-3.05 3.509z',
+  },
+  email: {
+    id: 'email', label: 'Email', folder: 'Email',
+    // Lucide-style mail outline drawn as a filled-stroke substitute is wrong for a
+    // fill-rendered mark, so email uses a simple filled envelope path instead.
+    svg: 'M1.5 4.5h21a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-21A1.5 1.5 0 0 1 0 18V6a1.5 1.5 0 0 1 1.5-1.5zm10.5 8.25L2.25 6.375v11.25h19.5V6.375L12 12.75zM3.375 6l8.625 5.625L20.625 6H3.375z',
+  },
+  calendar: {
+    id: 'calendar', label: 'Google Calendar', folder: null, // no per-event notes; one cache file (CALENDAR_CACHE_FILE)
+    svg: 'M18.316 5.684H24v12.632h-5.684V5.684zM5.684 24h12.632v-5.684H5.684V24zM18.316 5.684V0H1.895A1.894 1.894 0 0 0 0 1.895v16.421h5.684V5.684h12.632zm-7.207 6.25v-.065c.272-.144.5-.349.687-.617s.279-.595.279-.982c0-.379-.099-.72-.3-1.025a2.05 2.05 0 0 0-.832-.714 2.703 2.703 0 0 0-1.197-.257c-.6 0-1.094.156-1.481.467-.386.311-.65.671-.793 1.078l1.085.452c.086-.249.224-.461.413-.633.189-.172.445-.257.767-.257.33 0 .602.088.816.264a.86.86 0 0 1 .322.703c0 .33-.12.589-.36.778-.24.19-.535.284-.886.284h-.567v1.085h.633c.407 0 .748.109 1.02.327.272.218.407.499.407.843 0 .336-.129.614-.387.832s-.565.327-.924.327c-.351 0-.651-.103-.897-.311-.248-.208-.422-.502-.521-.881l-1.096.452c.178.616.505 1.082.977 1.401.472.319.984.478 1.538.477a2.84 2.84 0 0 0 1.293-.291c.382-.193.684-.458.902-.794.218-.336.327-.72.327-1.149 0-.429-.115-.797-.344-1.105a2.067 2.067 0 0 0-.881-.689zm2.093-1.931l.602.913L15 10.045v5.744h1.187V8.446h-.827l-2.158 1.557zM22.105 0h-3.289v5.184H24V1.895A1.894 1.894 0 0 0 22.105 0zm-3.289 23.5l4.684-4.684h-4.684V23.5zM0 22.105C0 23.152.848 24 1.895 24h3.289v-5.184H0v3.289z',
+  },
+};
+
+// The three sources that have a connector: they own a credential, they are
+// fetched, they reconcile, and they can be written back to. MANUAL is
+// deliberately absent from this list, and every outward-facing decision in the
+// plugin asks this list rather than testing for 'manual' by hand.
+const SYNCED_SOURCES = ['todoist', 'clickup', 'email'];
+const MANUAL_SOURCE = 'manual';
+// Tray render order. Manual leads: it is the one section that works on a vault
+// with no keys at all, and the add control lives in it.
+const TASK_SOURCES = [MANUAL_SOURCE, ...SYNCED_SOURCES];
+
+function isSyncedSource(source) { return SYNCED_SOURCES.includes(source); }
+// Can an edit in the note be pushed outward? Only Todoist and ClickUp accept
+// field writes; email takes the star flag only; manual has nowhere to go.
+function canPushToSource(source) { return source === 'todoist' || source === 'clickup'; }
+// Can checking the card close something at the source?
+function canCompleteOnSource(source) { return isSyncedSource(source); }
+
+// Is this source's credential actually present? The ONE authority on the
+// question, so the tray, the board notice and the sync scheduler can never
+// disagree about whether a source exists. Manual is always configured: there
+// is nothing to configure.
+//
+// This mirrors, field for field, the no-token guard at the top of each
+// connector (todoistFetchOpen, clickupFetchOpen, emailFetchStarred,
+// calendarFetchDefs). The connector guard decides whether a FETCH runs; this
+// decides what the UI is allowed to claim before any fetch has run. They must
+// agree, and the test suite asserts they do.
+function sourceConfigured(settings, source) {
+  const s = settings || {};
+  const t = (v) => String(v == null ? '' : v).trim();
+  switch (source) {
+    case MANUAL_SOURCE: return true;
+    case 'todoist': return !!t(s.todoistToken);
+    case 'clickup': return !!t(s.clickupToken);
+    case 'email': return !!(t(s.imapHost) && t(s.imapUser) && t(s.imapPassword));
+    case 'calendar': return !!t(s.icsUrl);
+    default: return false;
+  }
+}
+
+const DEFAULT_SETTINGS = {
+  todoistToken: '',
+  clickupToken: '',
+  clickupTeamId: '',
+  imapHost: 'imap.gmail.com',
+  imapUser: '',
+  imapPassword: '',
+  icsUrl: '',
+  syncMinutes: 10,
+  showWeekend: false,
+  splitTime: '13:00',
+  lunchEnabled: false,
+  lunchStart: '12:30',
+  lunchEnd: '13:30',
+  dayStart: '08:00',
+  dayEnd: '18:00',
+  includeDatelessTasks: true,
+  // two-way sync (v0.2.0). completeOnSource is the user's explicit arm switch:
+  // checking a card also closes the task at the source / unstars the mail.
+  completeOnSource: false,
+  // pushEdits: due / priority / description edits in the note flow back to
+  // Todoist and ClickUp. Baseline-guarded: only fields the USER changed since
+  // the last sync are pushed, so a fresh install never mass-writes.
+  pushEdits: true,
+  // v0.5.0: the next-event badge under the left ribbon (desktop only).
+  showNextBadge: true,
+};
+
+const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+
+/* ========================================================================== *
+ * Date helpers (all in the system-local timezone: the planner runs where the
+ * user sits; the cockpit's fixed Berlin zone becomes "wherever this Mac is")
+ * ========================================================================== */
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function localDayStr(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function todayStr() { return localDayStr(new Date()); }
+
+// Monday of the week containing dayStr (ISO week anchor, matches the cockpit).
+function mondayOf(dayStr) {
+  const [y, m, d] = dayStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const shift = (dt.getDay() + 6) % 7; // Mon=0 .. Sun=6
+  dt.setDate(dt.getDate() - shift);
+  return localDayStr(dt);
+}
+
+function addDays(dayStr, n) {
+  const [y, m, d] = dayStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + n);
+  return localDayStr(dt);
+}
+
+function weekDays(weekStart) {
+  return Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+}
+
+// Lexical compare is correct for YYYY-MM-DD.
+function dayInWeek(day, weekStart) {
+  return !!day && day >= weekStart && day < addDays(weekStart, 7);
+}
+
+function dueBucketOf(day, today) {
+  if (!day) return 'none';
+  if (day < today) return 'overdue';
+  if (day === today) return 'today';
+  return 'upcoming';
+}
+
+function fmtWeekLabel(weekStart) {
+  const end = addDays(weekStart, 6);
+  const [sy, sm, sd] = weekStart.split('-').map(Number);
+  const [ey, em, ed] = end.split('-').map(Number);
+  const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  if (sm === em) return `${sd} - ${ed} ${months[sm - 1]} ${sy}`;
+  if (sy === ey) return `${sd} ${months[sm - 1]} - ${ed} ${months[em - 1]} ${sy}`;
+  return `${sd} ${months[sm - 1]} ${sy} - ${ed} ${months[em - 1]} ${ey}`;
+}
+
+function fmtDayNum(dayStr) {
+  const [, m, d] = dayStr.split('-').map(Number);
+  return `${d}.${pad2(m)}.`;
+}
+
+function fmtTimeHM(iso) {
+  const d = new Date(iso);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+// Synthetic lane order for a timed calendar event: minutes since local
+// midnight of its start (09:30 -> 570). Events are read-only and always sort
+// by this; tasks sort by their planned_order and can be dropped around them.
+function eventLaneOrder(ev) {
+  const d = new Date(ev.start);
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+// One lane = ONE sequence: timed events (order = start minutes) and task
+// cards (order = plannedOrder), ascending; ties put the event first so a task
+// dropped "at 09:00" lands below the 09:00 chip. Both entry kinds expose
+// `plannedOrder` so orderForInsert can rank over the mixed list. Known and
+// accepted: tap-menu planning assigns order = Date.now() (huge), so those
+// tasks land after every event; legacy hand orders like 10/20 render above a
+// 09:00 (540) event until the next drag renormalizes them.
+function laneSequence(laneEvents, cell) {
+  const seq = laneEvents
+    .map((ev) => ({ kind: 'event', ev, plannedOrder: eventLaneOrder(ev) }))
+    .concat(cell.map((it) => ({ kind: 'task', it, path: it.path, plannedOrder: it.plannedOrder })));
+  return seq.sort((a, b) => (a.plannedOrder - b.plannedOrder) || (a.kind === b.kind ? 0 : a.kind === 'event' ? -1 : 1));
+}
+
+// Minutes that `tz` is ahead of UTC at the given instant (cockpit types.js port).
+function tzOffsetMinutes(date, tz) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts = {};
+  for (const p of dtf.formatToParts(date)) parts[p.type] = p.value;
+  const asUtc = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour === '24' ? '0' : parts.hour), Number(parts.minute), Number(parts.second)
+  );
+  return Math.round((asUtc - date.getTime()) / 60000);
+}
+
+// The UTC instant of local wall-clock time (y,m,d,hh,mm,ss) in IANA zone tz.
+// Two-pass offset probe: guess with the offset at the UTC-interpreted instant,
+// then re-probe at the corrected instant (handles DST boundaries).
+function zonedToUtc(y, m, d, hh, mm, ss, tz) {
+  const guess = Date.UTC(y, m - 1, d, hh, mm, ss);
+  let off = tzOffsetMinutes(new Date(guess), tz);
+  let inst = guess - off * 60000;
+  off = tzOffsetMinutes(new Date(inst), tz);
+  return new Date(guess - off * 60000);
+}
+
+/* ========================================================================== *
+ * Text helpers
+ * ========================================================================== */
+
+// A vault-safe file basename from a task title. Windows-illegal + Obsidian-hot
+// characters are stripped; length bounded so paths stay sane.
+function safeBasename(title) {
+  const cleaned = String(title || 'untitled')
+    .replace(/[\\/:*?"<>|#^[\]{}]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 70)
+    .replace(/[. ]+$/, '');
+  return cleaned || 'untitled';
+}
+
+// RFC 2047 encoded-word decoder for mail subjects: =?charset?B|Q?data?=
+function decodeRfc2047(raw) {
+  if (!raw || raw.indexOf('=?') === -1) return raw || '';
+  return raw.replace(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=(\s*(?==\?))?/g, (_m, charset, enc, data) => {
+    try {
+      let bytes;
+      if (enc.toUpperCase() === 'B') {
+        bytes = Buffer.from(data, 'base64');
+      } else {
+        const qp = data.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_x, h) =>
+          String.fromCharCode(parseInt(h, 16)));
+        bytes = Buffer.from(qp, 'binary');
+      }
+      const cs = charset.toLowerCase().split('*')[0];
+      if (cs === 'utf-8' || cs === 'us-ascii') return bytes.toString('utf8');
+      if (cs === 'iso-8859-1' || cs === 'latin1') return bytes.toString('latin1');
+      return bytes.toString('utf8'); // best effort for anything else
+    } catch {
+      return raw;
+    }
+  });
+}
+
+// ICS TEXT unescaping per RFC 5545: \\n -> newline, \\, \\; \\\\ literals.
+function icsUnescape(s) {
+  return String(s || '')
+    .replace(/\\n/gi, '\n')
+    .replace(/\\([,;\\])/g, '$1')
+    .trim();
+}
+
+function hmToMin(hm, fallback) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hm || '');
+  return m ? Number(m[1]) * 60 + Number(m[2]) : fallback;
+}
+
+// Height of the lunch band in px, scaled to its duration (cockpit break-fill:
+// 28px floor so a short break still reads as a band).
+function lunchBandHeight(startHM, endHM) {
+  const mins = Math.max(0, hmToMin(endHM, 810) - hmToMin(startHM, 750));
+  return Math.max(28, Math.round(mins * 0.55));
+}
+
+// Google Calendar descriptions arrive as HTML soup. Flatten to readable
+// text: brs/blocks to newlines, anchors to "text url", tags stripped,
+// entities decoded. Pure regex (no DOM) so it is headless-testable.
+function htmlishToText(raw) {
+  let x = String(raw || '');
+  if (!/<[a-z!\/][^>]*>/i.test(x)) return x;
+  x = x
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(div|p|li|tr|h[1-6]|ul|ol)>/gi, '\n')
+    .replace(/<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi, (_m, _q, href, inner) => {
+      const txt = inner.replace(/<[^>]+>/g, '').trim();
+      return txt && txt !== href ? `${txt} ${href}` : href;
+    })
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+  return x.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// Render text into el with bare URLs as clickable anchors.
+function linkifyInto(el, text) {
+  const parts = String(text || '').split(/(https?:\/\/[^\s<>"']+)/g);
+  for (const part of parts) {
+    if (/^https?:\/\//.test(part)) {
+      const clean = part.replace(/[).,;:!?]+$/, '');
+      const trail = part.slice(clean.length);
+      const a = el.createEl('a', { text: clean, href: clean });
+      a.addEventListener('click', (e) => { e.preventDefault(); window.open(clean, '_external'); });
+      if (trail) el.appendChild(document.createTextNode(trail));
+    } else if (part) {
+      el.appendChild(document.createTextNode(part));
+    }
+  }
+}
+
+// Which board segment is `minsNow` in, and how far along (cockpit countdown).
+// Segments derive from dayStart / lunch (or split) / dayEnd. null outside.
+function segmentInfo(settings, minsNow) {
+  const dayStart = hmToMin(settings.dayStart, 480);
+  const dayEnd = hmToMin(settings.dayEnd, 1080);
+  const lunchOn = !!settings.lunchEnabled;
+  const amEnd = lunchOn ? hmToMin(settings.lunchStart, 750) : hmToMin(settings.splitTime, 780);
+  const pmStart = lunchOn ? hmToMin(settings.lunchEnd, 810) : amEnd;
+  const seg = (name, a, b) => (minsNow >= a && minsNow < b && b > a)
+    ? { name, pct: (minsNow - a) / (b - a), leftMin: b - minsNow } : null;
+  return seg('MORNING', dayStart, amEnd) || (lunchOn && seg('LUNCH', amEnd, pmStart)) ||
+    seg('AFTERNOON', pmStart, dayEnd) || null;
+}
+
+const DAY_TITLES = ['Monday.', 'Tuesday.', 'Wednesday.', 'Thursday.', 'Friday.', 'Saturday.', 'Sunday.'];
+function fmtDayTitle(day, today) {
+  if (day === today) return 'Today.';
+  const [y, m, d] = day.split('-').map(Number);
+  return DAY_TITLES[(new Date(y, m - 1, d, 12).getDay() + 6) % 7];
+}
+function fmtDayLabel(day) {
+  const [y, m, d] = day.split('-').map(Number);
+  const idx = (new Date(y, m - 1, d, 12).getDay() + 6) % 7;
+  return `${DAY_NAMES[idx]} ${d}.${pad2(m)}.${y}`;
+}
+
+// Live pass 2026-08-30: with one task the board footer read "1 OPEN ITEMS",
+// and one task is exactly what the first session has. One helper owns the
+// string; a gate asserts no second call site hand-builds it.
+function fmtOpenItems(count) {
+  return count === 1 ? '1 OPEN ITEM' : `${count} OPEN ITEMS`;
+}
+
+function fmtLeft(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}H ${pad2(m)}M LEFT` : `${m}M LEFT`;
+}
+
+function clampPriorityRank(n) {
+  if (n == null || !Number.isFinite(n)) return 5;
+  return Math.min(5, Math.max(1, Math.round(n)));
+}
+
+/* ========================================================================== *
+ * Connector results (cockpit contract: never throw upward)
+ * ========================================================================== */
+
+function degraded(source, reason, message) {
+  return { ok: false, source, reason, message, items: [] };
+}
+function okResult(source, items) {
+  return { ok: true, source, items };
+}
+
+/* ========================================================================== *
+ * Three-way merge for two-way fields (due, priority, description).
+ * shadow = the value both sides agreed on at the last sync. Per field:
+ *   local changed, source unchanged -> PUSH local (keep local in the note)
+ *   source changed (local too or not) -> PULL source (source wins conflicts)
+ *   neither changed -> nothing
+ * No shadow yet (first sync of an item) -> pull everything, seed the shadow.
+ * ========================================================================== */
+
+const TWO_WAY_FIELDS = ['due', 'priority', 'description'];
+
+function threeWayMerge(sourceVals, localVals, shadow, pushEnabled) {
+  const pushes = {};
+  const finals = {};
+  const nextShadow = {};
+  for (const f of TWO_WAY_FIELDS) {
+    const src = sourceVals[f] == null || sourceVals[f] === '' ? (f === 'priority' ? 5 : null) : sourceVals[f];
+    const loc = localVals[f] == null || localVals[f] === '' ? (f === 'priority' ? 5 : null) : localVals[f];
+    if (!shadow) { finals[f] = src; nextShadow[f] = src; continue; }
+    const base = shadow[f] == null || shadow[f] === '' ? (f === 'priority' ? 5 : null) : shadow[f];
+    const srcChanged = src !== base;
+    const locChanged = loc !== base;
+    if (locChanged && !srcChanged && pushEnabled) {
+      pushes[f] = loc; finals[f] = loc; nextShadow[f] = loc;
+    } else if (srcChanged) {
+      finals[f] = src; nextShadow[f] = src;      // source wins (incl. conflicts)
+    } else {
+      finals[f] = loc; nextShadow[f] = base;      // unchanged, or local kept unpushed
+    }
+  }
+  return { pushes, finals, nextShadow };
+}
+
+/* ========================================================================== *
+ * Connector: Todoist (unified API v1, Bearer token, cursor pagination)
+ * ========================================================================== */
+
+// Todoist API priority is INVERTED: 4 = P1 (highest) .. 1 = none.
+function todoistPriorityRank(apiPriority) {
+  if (!apiPriority || apiPriority === 1) return apiPriority === 1 ? 4 : 5;
+  return clampPriorityRank(5 - apiPriority);
+}
+
+async function todoistFetchOpen(settings) {
+  const token = (settings.todoistToken || '').trim();
+  if (!token) return degraded('todoist', 'no-token', 'Todoist is not connected (no token).');
+  const base = 'https://api.todoist.com/api/v1';
+  const items = [];
+  let cursor = null;
+  try {
+    for (let page = 0; page < 20; page++) {
+      const url = `${base}/tasks?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      const res = await requestUrl({
+        url, method: 'GET', throw: false,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401 || res.status === 403) {
+        return degraded('todoist', 'misconfigured', 'Todoist rejected the token.');
+      }
+      if (res.status < 200 || res.status >= 300) {
+        return degraded('todoist', 'unreachable', `Todoist returned HTTP ${res.status}.`);
+      }
+      const body = res.json || {};
+      for (const t of body.results || []) {
+        items.push({
+          source: 'todoist',
+          id: String(t.id),
+          title: t.content || '(untitled)',
+          description: (t.description || '').replace(/\s+$/, ''),
+          due: t.due && t.due.date ? String(t.due.date).slice(0, 10) : null,
+          priority: todoistPriorityRank(t.priority),
+          // v1 returns no url field (verified in the cockpit 2026-06-03);
+          // the app deep link is constructed from the id.
+          url: t.url || `https://app.todoist.com/app/task/${encodeURIComponent(String(t.id))}`,
+          tags: Array.isArray(t.labels) ? t.labels : [],
+          status: null,
+        });
+      }
+      cursor = body.next_cursor || null;
+      if (!cursor) break;
+    }
+    return okResult('todoist', items);
+  } catch (e) {
+    return degraded('todoist', 'unreachable', 'Todoist is unreachable.');
+  }
+}
+
+/* ========================================================================== *
+ * Connector: ClickUp (API v2, RAW token in Authorization - no Bearer prefix)
+ * ========================================================================== */
+
+async function clickupApi(token, path) {
+  const res = await requestUrl({
+    url: `https://api.clickup.com/api/v2${path}`,
+    method: 'GET', throw: false,
+    headers: { Authorization: token },
+  });
+  if (res.status === 401 || res.status === 403) {
+    const err = new Error('auth'); err.auth = true; throw err;
+  }
+  if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
+  return res.json || {};
+}
+
+async function clickupFetchOpen(settings) {
+  const token = (settings.clickupToken || '').trim();
+  if (!token) return degraded('clickup', 'no-token', 'ClickUp is not connected (no token).');
+  try {
+    // Who am I - assignee filter derives from the token, never hard-coded.
+    const me = await clickupApi(token, '/user');
+    const myId = me && me.user && me.user.id;
+    if (!myId) return degraded('clickup', 'misconfigured', 'ClickUp: could not derive the user from the token.');
+
+    // Which workspaces - configured id first, else every team on the token.
+    let teamIds = [];
+    const configured = (settings.clickupTeamId || '').trim();
+    if (configured) {
+      teamIds = [configured];
+    } else {
+      const teams = await clickupApi(token, '/team');
+      teamIds = ((teams && teams.teams) || []).map((t) => String(t.id));
+    }
+    if (!teamIds.length) return degraded('clickup', 'misconfigured', 'ClickUp: no workspace visible to this token.');
+
+    const items = [];
+    for (const teamId of teamIds) {
+      for (let page = 0; page < 20; page++) {
+        const qs = new URLSearchParams({
+          include_closed: 'false', subtasks: 'false', order_by: 'due_date', page: String(page),
+        });
+        qs.append('assignees[]', String(myId));
+        const data = await clickupApi(token, `/team/${encodeURIComponent(teamId)}/task?${qs.toString()}`);
+        const tasks = (data && data.tasks) || [];
+        for (const t of tasks) {
+          const st = (t.status && t.status.type || '').toLowerCase();
+          if (st === 'done' || st === 'closed') continue;
+          const dueMs = t.due_date ? Number(t.due_date) : null;
+          items.push({
+            source: 'clickup',
+            id: String(t.id),
+            title: t.name || '(untitled)',
+            description: ((t.text_content || t.description || '')).replace(/\s+$/, ''),
+            due: dueMs && Number.isFinite(dueMs) ? localDayStr(new Date(dueMs)) : null,
+            priority: t.priority && t.priority.id != null ? clampPriorityRank(Number(t.priority.id)) : 5,
+            url: t.url || null,
+            tags: Array.isArray(t.tags) ? t.tags.map((x) => x.name).filter(Boolean) : [],
+            status: (t.status && t.status.status) || null,
+            listId: t.list && t.list.id ? String(t.list.id) : null,
+          });
+        }
+        if (!tasks.length || (data && data.last_page === true)) break;
+      }
+    }
+    return okResult('clickup', items);
+  } catch (e) {
+    if (e && e.auth) return degraded('clickup', 'misconfigured', 'ClickUp rejected the token.');
+    return degraded('clickup', 'unreachable', 'ClickUp is unreachable.');
+  }
+}
+
+/* ========================================================================== *
+ * Source WRITE clients (v0.2.0, armed by settings only; never called
+ * otherwise). Every writer throws on failure - callers catch and Notice.
+ * ========================================================================== */
+
+// rank 1..5 back to the Todoist API's inverted scale (1=P1 highest -> api 4).
+function todoistApiPriority(rank) {
+  const r = clampPriorityRank(rank);
+  return r >= 5 ? 1 : 5 - r;
+}
+
+async function todoistWrite(token, path, payload) {
+  const res = await requestUrl({
+    url: `https://api.todoist.com/api/v1${path}`,
+    method: 'POST', throw: false,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: payload ? JSON.stringify(payload) : undefined,
+  });
+  if (res.status < 200 || res.status >= 300) throw new Error(`Todoist HTTP ${res.status}`);
+}
+
+async function todoistSetClosed(token, id, closed) {
+  await todoistWrite(token, `/tasks/${encodeURIComponent(id)}/${closed ? 'close' : 'reopen'}`);
+}
+
+async function todoistPushFields(token, id, pushes) {
+  const payload = {};
+  if ('description' in pushes) payload.description = pushes.description || '';
+  if ('priority' in pushes) payload.priority = todoistApiPriority(pushes.priority);
+  if ('due' in pushes) {
+    if (pushes.due) payload.due_date = pushes.due;
+    else payload.due_string = 'no date';
+  }
+  if (Object.keys(payload).length) await todoistWrite(token, `/tasks/${encodeURIComponent(id)}`, payload);
+}
+
+async function clickupWrite(token, path, payload) {
+  const res = await requestUrl({
+    url: `https://api.clickup.com/api/v2${path}`,
+    method: 'PUT', throw: false,
+    headers: { Authorization: token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.status < 200 || res.status >= 300) throw new Error(`ClickUp HTTP ${res.status}`);
+}
+
+// ClickUp has no universal close: statuses are per-list. Resolve the list's
+// own done/closed (or open) status name once and cache it for the session.
+const _clickupStatusCache = new Map();
+async function clickupStatusName(token, listId, wantClosed) {
+  const cacheKey = `${listId}`;
+  if (!_clickupStatusCache.has(cacheKey)) {
+    const res = await requestUrl({
+      url: `https://api.clickup.com/api/v2/list/${encodeURIComponent(listId)}`,
+      method: 'GET', throw: false, headers: { Authorization: token },
+    });
+    if (res.status < 200 || res.status >= 300) throw new Error(`ClickUp HTTP ${res.status}`);
+    _clickupStatusCache.set(cacheKey, (res.json && res.json.statuses) || []);
+  }
+  const statuses = _clickupStatusCache.get(cacheKey);
+  const byType = (t) => statuses.find((x) => (x.type || '').toLowerCase() === t);
+  const hit = wantClosed ? (byType('closed') || byType('done')) : byType('open');
+  if (!hit || !hit.status) throw new Error('ClickUp: no matching list status');
+  return hit.status;
+}
+
+async function clickupSetClosed(token, id, listId, closed) {
+  if (!listId) throw new Error('ClickUp: task has no list id yet (resync first)');
+  const status = await clickupStatusName(token, listId, closed);
+  await clickupWrite(token, `/task/${encodeURIComponent(id)}`, { status });
+}
+
+async function clickupPushFields(token, id, pushes) {
+  const payload = {};
+  if ('description' in pushes) payload.description = pushes.description || '';
+  if ('priority' in pushes) {
+    const r = clampPriorityRank(pushes.priority);
+    payload.priority = r >= 5 ? null : r;
+  }
+  if ('due' in pushes) {
+    if (pushes.due) {
+      const [y, m, d] = pushes.due.split('-').map(Number);
+      payload.due_date = new Date(y, m - 1, d, 12, 0, 0).getTime();
+      payload.due_date_time = false;
+    } else {
+      payload.due_date = null;
+    }
+  }
+  if (Object.keys(payload).length) await clickupWrite(token, `/task/${encodeURIComponent(id)}`, payload);
+}
+
+/* ========================================================================== *
+ * Connector: starred email over IMAP (Superhuman = the Gmail/Outlook account
+ * underneath; a Superhuman star IS the Gmail star, so IMAP \Flagged reads it).
+ * Minimal hand-rolled IMAP client: strictly read-only - EXAMINE (not SELECT),
+ * UID SEARCH FLAGGED, UID FETCH of header fields only. No STORE, ever.
+ * ========================================================================== */
+
+// Parse an IMAP server stream into complete "entries" respecting {n} literals.
+// Returns { lines: [...], rest: bufferedRemainder }. Each entry is the raw text
+// of one response line WITH any literal payloads inlined after their marker.
+function imapSplitResponses(buf) {
+  const entries = [];
+  let i = 0;
+  while (true) {
+    // find CRLF
+    const nl = buf.indexOf('\r\n', i);
+    if (nl === -1) break;
+    let line = buf.slice(i, nl);
+    let consumed = nl + 2;
+    // literal continuation: line ends with {n}
+    let m = /\{(\d+)\}$/.exec(line);
+    let full = line;
+    let cursor = consumed;
+    let incomplete = false;
+    while (m) {
+      const n = Number(m[1]);
+      if (buf.length < cursor + n) { incomplete = true; break; }
+      const literal = buf.slice(cursor, cursor + n);
+      cursor += n;
+      const nl2 = buf.indexOf('\r\n', cursor);
+      if (nl2 === -1) { incomplete = true; break; }
+      const tail = buf.slice(cursor, nl2);
+      cursor = nl2 + 2;
+      full += '\n' + literal + tail;
+      m = /\{(\d+)\}$/.exec(tail);
+    }
+    if (incomplete) break;
+    entries.push(full);
+    i = cursor;
+  }
+  return { entries, rest: buf.slice(i) };
+}
+
+function imapQuote(s) {
+  return '"' + String(s).replace(/([\\"])/g, '\\$1') + '"';
+}
+
+// One short read-only IMAP session. Returns normalized task items.
+function imapFetchStarredRaw(host, user, pass, maxItems) {
+  return new Promise((resolve, reject) => {
+    let tls;
+    try { tls = require('tls'); } catch { return reject(new Error('tls unavailable')); }
+    const socket = tls.connect({ host, port: 993, servername: host });
+    let buffer = '';
+    let stage = 'greeting';
+    let tagN = 0;
+    let pendingTag = null;
+    const fetched = []; // raw FETCH entries
+    let uids = [];
+    const items = [];
+    const timer = setTimeout(() => { try { socket.destroy(); } catch {} reject(new Error('timeout')); }, 20000);
+    const fail = (err) => { clearTimeout(timer); try { socket.destroy(); } catch {} reject(err); };
+    const finish = () => { clearTimeout(timer); try { socket.end(); } catch {} resolve(items); };
+
+    const send = (cmd) => {
+      tagN += 1;
+      pendingTag = `A${tagN}`;
+      socket.write(`${pendingTag} ${cmd}\r\n`);
+    };
+
+    const step = (statusLine) => {
+      const okTagged = statusLine.startsWith(`${pendingTag} OK`);
+      if (!okTagged) {
+        const authFail = stage === 'login';
+        return fail(new Error(authFail ? 'auth' : `imap ${stage} failed`));
+      }
+      if (stage === 'login') {
+        stage = 'examine';
+        send('EXAMINE INBOX');
+      } else if (stage === 'examine') {
+        stage = 'search';
+        send('UID SEARCH FLAGGED');
+      } else if (stage === 'search') {
+        if (!uids.length) return finish();
+        const take = uids.slice(-maxItems);
+        stage = 'fetch';
+        send(`UID FETCH ${take.join(',')} (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])`);
+      } else if (stage === 'fetch') {
+        for (const entry of fetched) {
+          const um = /UID (\d+)/.exec(entry);
+          const uid = um ? um[1] : null;
+          if (!uid) continue;
+          // The literal (header block) was inlined after the first \n.
+          const headerText = entry.includes('\n') ? entry.slice(entry.indexOf('\n') + 1) : '';
+          const unfolded = headerText.replace(/\r?\n[ \t]+/g, ' ');
+          const header = (name) => {
+            const hm = new RegExp(`^${name}:\\s*(.*)$`, 'im').exec(unfolded);
+            return hm ? hm[1].trim() : null;
+          };
+          const subject = decodeRfc2047(header('Subject') || '') || '(no subject)';
+          const from = decodeRfc2047(header('From') || '');
+          const date = header('Date');
+          const messageId = (header('Message-ID') || '').replace(/^<|>$/g, '');
+          const dateLine = date ? (() => { const d = new Date(date); return isNaN(d) ? null : localDayStr(d); })() : null;
+          let url = null;
+          if (/gmail|googlemail/i.test(host) && messageId) {
+            url = `https://mail.google.com/mail/u/0/#search/rfc822msgid:${encodeURIComponent(messageId)}`;
+          }
+          items.push({
+            source: 'email',
+            id: String(uid),
+            title: subject,
+            description: [from && `From: ${from}`, dateLine && `Received: ${dateLine}`].filter(Boolean).join('\n'),
+            due: null,
+            priority: 4,
+            url,
+            tags: [],
+            status: null,
+          });
+        }
+        items.reverse(); // newest first
+        stage = 'logout';
+        send('LOGOUT');
+      } else if (stage === 'logout') {
+        finish();
+      }
+    };
+
+    socket.on('secureConnect', () => { /* wait for greeting line */ });
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('binary');
+      const { entries, rest } = imapSplitResponses(buffer);
+      buffer = rest;
+      for (const entry of entries) {
+        if (stage === 'greeting') {
+          if (entry.startsWith('* OK') || entry.startsWith('* PREAUTH')) {
+            stage = 'login';
+            send(`LOGIN ${imapQuote(user)} ${imapQuote(pass)}`);
+          } else if (entry.startsWith('* BYE')) {
+            return fail(new Error('server refused connection'));
+          }
+          continue;
+        }
+        if (entry.startsWith('* SEARCH')) {
+          uids = entry.slice(8).trim().split(/\s+/).filter((x) => /^\d+$/.test(x));
+          continue;
+        }
+        if (/^\* \d+ FETCH/.test(entry)) {
+          fetched.push(Buffer.from(entry, 'binary').toString('utf8'));
+          continue;
+        }
+        if (pendingTag && entry.startsWith(`${pendingTag} `)) {
+          step(entry);
+        }
+      }
+    });
+    socket.on('error', (err) => fail(err));
+  });
+}
+
+async function emailFetchStarred(settings) {
+  const host = (settings.imapHost || '').trim();
+  const user = (settings.imapUser || '').trim();
+  const pass = (settings.imapPassword || '').trim();
+  if (!host || !user || !pass) {
+    return degraded('email', 'no-token', 'Starred email is not connected (host, address or app password missing).');
+  }
+  try {
+    const items = await imapFetchStarredRaw(host, user, pass, 50);
+    return okResult('email', items);
+  } catch (e) {
+    const msg = (e && e.message) || '';
+    if (/tls unavailable/i.test(msg)) {
+      return degraded('email', 'unsupported',
+        'Starred email needs the desktop app (IMAP). Todoist, ClickUp and Calendar still sync here.');
+    }
+    const auth = /auth|login|credential/i.test(msg);
+    return degraded('email', auth ? 'misconfigured' : 'unreachable',
+      auth ? 'IMAP login failed. Check the address and the app password.' : 'IMAP host unreachable.');
+  }
+}
+
+// Set or clear \Flagged on one message. The ONLY write the mailbox ever
+// sees, armed by completeOnSource. SELECT (not EXAMINE) + UID STORE.
+function imapSetStarredRaw(host, user, pass, uid, starred) {
+  return new Promise((resolve, reject) => {
+    let tls;
+    try { tls = require('tls'); } catch { return reject(new Error('tls unavailable')); }
+    const socket = tls.connect({ host, port: 993, servername: host });
+    let buffer = '';
+    let stage = 'greeting';
+    let tagN = 0;
+    let pendingTag = null;
+    const timer = setTimeout(() => { try { socket.destroy(); } catch {} reject(new Error('timeout')); }, 20000);
+    const fail = (err) => { clearTimeout(timer); try { socket.destroy(); } catch {} reject(err); };
+    const finish = () => { clearTimeout(timer); try { socket.end(); } catch {} resolve(); };
+    const send = (cmd) => { tagN += 1; pendingTag = `A${tagN}`; socket.write(`${pendingTag} ${cmd}\r\n`); };
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('binary');
+      const { entries, rest } = imapSplitResponses(buffer);
+      buffer = rest;
+      for (const entry of entries) {
+        if (stage === 'greeting') {
+          if (entry.startsWith('* OK') || entry.startsWith('* PREAUTH')) {
+            stage = 'login';
+            send(`LOGIN ${imapQuote(user)} ${imapQuote(pass)}`);
+          } else if (entry.startsWith('* BYE')) return fail(new Error('server refused connection'));
+          continue;
+        }
+        if (pendingTag && entry.startsWith(`${pendingTag} `)) {
+          if (!entry.startsWith(`${pendingTag} OK`)) {
+            return fail(new Error(stage === 'login' ? 'auth' : `imap ${stage} failed`));
+          }
+          if (stage === 'login') { stage = 'select'; send('SELECT INBOX'); }
+          else if (stage === 'select') {
+            stage = 'store';
+            send(`UID STORE ${uid} ${starred ? '+' : '-'}FLAGS (\\Flagged)`);
+          }
+          else if (stage === 'store') { stage = 'logout'; send('LOGOUT'); }
+          else if (stage === 'logout') finish();
+        }
+      }
+    });
+    socket.on('error', (err) => fail(err));
+  });
+}
+
+/* ========================================================================== *
+ * Connector: Google Calendar via secret ICS URL (read-only, no OAuth).
+ * Minimal RFC 5545 parser + best-effort RRULE expansion for the visible week:
+ * FREQ=DAILY/WEEKLY/MONTHLY/YEARLY with INTERVAL, BYDAY (weekly), UNTIL,
+ * COUNT, EXDATE and RECURRENCE-ID overrides. Exotic rules degrade to "shows
+ * the master occurrence only", never to a crash.
+ * ========================================================================== */
+
+function parseIcs(text) {
+  // Unfold: CRLF (or LF) followed by space/tab continues the line.
+  const unfolded = String(text || '').replace(/\r?\n[ \t]/g, '');
+  const lines = unfolded.split(/\r?\n/);
+  const events = [];
+  let cur = null;
+  for (const line of lines) {
+    if (line === 'BEGIN:VEVENT') { cur = { props: [] }; continue; }
+    if (line === 'END:VEVENT') { if (cur) events.push(cur); cur = null; continue; }
+    if (!cur) continue;
+    const idx = line.indexOf(':');
+    if (idx === -1) continue;
+    const left = line.slice(0, idx);
+    const value = line.slice(idx + 1);
+    const [name, ...paramParts] = left.split(';');
+    const params = {};
+    for (const p of paramParts) {
+      const eq = p.indexOf('=');
+      if (eq !== -1) params[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1);
+    }
+    cur.props.push({ name: name.toUpperCase(), params, value });
+  }
+  return events.map(icsEventDef).filter(Boolean);
+}
+
+// DTSTART value + params -> { instant: Date|null, day: 'YYYY-MM-DD'|null, allDay }
+function icsParseDate(value, params) {
+  const isDate = (params.VALUE === 'DATE') || /^\d{8}$/.test(value);
+  if (isDate) {
+    const y = Number(value.slice(0, 4)), m = Number(value.slice(4, 6)), d = Number(value.slice(6, 8));
+    return { allDay: true, day: `${y}-${pad2(m)}-${pad2(d)}`, instant: new Date(y, m - 1, d) };
+  }
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/.exec(value);
+  if (!m) return null;
+  const [, y, mo, d, hh, mm, ss, z] = m;
+  if (z === 'Z') {
+    return { allDay: false, day: null, instant: new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mm, +ss)) };
+  }
+  if (params.TZID) {
+    try {
+      return { allDay: false, day: null, instant: zonedToUtc(+y, +mo, +d, +hh, +mm, +ss, params.TZID) };
+    } catch { /* unknown zone: fall through to floating */ }
+  }
+  return { allDay: false, day: null, instant: new Date(+y, +mo - 1, +d, +hh, +mm, +ss) };
+}
+
+function icsEventDef(ev) {
+  const prop = (n) => ev.props.find((p) => p.name === n) || null;
+  const dtstart = prop('DTSTART');
+  if (!dtstart) return null;
+  const start = icsParseDate(dtstart.value, dtstart.params);
+  if (!start) return null;
+  const dtend = prop('DTEND');
+  const end = dtend ? icsParseDate(dtend.value, dtend.params) : null;
+  const rruleProp = prop('RRULE');
+  const rrule = rruleProp ? Object.fromEntries(
+    rruleProp.value.split(';').map((kv) => {
+      const eq = kv.indexOf('=');
+      return eq === -1 ? [kv, ''] : [kv.slice(0, eq).toUpperCase(), kv.slice(eq + 1)];
+    })
+  ) : null;
+  const exdates = new Set();
+  for (const p of ev.props.filter((x) => x.name === 'EXDATE')) {
+    for (const v of p.value.split(',')) {
+      const parsed = icsParseDate(v.trim(), p.params);
+      if (parsed) exdates.add(parsed.allDay ? parsed.day : localDayStr(parsed.instant));
+    }
+  }
+  const recurrenceId = prop('RECURRENCE-ID');
+  return {
+    uid: (prop('UID') || { value: `${dtstart.value}-${Math.abs(hashStr(ev.props.map((p) => p.value).join('|')))}` }).value,
+    title: icsUnescape((prop('SUMMARY') || { value: '(no title)' }).value) || '(no title)',
+    description: icsUnescape((prop('DESCRIPTION') || { value: '' }).value),
+    location: icsUnescape((prop('LOCATION') || { value: '' }).value) || null,
+    url: ((prop('URL') || { value: '' }).value || '').trim() || null,
+    start, end, rrule, exdates,
+    recurrenceDay: recurrenceId ? (() => {
+      const r = icsParseDate(recurrenceId.value, recurrenceId.params);
+      return r ? (r.allDay ? r.day : localDayStr(r.instant)) : null;
+    })() : null,
+  };
+}
+
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+  return h;
+}
+
+const ICS_BYDAY = { MO: 0, TU: 1, WE: 2, TH: 3, FR: 4, SA: 5, SU: 6 };
+
+// Expand one event def into occurrence start Dates within [winStart, winEnd).
+function expandOccurrences(def, winStart, winEnd) {
+  const startInstant = def.start.instant;
+  if (!def.rrule) {
+    return (startInstant < winEnd) ? [startInstant] : [];
+  }
+  const freq = def.rrule.FREQ;
+  const interval = Math.max(1, Number(def.rrule.INTERVAL || 1));
+  const count = def.rrule.COUNT ? Number(def.rrule.COUNT) : null;
+  let until = null;
+  if (def.rrule.UNTIL) {
+    const u = icsParseDate(def.rrule.UNTIL, {});
+    until = u ? (u.allDay ? new Date(u.instant.getTime() + 86400000) : u.instant) : null;
+  }
+  const out = [];
+  let produced = 0;
+  const push = (d) => {
+    if (until && d > until) return false;
+    produced += 1;
+    if (count && produced > count) return false;
+    if (d >= winStart && d < winEnd) out.push(d);
+    return true;
+  };
+  const HARD_CAP = 2000;
+  if (freq === 'DAILY') {
+    for (let i = 0, d = new Date(startInstant); i < HARD_CAP && d < winEnd; i++, d = new Date(d.getTime() + interval * 86400000)) {
+      if (!push(new Date(d))) break;
+    }
+  } else if (freq === 'WEEKLY') {
+    const bydays = def.rrule.BYDAY
+      ? def.rrule.BYDAY.split(',').map((x) => ICS_BYDAY[x.trim()]).filter((x) => x != null)
+      : [(startInstant.getDay() + 6) % 7];
+    // Walk week by week from the start's Monday.
+    let weekAnchor = new Date(startInstant);
+    weekAnchor.setDate(weekAnchor.getDate() - ((weekAnchor.getDay() + 6) % 7));
+    for (let w = 0; w < HARD_CAP / 7; w++) {
+      let stop = false;
+      for (const wd of [...bydays].sort((a, b) => a - b)) {
+        const d = new Date(weekAnchor);
+        d.setDate(d.getDate() + wd);
+        d.setHours(startInstant.getHours(), startInstant.getMinutes(), startInstant.getSeconds(), 0);
+        if (d < startInstant) continue;
+        if (d >= winEnd && !until && !count) { stop = true; break; }
+        if (!push(d)) { stop = true; break; }
+      }
+      if (stop) break;
+      weekAnchor = new Date(weekAnchor.getTime() + interval * 7 * 86400000);
+      if (weekAnchor >= winEnd) break;
+    }
+  } else if (freq === 'MONTHLY') {
+    const dom = startInstant.getDate();
+    for (let i = 0; i < 240; i++) {
+      const d = new Date(startInstant);
+      d.setMonth(d.getMonth() + i * interval);
+      if (d.getDate() !== dom) continue; // month overflow (e.g. 31st) - skip
+      if (d >= winEnd && !until && !count) break;
+      if (!push(d)) break;
+    }
+  } else if (freq === 'YEARLY') {
+    for (let i = 0; i < 50; i++) {
+      const d = new Date(startInstant);
+      d.setFullYear(d.getFullYear() + i * interval);
+      if (d >= winEnd && !until && !count) break;
+      if (!push(d)) break;
+    }
+  } else {
+    return (startInstant >= winStart && startInstant < winEnd) ? [startInstant] : [];
+  }
+  return out;
+}
+
+// Expand parsed defs to per-day event cards for one week.
+function icsEventsForWeek(defs, weekStart, splitHour) {
+  const winStart = (() => { const [y, m, d] = weekStart.split('-').map(Number); return new Date(y, m - 1, d); })();
+  const winEnd = new Date(winStart.getTime() + 7 * 86400000);
+  const out = [];
+  const overrides = new Map(); // uid::day -> def (RECURRENCE-ID edits)
+  for (const def of defs) {
+    if (def.recurrenceDay) overrides.set(`${def.uid}::${def.recurrenceDay}`, def);
+  }
+  for (const def of defs) {
+    if (def.recurrenceDay) continue; // rendered via its master's expansion
+    const durationMs = (def.end && def.end.instant && def.start.instant)
+      ? Math.max(0, def.end.instant.getTime() - def.start.instant.getTime())
+      : (def.start.allDay ? 86400000 : 0);
+    const occurrences = expandOccurrences(def, winStart, winEnd);
+    for (const occStart of occurrences) {
+      const occDay = def.start.allDay && !def.rrule ? def.start.day : localDayStr(occStart);
+      if (def.exdates.has(occDay)) continue;
+      const ov = overrides.get(`${def.uid}::${occDay}`);
+      const eff = ov || def;
+      const effStart = ov ? ov.start.instant : occStart;
+      const effEnd = ov && ov.end ? ov.end.instant : new Date(effStart.getTime() + durationMs);
+      const allDay = eff.start.allDay;
+      // Raw pieces for the Google Calendar deep link (built lazily in the
+      // detail modal): master UID, whether this is an expanded recurrence,
+      // and the ORIGINAL occurrence start (the recurrence id Google keys on;
+      // an override's edited start is deliberately not used here).
+      const recurring = !!def.rrule;
+      const occStartUtc = allDay
+        ? occDay.replace(/-/g, '')
+        : occStart.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '');
+      if (allDay) {
+        // DTEND is exclusive for all-day events; emit one card per spanned day.
+        const startDay = ov ? ov.start.day : occDay;
+        const nDays = Math.max(1, Math.round(durationMs / 86400000));
+        for (let i = 0; i < nDays; i++) {
+          const day = addDays(startDay, i);
+          if (!dayInWeek(day, weekStart)) continue;
+          out.push({
+            kind: 'event', source: 'calendar',
+            uid: `${def.uid}::${day}`, title: eff.title, description: eff.description,
+            start: null, end: null, allDay: true, day, half: null,
+            location: eff.location, url: eff.url, continues: i > 0,
+            masterUid: def.uid, recurring, occStartUtc,
+          });
+        }
+      } else {
+        const startDay = localDayStr(effStart);
+        const endDayInclusive = localDayStr(new Date(Math.max(effStart.getTime(), effEnd.getTime() - 1)));
+        let day = startDay;
+        let first = true;
+        while (day <= endDayInclusive) {
+          if (dayInWeek(day, weekStart)) {
+            out.push({
+              kind: 'event', source: 'calendar',
+              uid: `${def.uid}::${occStart.toISOString()}${first ? '' : `::${day}`}`,
+              title: eff.title, description: eff.description,
+              start: effStart.toISOString(), end: effEnd.toISOString(),
+              allDay: !first, day,
+              half: first ? (effStart.getHours() < splitHour ? 'am' : 'pm') : null,
+              location: eff.location, url: eff.url, continues: !first,
+              masterUid: def.uid, recurring, occStartUtc,
+            });
+          }
+          day = addDays(day, 1);
+          first = false;
+        }
+      }
+    }
+  }
+  out.sort((a, b) => {
+    if (a.day !== b.day) return a.day < b.day ? -1 : 1;
+    if (a.allDay !== b.allDay) return a.allDay ? -1 : 1;
+    return String(a.start) < String(b.start) ? -1 : 1;
+  });
+  return out;
+}
+
+async function calendarFetchDefs(settings) {
+  let raw = (settings.icsUrl || '').trim();
+  if (!raw) return degraded('calendar', 'no-token', 'Calendar is not connected (no iCal URL).');
+  if (/^webcal:\/\//i.test(raw)) raw = raw.replace(/^webcal:\/\//i, 'https://');
+  if (!/^https:\/\//i.test(raw)) {
+    return degraded('calendar', 'misconfigured', 'Calendar URL must be https:// (or webcal://).');
+  }
+  try {
+    const res = await requestUrl({ url: raw, method: 'GET', throw: false, headers: { Accept: 'text/calendar' } });
+    if (res.status < 200 || res.status >= 300) {
+      return degraded('calendar', 'unreachable', `Calendar feed returned HTTP ${res.status}.`);
+    }
+    const defs = parseIcs(res.text || '');
+    return okResult('calendar', defs);
+  } catch {
+    return degraded('calendar', 'unreachable', 'Calendar feed unreachable.');
+  }
+}
+
+/* ========================================================================== *
+ * Calendar event cache (v0.5.0) - the parsed defs mirror into ONE vault file
+ * (CALENDAR_CACHE_FILE) so relaunch renders instantly from the last healthy
+ * fetch. File shape: YAML frontmatter, a human/AI-readable list of the next
+ * ~14 days, then a fenced ```json block holding the FULL serialized defs
+ * array for exact rehydration (Date instants as ISO strings; rrule / exdates
+ * / overrides preserved so icsEventsForWeek reproduces identical output).
+ * HARD RULE: the cache never contains the ICS feed URL or its private key -
+ * event data only. A malformed cache is ignored; the next fetch rebuilds it.
+ * ========================================================================== */
+
+// Meeting-URL detection: scan location, then description, then the URL
+// property; inside a field, pattern order decides (first match wins). The
+// character class stops at whitespace and quotes so URLs inside Google's
+// HTML-soup descriptions come out clean.
+const CONFERENCE_URL_PATTERNS = [
+  /https?:\/\/[^\s<>"']*zoom\.us\/(?:j|my)\/[^\s<>"']+/i,
+  /https?:\/\/meet\.google\.com\/[^\s<>"']+/i,
+  /https?:\/\/teams\.microsoft\.com\/l\/meetup-join\/[^\s<>"']+/i,
+  /https?:\/\/teams\.live\.com\/[^\s<>"']+/i,
+  /https?:\/\/[^\s<>"']*webex\.com\/(?:meet|join)\/[^\s<>"']+/i,
+  /https?:\/\/whereby\.com\/[^\s<>"']+/i,
+  /https?:\/\/meet\.jit\.si\/[^\s<>"']+/i,
+];
+
+// ev needs only { location, description, url } - works for defs AND for the
+// expanded per-day events. Returns the clean URL or null.
+function detectConferenceUrl(ev) {
+  if (!ev) return null;
+  for (const field of [ev.location, ev.description, ev.url]) {
+    if (!field) continue;
+    const text = String(field);
+    for (const re of CONFERENCE_URL_PATTERNS) {
+      const m = re.exec(text);
+      if (m) return m[0].replace(/[).,;:!?]+$/, '');
+    }
+  }
+  return null;
+}
+
+function serializeIcsDate(x) {
+  if (!x) return null;
+  return {
+    allDay: !!x.allDay,
+    day: x.day || null,
+    instant: x.instant instanceof Date && !isNaN(x.instant) ? x.instant.toISOString() : null,
+  };
+}
+function reviveIcsDate(x) {
+  if (!x || typeof x !== 'object') return null;
+  return {
+    allDay: !!x.allDay,
+    day: x.day || null,
+    instant: x.instant ? new Date(x.instant) : null,
+  };
+}
+
+// defs (from parseIcs) -> plain-JSON array. conferenceUrl is derived and
+// stored per def so the vault copy carries it explicitly for the AI team.
+function serializeCalendarDefs(defs) {
+  return (defs || []).map((def) => ({
+    uid: def.uid,
+    title: def.title,
+    description: def.description || '',
+    location: def.location || null,
+    url: def.url || null,
+    conferenceUrl: detectConferenceUrl(def),
+    start: serializeIcsDate(def.start),
+    end: serializeIcsDate(def.end),
+    rrule: def.rrule || null,
+    exdates: Array.from(def.exdates || []),
+    recurrenceDay: def.recurrenceDay || null,
+  }));
+}
+
+// plain-JSON array -> defs identical (for expansion purposes) to parseIcs
+// output. Returns null when the payload is not an array; skips broken rows.
+function reviveCalendarDefs(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const d of raw) {
+    if (!d || typeof d !== 'object' || !d.start) continue;
+    const start = reviveIcsDate(d.start);
+    if (!start || (!start.allDay && !(start.instant instanceof Date && !isNaN(start.instant)))) continue;
+    out.push({
+      uid: String(d.uid || ''),
+      title: String(d.title || '(no title)'),
+      description: String(d.description || ''),
+      location: d.location || null,
+      url: d.url || null,
+      conferenceUrl: d.conferenceUrl || null,
+      start,
+      end: reviveIcsDate(d.end),
+      rrule: d.rrule && typeof d.rrule === 'object' ? d.rrule : null,
+      exdates: new Set(Array.isArray(d.exdates) ? d.exdates : []),
+      recurrenceDay: d.recurrenceDay || null,
+    });
+  }
+  return out;
+}
+
+// The full cache file content. `now` is injectable so tests are deterministic.
+function buildCalendarCacheContent(defs, now) {
+  const serialized = serializeCalendarDefs(defs);
+  const today = localDayStr(now);
+  const lines = [
+    '---',
+    'type: calendar-cache',
+    'source: google-calendar-ics',
+    `updated_at: ${now.toISOString()}`,
+    `events: ${serialized.length}`,
+    '---',
+    '',
+    '# Calendar Events',
+    '',
+    'Last synced calendar state, written by the ICOR Planner plugin on every',
+    'healthy fetch (may be minutes stale). Safe to read for schedule context;',
+    'it never contains the calendar feed URL or any secret. Do not edit: the',
+    'next sync overwrites this file.',
+    '',
+    `## Upcoming (${today} to ${addDays(today, 13)})`,
+    '',
+  ];
+  // Reuse the board's own expansion so the readable list and the board agree.
+  const w0 = mondayOf(today);
+  const events = icsEventsForWeek(defs, w0, 13)
+    .concat(icsEventsForWeek(defs, addDays(w0, 7), 13))
+    .concat(icsEventsForWeek(defs, addDays(w0, 14), 13))
+    .filter((ev) => ev.day >= today && ev.day < addDays(today, 14));
+  let lastDay = null;
+  for (const ev of events) {
+    if (ev.day !== lastDay) {
+      lines.push(`### ${fmtDayLabel(ev.day)}`);
+      lastDay = ev.day;
+    }
+    const when = ev.allDay || !ev.start
+      ? (ev.continues ? 'CONT.' : 'ALL DAY')
+      : `${fmtTimeHM(ev.start)}-${fmtTimeHM(ev.end)}`;
+    const conf = detectConferenceUrl(ev);
+    const bits = [`- ${when} ${ev.title}`];
+    if (ev.location) bits.push(`  - location: ${ev.location}`);
+    if (conf) bits.push(`  - conference: ${conf}`);
+    lines.push(...bits);
+  }
+  if (!events.length) lines.push('No events in the next 14 days.');
+  lines.push('', '## Serialized defs (for the plugin - do not edit)', '', '```json', JSON.stringify(serialized), '```', '');
+  return lines.join('\n');
+}
+
+// Cache file content -> revived defs, or null on any malformed shape.
+function parseCalendarCacheContent(text) {
+  const m = /```json\s*\n([\s\S]*?)\n```/.exec(String(text || ''));
+  if (!m) return null;
+  try { return reviveCalendarDefs(JSON.parse(m[1])); } catch { return null; }
+}
+
+/* ========================================================================== *
+ * Next-event badge helpers (v0.5.0)
+ * ========================================================================== */
+
+// From expanded per-day events: a RUNNING timed event wins (badge says NOW),
+// else the next timed event whose start is in the future. All-day events and
+// continuation rows are skipped. Returns the event or null.
+function nextUpcomingEvent(events, now) {
+  const t = now.getTime();
+  let running = null;
+  let next = null;
+  for (const ev of events || []) {
+    if (ev.allDay || !ev.start || !ev.end || ev.continues) continue;
+    const s = new Date(ev.start).getTime();
+    const e = new Date(ev.end).getTime();
+    if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
+    if (s <= t && t < e) {
+      if (!running || s < new Date(running.start).getTime()) running = ev;
+    } else if (s > t) {
+      if (!next || s < new Date(next.start).getTime()) next = ev;
+    }
+  }
+  return running || next;
+}
+
+// Countdown label for the badge. Under 5 minutes it switches to M:SS (the
+// caller also switches the tick to 1s there); running events read NOW.
+function fmtBadgeCountdown(ev, now) {
+  const s = new Date(ev.start).getTime();
+  const t = now.getTime();
+  if (s <= t) return 'NOW';
+  const leftMs = s - t;
+  if (leftMs <= 5 * 60000) {
+    const totalSec = Math.max(0, Math.round(leftMs / 1000));
+    return `IN ${Math.floor(totalSec / 60)}:${pad2(totalSec % 60)}`;
+  }
+  const mins = Math.round(leftMs / 60000);
+  const d = Math.floor(mins / 1440);
+  const h = Math.floor((mins % 1440) / 60);
+  const m = mins % 60;
+  if (d > 0) return `IN ${d}D ${h}H`;
+  if (h > 0) return `IN ${h}H ${pad2(m)}M`;
+  return `IN ${m}M`;
+}
+
+/* ========================================================================== *
+ * Item store - synced tasks live as markdown notes under 02 Planner/<Source>/.
+ * Frontmatter is the plan database (the cockpit's plan_assignments analog):
+ *   type: planner-item        source / external_id  - identity (idempotency key)
+ *   status: open|done         - SOURCE truth, written by reconcile
+ *   planned_day / planned_half / planned_order - the board placement
+ *   done_local / weekly_goal  - planner-local flags (never written to source)
+ * The AI team edits the same fields to move items; the board re-renders live.
+ * ========================================================================== */
+
+// The normalizer, pure and shared: one place decides what a frontmatter block
+// MEANS, so a manual item and a synced item are the same shape by
+// construction rather than by two code paths agreeing. Everything downstream
+// (board, tray, drag, menus) reads this output and nothing else.
+function itemFromFrontmatter(fm, path, basename) {
+  if (!fm || fm.type !== 'planner-item' || !fm.source || fm.external_id == null) return null;
+  // priority: an ABSENT or EMPTY value means "no priority" (rank 5). Number(null)
+  // and Number('') are both 0, which clampPriorityRank would floor up to 1 (the
+  // TOP rank) - so the absent case must be caught before the coercion, never
+  // after it. Manual items are the first items that can legitimately carry a
+  // hand-cleared priority, which is how this surfaced.
+  const rawPriority = fm.priority;
+  const priority = (rawPriority == null || rawPriority === '')
+    ? 5 : clampPriorityRank(Number(rawPriority));
+  return {
+    path,
+    source: String(fm.source),
+    id: String(fm.external_id),
+    title: fm.title != null ? String(fm.title) : basename,
+    status: fm.status === 'done' ? 'done' : 'open',
+    due: fm.due ? String(fm.due).slice(0, 10) : null,
+    priority,
+    url: fm.url ? String(fm.url) : null,
+    tags: Array.isArray(fm.tags) ? fm.tags.map(String) : [],
+    sourceStatus: fm.source_status != null ? String(fm.source_status) : null,
+    listId: fm.list_id != null ? String(fm.list_id) : null,
+    plannedDay: fm.planned_day ? String(fm.planned_day).slice(0, 10) : null,
+    plannedHalf: fm.planned_half === 'am' || fm.planned_half === 'pm' ? fm.planned_half : null,
+    plannedOrder: Number.isFinite(Number(fm.planned_order)) ? Number(fm.planned_order) : 0,
+    doneLocal: fm.done_local === true,
+    weeklyGoal: fm.weekly_goal === true,
+  };
+}
+
+function itemFromFile(app, file) {
+  const cache = app.metadataCache.getFileCache(file);
+  const item = itemFromFrontmatter(cache && cache.frontmatter, file.path, file.basename);
+  if (item) item.file = file;
+  return item;
+}
+function collectItems(app) {
+  const root = app.vault.getAbstractFileByPath(PLANNER_FOLDER);
+  const items = [];
+  const walk = (folder) => {
+    for (const child of folder.children || []) {
+      if (child instanceof TFolder) walk(child);
+      else if (child instanceof TFile && child.extension === 'md') {
+        const it = itemFromFile(app, child);
+        if (it) items.push(it);
+      }
+    }
+  };
+  if (root instanceof TFolder) walk(root);
+  return items;
+}
+
+// effective completion: struck when locally checked OR the source closed it
+function isDone(item) { return item.doneLocal || item.status === 'done'; }
+
+/* ========================================================================== *
+ * Manual items (2026-08-30)
+ *
+ * A task typed straight into the tray. It is a planner-item like any other,
+ * with source: manual and an external_id that CANNOT collide with a synced
+ * one: the id is namespaced by the literal 'manual-' prefix, which no Todoist
+ * id (digits or a 16-char base62 token), ClickUp id (base36, no hyphen) or
+ * IMAP UID (digits) can ever produce. Identity is the (source, external_id)
+ * pair, so the prefix is belt on top of braces - it means a hand-edited
+ * `source:` field still cannot make a manual note shadow a synced one.
+ *
+ * Two hard rules, both enforced by SYNCED_SOURCES rather than by testing for
+ * the string 'manual':
+ *   - a sync run never deletes, closes or overwrites a manual item
+ *     (reconcileStaleIds returns nothing for a source it does not own)
+ *   - two-way sync never tries to push a manual item anywhere
+ *     (canPushToSource / canCompleteOnSource are both false for it)
+ * ========================================================================== */
+
+// `manual-<base36 ms>-<6 base36 chars>`. Time-ordered so the ids sort the way
+// they were created, random-tailed so two entries in the same millisecond do
+// not collide. The caller may inject now/rand to make this deterministic.
+function manualExternalId(now, rand) {
+  const ms = Number.isFinite(now) ? now : Date.now();
+  const r = typeof rand === 'function' ? rand : Math.random;
+  let tail = '';
+  for (let i = 0; i < 6; i++) tail += Math.floor(r() * 36).toString(36);
+  return `manual-${ms.toString(36)}-${tail}`;
+}
+
+// The frontmatter object for a new manual item. Every field of the README
+// contract is present and explicit: a manual note must be readable by anything
+// that reads a synced note, and an ABSENT field is a different thing from a
+// null one to the frontmatter parser.
+//
+// `priority: 5` is written literally rather than left null. 5 is "no
+// priority"; see the coercion note in itemFromFrontmatter.
+function manualItemFrontmatter(title, id, nowIso) {
+  return {
+    type: 'planner-item',
+    source: MANUAL_SOURCE,
+    external_id: String(id),
+    title: String(title),
+    status: 'open',
+    due: null,
+    priority: 5,
+    url: null,
+    tags: [],
+    source_status: null,
+    planned_day: null,
+    planned_half: null,
+    planned_order: 0,
+    weekly_goal: false,
+    done_local: false,
+    // Manual items are never synced, so `synced_at` would be a lie. This is
+    // the manual-only field, documented in the README contract table.
+    created_at: nowIso,
+  };
+}
+
+// Which of `allItems` a HEALTHY fetch of `source` proves are finished.
+//
+// The guard that matters is the first one: a source only ever reconciles its
+// OWN items. A manual item is invisible to every sync run, including one whose
+// external_id happens to look like the id of a task that just vanished from
+// Todoist. Extracted as a pure function so that invariant is a test and not a
+// comment.
+function reconcileStaleIds(source, allItems, openIds) {
+  if (!isSyncedSource(source)) return [];
+  const out = [];
+  for (const it of allItems || []) {
+    if (it.source !== source) continue;
+    if (openIds.has(it.id)) continue;
+    if (it.status === 'done') continue;
+    out.push(it);
+  }
+  return out;
+}
+
+/* ========================================================================== *
+ * The plugin
+ * ========================================================================== */
+
+class IcorPlannerPlugin extends Plugin {
+  async onload() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // _shadow: per-item last-synced baseline for the two-way fields. Lives in
+    // data.json beside the settings; never shown in the settings UI.
+    if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
+    this._pushTimers = new Map();
+    this.calendarDefs = null;        // parsed ICS defs (mirrored to CALENDAR_CACHE_FILE on healthy fetches)
+    this.calendarStale = false;      // true while defs come from the vault cache, not a live fetch
+    this.calendarStatus = null;      // last calendar ConnectorResult status
+    this.syncStatus = {};            // source -> { ok, reason, message, count, at }
+    this.syncing = false;
+    this.lastSyncAt = null;
+    // One auto-reveal of the tray per session (trayRevealDecision).
+    this._trayAutoRevealed = false;
+
+    this.registerView(BOARD_VIEW_TYPE, (leaf) => new PlannerBoardView(leaf, this));
+    this.registerView(TRAY_VIEW_TYPE, (leaf) => new PlannerTrayView(leaf, this));
+
+    this.addCommand({ id: 'open-board', name: 'Open weekly planner', callback: () => this.openBoard() });
+    this.addCommand({ id: 'open-tray', name: 'Open planner tray', callback: () => this.openTray(true) });
+    this.addCommand({ id: 'sync-now', name: 'Sync planner sources now', callback: () => this.syncNow(true) });
+    this.addCommand({ id: 'add-manual-task', name: 'Add a task', callback: () => this.focusAddTask() });
+
+    this.addSettingTab(new IcorPlannerSettingTab(this.app, this));
+
+    // The real 02 Planner folder is the entry point (styled like the other
+    // rooms by icor-rooms.css). A capture-phase listener turns its click into
+    // opening the board instead of folding the folder - no injected rows.
+    this.registerDomEvent(document, 'click', (e) => {
+      const title = e.target instanceof Element
+        ? e.target.closest(`.nav-folder-title[data-path="${PLANNER_FOLDER}"]`)
+        : null;
+      if (!title) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.openBoard();
+    }, { capture: true });
+
+    this.app.workspace.onLayoutReady(() => {
+      this.ensureGitignore();
+      // Instant calendar: rehydrate the last healthy fetch from the vault
+      // cache (rendered pale + pulsing) before the live fetch replaces it.
+      this.loadCalendarCache();
+      this.setupNextBadge();
+      // First sync shortly after startup (never blocking plugin load), then on
+      // the configured cadence.
+      if (this.anySourceConfigured()) {
+        window.setTimeout(() => this.syncNow(false), 4000);
+      }
+      this.scheduleSync();
+    });
+
+    // Live re-render when anything under 02 Planner changes (sync writes, user
+    // edits, or the AI team moving an item by editing frontmatter).
+    const notify = (file) => {
+      if (file && file.path && file.path.startsWith(PLANNER_FOLDER + '/')) this.emitModelChanged();
+    };
+    this.registerEvent(this.app.metadataCache.on('changed', (file) => {
+      notify(file);
+      if (file && file.path && file.path.startsWith(PLANNER_FOLDER + '/')) this.schedulePushCheck(file.path);
+    }));
+    this.registerEvent(this.app.vault.on('delete', notify));
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+      if ((file.path && file.path.startsWith(PLANNER_FOLDER + '/')) ||
+          (oldPath && oldPath.startsWith(PLANNER_FOLDER + '/'))) this.emitModelChanged();
+    }));
+  }
+
+  onunload() {
+    this.removeNextBadge();
+    if (this._cacheWriteTimer) { window.clearTimeout(this._cacheWriteTimer); this._cacheWriteTimer = null; }
+  }
+
+  // Any source with a connector, calendar included. Manual is excluded on
+  // purpose: it needs no fetch, so it must never make the scheduler start one.
+  anySourceConfigured() {
+    return [...SYNCED_SOURCES, 'calendar'].some((k) => sourceConfigured(this.settings, k));
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+    this.scheduleSync();
+    this.emitModelChanged();
+  }
+
+  scheduleSync() {
+    if (this._syncTimer) { window.clearInterval(this._syncTimer); this._syncTimer = null; }
+    const minutes = Math.max(2, Number(this.settings.syncMinutes) || 10);
+    this._syncTimer = window.setInterval(() => {
+      if (this.anySourceConfigured()) this.syncNow(false);
+    }, minutes * 60000);
+    this.registerInterval(this._syncTimer);
+  }
+
+  // Debounced fan-out to both views.
+  emitModelChanged() {
+    if (this._emitTimer) window.clearTimeout(this._emitTimer);
+    this._emitTimer = window.setTimeout(() => {
+      this.app.workspace.getLeavesOfType(BOARD_VIEW_TYPE).forEach((l) => {
+        if (l.view instanceof PlannerBoardView) l.view.render();
+      });
+      this.app.workspace.getLeavesOfType(TRAY_VIEW_TYPE).forEach((l) => {
+        if (l.view instanceof PlannerTrayView) l.view.render();
+      });
+      this.updateNextBadge();
+    }, 250);
+  }
+
+  /* ---- gitignore guard: token store never reaches the scaffold repo ------ */
+  async ensureGitignore() {
+    try {
+      const adapter = this.app.vault.adapter;
+      const gi = '.gitignore';
+      let text = '';
+      try { text = await adapter.read(gi); } catch { text = ''; }
+      const wanted = ['.obsidian/plugins/icor-for-life-planner/'];
+      const missing = wanted.filter((line) => !text.split('\n').some((l) => l.trim() === line));
+      if (missing.length) {
+        const block = `\n# ICOR Planner is its own git repository (and its data.json holds API keys)\n${missing.join('\n')}\n`;
+        await adapter.write(gi, (text.endsWith('\n') || !text ? text : text + '\n') + block);
+      }
+    } catch { /* never block load on this */ }
+  }
+
+  /* ---- calendar event cache (v0.5.0) ------------------------------------- */
+
+  // Rehydrate the last healthy fetch from CALENDAR_CACHE_FILE. Only fills the
+  // gap before the first live fetch; a malformed cache is silently ignored
+  // (the next healthy fetch rebuilds it).
+  async loadCalendarCache() {
+    if (this.calendarDefs) return;
+    try {
+      const file = this.app.vault.getAbstractFileByPath(normalizePath(CALENDAR_CACHE_FILE));
+      if (!(file instanceof TFile)) return;
+      const text = await this.app.vault.cachedRead(file);
+      const defs = parseCalendarCacheContent(text);
+      if (defs && defs.length && !this.calendarDefs) {
+        this.calendarDefs = defs;
+        this.calendarStale = true; // pale + pulsing until a healthy fetch lands
+        this.emitModelChanged();
+      }
+    } catch { /* unreadable cache: the fetch path covers it */ }
+  }
+
+  // Debounced so a manual sync right after the scheduled one writes once.
+  scheduleCalendarCacheWrite() {
+    if (this._cacheWriteTimer) window.clearTimeout(this._cacheWriteTimer);
+    this._cacheWriteTimer = window.setTimeout(() => {
+      this._cacheWriteTimer = null;
+      this.writeCalendarCache();
+    }, 2000);
+  }
+
+  async writeCalendarCache() {
+    try {
+      if (!this.calendarDefs || this.calendarStale) return; // only persist live fetches
+      await this.ensureFolders();
+      const content = buildCalendarCacheContent(this.calendarDefs, new Date());
+      const path = normalizePath(CALENDAR_CACHE_FILE);
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (existing instanceof TFile) await this.app.vault.process(existing, () => content);
+      else await this.app.vault.create(path, content);
+    } catch { /* the cache is a convenience - never fail a sync on it */ }
+  }
+
+  /* ---- next-event badge (v0.5.0, desktop only) --------------------------- */
+
+  // Expanded events for the badge window: this ISO week plus the next, so the
+  // "next" pick can see ahead across a weekend regardless of the board's week.
+  badgeEvents() {
+    if (!this.calendarDefs) return [];
+    const w0 = mondayOf(todayStr());
+    const split = this.splitHour();
+    return icsEventsForWeek(this.calendarDefs, w0, split)
+      .concat(icsEventsForWeek(this.calendarDefs, addDays(w0, 7), split));
+  }
+
+  // Inject the badge into the LEFT ribbon, right after the action stack the
+  // INKLINE theme styles (the theme positions .iplan-next-badge further).
+  setupNextBadge() {
+    if (Platform.isMobile) return;                       // desktop only
+    if (!this.settings.showNextBadge) { this.removeNextBadge(); return; }
+    if (this._badgeEl && this._badgeEl.isConnected) { this.updateNextBadge(); return; }
+    const dock = document.querySelector('.workspace-ribbon.mod-left .side-dock-actions');
+    if (!dock) return;                                   // layout not there yet
+    const el = document.createElement('div');
+    el.className = 'iplan-next-badge';
+    el.hidden = true;
+    el.setAttribute('role', 'button');
+    el.setAttribute('tabindex', '0');
+    const icon = document.createElement('span');
+    icon.className = 'iplan-next-badge-icon';
+    setIcon(icon, 'video');
+    const count = document.createElement('span');
+    count.className = 'iplan-next-badge-count';
+    const title = document.createElement('span');
+    title.className = 'iplan-next-badge-title';
+    el.appendChild(icon);
+    el.appendChild(count);
+    el.appendChild(title);
+    const activate = () => {
+      if (this._badgeConfUrl) window.open(this._badgeConfUrl, '_external');
+      else this.openBoard();
+    };
+    el.addEventListener('click', activate);
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+    });
+    dock.insertAdjacentElement('afterend', el);
+    this._badgeEl = el;
+    this._badgeParts = { icon, count, title };
+    this.updateNextBadge();
+  }
+
+  removeNextBadge() {
+    if (this._badgeTimer != null) { window.clearTimeout(this._badgeTimer); this._badgeTimer = null; }
+    if (this._badgeEl) { this._badgeEl.remove(); this._badgeEl = null; this._badgeParts = null; }
+    this._badgeConfUrl = null;
+  }
+
+  // Single re-arming timer: 30s cadence normally, 1s once <= 5 minutes remain
+  // (the label switches to M:SS there). Cleared on unload via removeNextBadge.
+  _armBadgeTick(ms) {
+    if (this._badgeTimer != null) window.clearTimeout(this._badgeTimer);
+    this._badgeTimer = window.setTimeout(() => {
+      this._badgeTimer = null;
+      this.updateNextBadge();
+    }, ms);
+  }
+
+  updateNextBadge() {
+    if (Platform.isMobile) return;
+    if (!this.settings.showNextBadge) { this.removeNextBadge(); return; }
+    if (!this._badgeEl || !this._badgeEl.isConnected) {
+      // Layout may not have carried the ribbon yet at first call.
+      if (this._badgeEl) this.removeNextBadge();
+      this.setupNextBadge();
+      if (!this._badgeEl) return;
+    }
+    const now = new Date();
+    const ev = nextUpcomingEvent(this.badgeEvents(), now);
+    const el = this._badgeEl;
+    const parts = this._badgeParts;
+    if (!ev) {
+      el.hidden = true;
+      this._badgeConfUrl = null;
+      this._armBadgeTick(30000);
+      return;
+    }
+    const label = fmtBadgeCountdown(ev, now);
+    const conf = detectConferenceUrl(ev);
+    this._badgeConfUrl = conf;
+    el.hidden = false;
+    parts.count.textContent = label;
+    parts.title.textContent = ev.title;
+    parts.icon.style.display = conf ? '' : 'none';
+    const msLeft = new Date(ev.start).getTime() - now.getTime();
+    const imminent = msLeft > 0 && msLeft <= 5 * 60000;
+    el.classList.toggle('is-imminent', imminent);
+    el.classList.toggle('is-now', label === 'NOW');
+    el.setAttribute('aria-label',
+      `${ev.title}, ${label === 'NOW' ? 'running now' : label.toLowerCase()}. ` +
+      (conf ? 'Opens the meeting link.' : 'Opens the planner board.'));
+    el.title = `${ev.title} · ${label}${conf ? '\nClick to join the meeting' : ''}`;
+    this._armBadgeTick(imminent ? 1000 : 30000);
+  }
+
+  /* ---- views ------------------------------------------------------------- */
+  async openBoard() {
+    const existing = this.app.workspace.getLeavesOfType(BOARD_VIEW_TYPE);
+    const leaf = existing.length ? existing[0] : this.app.workspace.getLeaf(true);
+    if (!existing.length) await leaf.setViewState({ type: BOARD_VIEW_TYPE, active: true });
+    this.app.workspace.revealLeaf(leaf);
+    await this.autoRevealTray();
+    // Focus belongs on the board the user just asked for, never on the tray we
+    // opened beside it.
+    try { this.app.workspace.setActiveLeaf(leaf, { focus: true }); } catch { /* older API */ }
+  }
+
+  // Reveal the tray alongside the board, once per session, without fighting a
+  // user who closed it. See trayRevealDecision for why the memory is
+  // session-scoped rather than persisted.
+  async autoRevealTray() {
+    let collapsed = false;
+    try { collapsed = !!(this.app.workspace.rightSplit && this.app.workspace.rightSplit.collapsed); } catch { collapsed = false; }
+    const decision = trayRevealDecision({
+      autoRevealedThisSession: !!this._trayAutoRevealed,
+      trayLeafExists: this.app.workspace.getLeavesOfType(TRAY_VIEW_TYPE).length > 0,
+      rightSplitCollapsed: collapsed,
+    });
+    if (decision === 'none' || decision === 'already-visible') {
+      // The tray still has to EXIST even when we are not revealing it, which is
+      // what openTray(false) has always done.
+      if (decision === 'already-visible') return;
+      await this.openTray(false);
+      return;
+    }
+    if (trayRevealSpendsTurn(decision)) this._trayAutoRevealed = true;
+    await this.openTray(true);
+  }
+
+  async openTray(reveal) {
+    let leaves = this.app.workspace.getLeavesOfType(TRAY_VIEW_TYPE);
+    if (!leaves.length) {
+      const leaf = this.app.workspace.getRightLeaf(false);
+      if (!leaf) return null;
+      await leaf.setViewState({ type: TRAY_VIEW_TYPE, active: false });
+      leaves = [leaf];
+    }
+    if (reveal) this.app.workspace.revealLeaf(leaves[0]);
+    return leaves[0];
+  }
+
+  // Reveal the tray on its TASKS tab with the add-a-task field open and
+  // focused. One capture surface, reachable from the command palette on
+  // desktop and mobile alike, rather than a second modal to design and keep.
+  async focusAddTask() {
+    const leaf = await this.openTray(true);
+    const view = leaf && leaf.view;
+    if (view instanceof PlannerTrayView) view.openComposer();
+  }
+
+  /* ---- sync engine -------------------------------------------------------- */
+  async ensureFolders() {
+    const mk = async (path) => {
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (!existing) { try { await this.app.vault.createFolder(path); } catch {} }
+    };
+    await mk(PLANNER_FOLDER);
+    // Manual included: the folder must exist on a vault with no keys at all.
+    for (const key of TASK_SOURCES) {
+      await mk(`${PLANNER_FOLDER}/${SOURCES[key].folder}`);
+    }
+  }
+
+  async syncNow(manual) {
+    if (this.syncing) { if (manual) new Notice('Planner sync already running.'); return; }
+    this.syncing = true;
+    this.emitModelChanged();
+    try {
+      await this.ensureFolders();
+      const s = this.settings;
+      const runs = [
+        ['todoist', todoistFetchOpen(s)],
+        ['clickup', clickupFetchOpen(s)],
+        ['email', emailFetchStarred(s)],
+      ];
+      for (const [source, promise] of runs) {
+        const result = await promise;
+        this.syncStatus[source] = {
+          ok: result.ok, reason: result.reason || null, message: result.message || null,
+          count: result.items.length, at: new Date().toISOString(),
+        };
+        if (result.ok) await this.upsertSource(source, result.items);
+      }
+      // Calendar: no per-event notes; a healthy fetch replaces the defs,
+      // clears the stale look and rewrites the ONE cache file. A failed fetch
+      // keeps whatever renders now (cached or previous) - never prune on a blip.
+      const cal = await calendarFetchDefs(s);
+      this.calendarStatus = { ok: cal.ok, reason: cal.reason || null, message: cal.message || null, at: new Date().toISOString() };
+      if (cal.ok) {
+        this.calendarDefs = cal.items;
+        this.calendarStale = false;
+        this.scheduleCalendarCacheWrite();
+      }
+      this.lastSyncAt = new Date().toISOString();
+      await this.saveData(this.settings); // persist the refreshed shadows
+      if (manual) {
+        const okCount = ['todoist', 'clickup', 'email'].filter((k) => this.syncStatus[k] && this.syncStatus[k].ok).length;
+        new Notice(`Planner sync done (${okCount} task source${okCount === 1 ? '' : 's'} healthy).`);
+      }
+    } finally {
+      this.syncing = false;
+      this.emitModelChanged();
+    }
+  }
+
+  // Upsert one source's OPEN set into the vault + reconcile completions.
+  // The fetch succeeded, so absence from `items` is a true completion signal
+  // (the cockpit's reconcileOpenIds contract), never a window artifact.
+  // v0.2.0: per item, the two-way fields go through threeWayMerge against the
+  // stored shadow - local edits push, source edits pull, source wins conflicts.
+  // Failed pushes keep the old baseline so the next sync retries them.
+  async upsertSource(source, items) {
+    const folder = `${PLANNER_FOLDER}/${SOURCES[source].folder}`;
+    const s = this.settings;
+    const allItems = collectItems(this.app);
+    const existing = new Map(); // external id -> item
+    for (const it of allItems) {
+      if (it.source === source) existing.set(it.id, it);
+    }
+    const openIds = new Set();
+    for (const t of items) {
+      openIds.add(t.id);
+      const prior = existing.get(t.id);
+      if (!prior) {
+        await this.createItemFile(folder, source, t);
+        continue;
+      }
+      const key = `${source}:${t.id}`;
+      const shadow = s._shadow[key] || null;
+      const body = await this.readBody(prior.file);
+      const sourceVals = { due: t.due || null, priority: t.priority, description: (t.description || '').trim() };
+      const localVals = { due: prior.due, priority: prior.priority, description: body };
+      const pushEnabled = !!s.pushEdits && source !== 'email';
+      const { pushes, finals, nextShadow } = threeWayMerge(sourceVals, localVals, shadow, pushEnabled);
+      if (Object.keys(pushes).length) {
+        try {
+          if (source === 'todoist') await todoistPushFields((s.todoistToken || '').trim(), t.id, pushes);
+          else if (source === 'clickup') await clickupPushFields((s.clickupToken || '').trim(), t.id, pushes);
+          new Notice(`Planner: pushed ${Object.keys(pushes).join(', ')} to ${SOURCES[source].label}.`);
+        } catch (e) {
+          new Notice(`Planner: ${SOURCES[source].label} push failed (${e.message}). Will retry.`);
+          for (const f of Object.keys(pushes)) {
+            finals[f] = localVals[f];
+            nextShadow[f] = shadow ? shadow[f] : sourceVals[f];
+          }
+        }
+      }
+      // completion state: retry a pending close/reopen at sync time too
+      nextShadow.done = shadow ? !!shadow.done : false;
+      if (s.completeOnSource && prior.doneLocal !== nextShadow.done) {
+        try {
+          await this.applyDoneOnSource(prior, prior.doneLocal);
+          nextShadow.done = prior.doneLocal;
+        } catch (e) {
+          new Notice(`Planner: ${SOURCES[source].label} ${prior.doneLocal ? 'close' : 'reopen'} failed (${e.message}). Will retry.`);
+        }
+      }
+      s._shadow[key] = nextShadow;
+      await this.updateItemFile(prior, t, finals, body);
+    }
+    // Reconcile: open file whose id vanished from the healthy open set -> done.
+    // The decision runs over EVERY item in the vault, not a pre-filtered set,
+    // so the "a source only reconciles its own items" rule is enforced by
+    // reconcileStaleIds itself and is testable there. Manual items are never
+    // returned, whatever their external_id looks like.
+    for (const [id] of existing) {
+      if (!openIds.has(id)) delete s._shadow[`${source}:${id}`];
+    }
+    for (const it of reconcileStaleIds(source, allItems, openIds)) {
+      await this.app.fileManager.processFrontMatter(it.file, (fm) => {
+        fm.status = 'done';
+        fm.done_at = new Date().toISOString();
+        fm.synced_at = new Date().toISOString();
+      });
+    }
+  }
+
+  async readBody(file) {
+    try {
+      const content = await this.app.vault.cachedRead(file);
+      return content.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    } catch { return ''; }
+  }
+
+  // The one place a completion crosses to the source. Throws on failure.
+  async applyDoneOnSource(item, closed) {
+    const s = this.settings;
+    if (!canCompleteOnSource(item.source)) return; // manual: nowhere to write
+    if (item.source === 'todoist') {
+      await todoistSetClosed((s.todoistToken || '').trim(), item.id, closed);
+      new Notice(closed ? 'Planner: closed in Todoist.' : 'Planner: reopened in Todoist.');
+    } else if (item.source === 'clickup') {
+      await clickupSetClosed((s.clickupToken || '').trim(), item.id, item.listId, closed);
+      new Notice(closed ? 'Planner: closed in ClickUp.' : 'Planner: reopened in ClickUp.');
+    } else if (item.source === 'email') {
+      try {
+        await imapSetStarredRaw((s.imapHost || '').trim(), (s.imapUser || '').trim(),
+          (s.imapPassword || '').trim(), item.id, !closed);
+      } catch (e) {
+        if (/tls unavailable/i.test((e && e.message) || '')) {
+          throw new Error('the email star can only be written from the desktop app');
+        }
+        throw e;
+      }
+      new Notice(closed ? 'Planner: unstarred the email.' : 'Planner: starred the email again.');
+    }
+  }
+
+  // Debounced per-file: a local edit (user typing, a card action, or an agent
+  // editing frontmatter) pushes out without waiting for the next sync.
+  schedulePushCheck(path) {
+    if (this._pushTimers.has(path)) window.clearTimeout(this._pushTimers.get(path));
+    this._pushTimers.set(path, window.setTimeout(() => {
+      this._pushTimers.delete(path);
+      this.detectAndPush(path);
+    }, 900));
+  }
+
+  async detectAndPush(path) {
+    const s = this.settings;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    const item = itemFromFile(this.app, file);
+    if (!item) return;
+    // A manual item has no source to write to. Guarded explicitly rather than
+    // relying on "it has no shadow entry, so it falls out below": that is true
+    // today and would stop being true the moment anything else seeds a shadow.
+    if (!isSyncedSource(item.source)) return;
+    const key = `${item.source}:${item.id}`;
+    const sh = s._shadow[key];
+    if (!sh) return; // no baseline yet - the next sync seeds it
+    let dirty = false;
+    if (s.pushEdits && canPushToSource(item.source)) {
+      const body = await this.readBody(file);
+      const localVals = { due: item.due, priority: item.priority, description: body };
+      const pushes = {};
+      for (const f of TWO_WAY_FIELDS) {
+        const base = sh[f] == null || sh[f] === '' ? (f === 'priority' ? 5 : null) : sh[f];
+        const loc = localVals[f] == null || localVals[f] === '' ? (f === 'priority' ? 5 : null) : localVals[f];
+        if (loc !== base) pushes[f] = loc;
+      }
+      if (Object.keys(pushes).length) {
+        try {
+          if (item.source === 'todoist') await todoistPushFields((s.todoistToken || '').trim(), item.id, pushes);
+          else await clickupPushFields((s.clickupToken || '').trim(), item.id, pushes);
+          for (const f of Object.keys(pushes)) sh[f] = pushes[f];
+          dirty = true;
+          new Notice(`Planner: pushed ${Object.keys(pushes).join(', ')} to ${SOURCES[item.source].label}.`);
+        } catch (e) {
+          new Notice(`Planner: ${SOURCES[item.source].label} push failed (${e.message}). Will retry on sync.`);
+        }
+      }
+    }
+    if (s.completeOnSource && canCompleteOnSource(item.source) && item.doneLocal !== !!sh.done) {
+      try {
+        await this.applyDoneOnSource(item, item.doneLocal);
+        sh.done = item.doneLocal;
+        dirty = true;
+      } catch (e) {
+        new Notice(`Planner: ${item.doneLocal ? 'close' : 'reopen'} on ${SOURCES[item.source].label} failed (${e.message}). Will retry on sync.`);
+      }
+    }
+    if (dirty) {
+      if (this._shadowSaveTimer) window.clearTimeout(this._shadowSaveTimer);
+      this._shadowSaveTimer = window.setTimeout(() => this.saveData(this.settings), 1500);
+    }
+  }
+
+  async createItemFile(folder, source, t) {
+    let base = `${safeBasename(t.title)} (${source}-${t.id})`;
+    let path = normalizePath(`${folder}/${base}.md`);
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      path = normalizePath(`${folder}/${base}-2.md`);
+    }
+    const fmLines = [
+      '---',
+      'type: planner-item',
+      `source: ${source}`,
+      `external_id: "${String(t.id).replace(/"/g, '')}"`,
+      `title: ${JSON.stringify(t.title)}`,
+      'status: open',
+      `due: ${t.due || null}`,
+      `priority: ${t.priority}`,
+      `url: ${t.url ? JSON.stringify(t.url) : null}`,
+      `tags: ${JSON.stringify(t.tags || [])}`,
+      `source_status: ${t.status ? JSON.stringify(t.status) : null}`,
+      `list_id: ${t.listId ? JSON.stringify(String(t.listId)) : null}`,
+      'planned_day: null',
+      'planned_half: null',
+      'planned_order: 0',
+      'weekly_goal: false',
+      'done_local: false',
+      `synced_at: ${new Date().toISOString()}`,
+      '---',
+      '',
+    ];
+    const body = (t.description || '').trim();
+    try {
+      await this.app.vault.create(path, fmLines.join('\n') + (body ? body + '\n' : ''));
+      this.settings._shadow[`${source}:${t.id}`] = {
+        due: t.due || null, priority: t.priority, description: body, done: false,
+      };
+    } catch { /* a race with another writer - the next sync settles it */ }
+  }
+
+  // Applies the merge result: `finals` carries the settled two-way fields
+  // (due / priority / description); source-owned metadata always pulls.
+  async updateItemFile(prior, t, finals, currentBody) {
+    const wantDue = finals.due || null;
+    const wantPriority = clampPriorityRank(finals.priority);
+    const changed =
+      prior.title !== t.title || prior.due !== wantDue ||
+      prior.priority !== wantPriority || prior.url !== (t.url || null) ||
+      prior.status === 'done' || // reopened at the source
+      JSON.stringify(prior.tags) !== JSON.stringify(t.tags || []) ||
+      prior.sourceStatus !== (t.status || null) ||
+      prior.listId !== (t.listId ? String(t.listId) : null);
+    if (changed) {
+      await this.app.fileManager.processFrontMatter(prior.file, (fm) => {
+        fm.title = t.title;
+        fm.due = wantDue;
+        fm.priority = wantPriority;
+        fm.url = t.url || null;
+        fm.tags = t.tags || [];
+        fm.source_status = t.status || null;
+        if (t.listId) fm.list_id = String(t.listId);
+        if (fm.status === 'done') { fm.status = 'open'; delete fm.done_at; }
+        fm.synced_at = new Date().toISOString();
+      });
+    }
+    // Body follows the settled description, never blindly the source.
+    const desc = (finals.description || '').trim();
+    try {
+      if ((currentBody || '').trim() !== desc) {
+        await this.app.vault.process(prior.file, (data) => {
+          const m = /^---\n[\s\S]*?\n---\n?/.exec(data);
+          const head = m ? m[0] : '';
+          return head + (desc ? desc + '\n' : '');
+        });
+      }
+    } catch { /* body refresh is cosmetic - never fail the sync on it */ }
+  }
+
+  /* ---- plan writes (the drag-and-drop write path) ------------------------- */
+  async assignItem(path, day, half, order) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.planned_day = day;
+      fm.planned_half = half;
+      fm.planned_order = order;
+    });
+  }
+
+  async unassignItem(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.planned_day = null;
+      fm.planned_half = null;
+      fm.planned_order = 0;
+    });
+  }
+
+  async toggleDoneLocal(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.done_local = fm.done_local !== true;
+    });
+  }
+
+  async toggleWeeklyGoal(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.weekly_goal = fm.weekly_goal !== true;
+    });
+  }
+
+  /* ---- manual items: the write path with no API key in front of it ------- */
+
+  // Create one manual task and return its path (or null on an empty title).
+  // Deliberately the same shape as createItemFile's output so the board, the
+  // tray, the drag logic and the card menu cannot tell the difference.
+  async addManualItem(title, opts) {
+    const clean = String(title == null ? '' : title).trim();
+    if (!clean) return null;
+    await this.ensureFolders();
+    const folder = `${PLANNER_FOLDER}/${SOURCES[MANUAL_SOURCE].folder}`;
+    const fm = manualItemFrontmatter(clean, manualExternalId(), new Date().toISOString());
+    if (opts && opts.day) {
+      fm.planned_day = opts.day;
+      fm.planned_half = opts.half === 'pm' ? 'pm' : 'am';
+      fm.planned_order = Date.now();
+    }
+    // The id is collision-proof by construction; this loop only guards against
+    // a file that already sits at the path for an unrelated reason.
+    let path = normalizePath(`${folder}/${safeBasename(clean)} (${fm.external_id}).md`);
+    for (let n = 2; this.app.vault.getAbstractFileByPath(path) && n < 50; n++) {
+      path = normalizePath(`${folder}/${safeBasename(clean)} (${fm.external_id}-${n}).md`);
+    }
+    const yaml = [
+      '---',
+      'type: planner-item',
+      `source: ${fm.source}`,
+      `external_id: "${fm.external_id}"`,
+      `title: ${JSON.stringify(fm.title)}`,
+      `status: ${fm.status}`,
+      `due: ${fm.due === null ? 'null' : fm.due}`,
+      `priority: ${fm.priority}`,
+      'url: null',
+      'tags: []',
+      'source_status: null',
+      `planned_day: ${fm.planned_day === null ? 'null' : fm.planned_day}`,
+      `planned_half: ${fm.planned_half === null ? 'null' : fm.planned_half}`,
+      `planned_order: ${fm.planned_order}`,
+      `weekly_goal: ${fm.weekly_goal}`,
+      `done_local: ${fm.done_local}`,
+      `created_at: ${fm.created_at}`,
+      '---',
+      '',
+    ].join('\n');
+    try {
+      await this.app.vault.create(path, yaml);
+    } catch (e) {
+      new Notice(`Planner: could not create the task (${(e && e.message) || 'unknown error'}).`);
+      return null;
+    }
+    // No shadow entry: a manual item has no source baseline, and detectAndPush
+    // must never find one for it.
+    this.emitModelChanged();
+    return path;
+  }
+
+  // Open the plugin's own settings tab. Obsidian exposes this on app.setting;
+  // guarded because it is not part of the published API surface.
+  openPluginSettings() {
+    try {
+      const setting = this.app.setting;
+      if (!setting || typeof setting.open !== 'function') {
+        new Notice('Open Settings, Community plugins, ICOR Planner to add a key.');
+        return;
+      }
+      setting.open();
+      if (typeof setting.openTabById === 'function') setting.openTabById(this.manifest.id);
+    } catch {
+      new Notice('Open Settings, Community plugins, ICOR Planner to add a key.');
+    }
+  }
+
+  splitHour() {
+    const src = this.settings.lunchEnabled
+      ? (this.settings.lunchStart || '12:30')
+      : (this.settings.splitTime || '13:00');
+    const m = /^(\d{1,2}):(\d{2})$/.exec(src);
+    return m ? Number(m[1]) : 13;
+  }
+
+  // Fractional rank for an insertion at `index` among `siblings` (sorted by
+  // plannedOrder). The cockpit's server-computed-position rule, client-side.
+  // Since 0.4.3 `siblings` is the lane's MIXED sequence from laneSequence():
+  // read-only event entries (plannedOrder = start minutes since midnight)
+  // interleaved with task entries (plannedOrder = planned_order). Dropping
+  // between a 09:00 event (540) and an 11:00 event (660) yields 600, so the
+  // task keeps its slot between them on the next render.
+  orderForInsert(siblings, index) {
+    if (!siblings.length) return 10;
+    if (index <= 0) return siblings[0].plannedOrder - 10;
+    if (index >= siblings.length) return siblings[siblings.length - 1].plannedOrder + 10;
+    return (siblings[index - 1].plannedOrder + siblings[index].plannedOrder) / 2;
+  }
+}
+
+/* ========================================================================== *
+ * Shared card rendering (board + tray speak the same visual grammar)
+ * ========================================================================== */
+
+// The theme's plugin-surface contract: declare this subtree a plugin surface,
+// so the INKLINE theme's own control rules stand down inside it. Without it the theme's input-well
+// rule sits at (0,5,1) and beats every (0,2,0) rule in styles.css on
+// background, border, font-family and both focus properties, and the tray's
+// underline field renders as a filled well. Measured against the shipped theme
+// bytes 2026-08-30. Reads the manifest, never a literal, so a rename cannot
+// silently unhook it.
+function markInkPlugin(el, pluginId) {
+  if (el && el.dataset && pluginId) el.dataset.inkPlugin = pluginId;
+}
+
+function sourceMarkEl(source) {
+  const meta = SOURCES[source] || SOURCES.todoist;
+  const span = document.createElement('span');
+  span.className = `iplan-source-mark iplan-source-${source}`;
+  span.setAttribute('aria-label', meta.label);
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  const path = document.createElementNS(svgNS, 'path');
+  path.setAttribute('d', meta.svg);
+  svg.appendChild(path);
+  span.appendChild(svg);
+  return span;
+}
+
+function dueChipText(item, today) {
+  if (!item.due) return null;
+  const bucket = dueBucketOf(item.due, today);
+  if (bucket === 'today') return 'TODAY';
+  if (bucket === 'overdue') {
+    const days = Math.round((new Date(today) - new Date(item.due)) / 86400000);
+    return days === 1 ? '1D OVER' : `${days}D OVER`;
+  }
+  return fmtDayNum(item.due);
+}
+
+// One read-only calendar chip's behavior, shared by the board lanes and the
+// tray's AGENDA tab: stale look while defs come from the vault cache, an
+// aria label, and click-through into the detail modal (with the icsUrl so
+// the Google edit deep-link can be built).
+function wireEventChip(plugin, chip, ev) {
+  if (plugin.calendarStale) chip.addClass('is-stale');
+  chip.setAttribute('aria-label', `${ev.title}${ev.location ? ', ' + ev.location : ''}`);
+  chip.addEventListener('click', () => new EventDetailModal(plugin.app, ev, plugin.settings.icsUrl, plugin.manifest.id).open());
+}
+
+// One task card. mode: 'board' | 'tray'.
+function renderCard(plugin, item, mode, view) {
+  const today = todayStr();
+  const card = document.createElement('div');
+  card.className = 'iplan-card';
+  card.setAttribute('data-path', item.path);
+  card.setAttribute('data-order', String(item.plannedOrder));
+  card.setAttribute('data-source', item.source);
+  card.draggable = true;
+  if (isDone(item)) card.classList.add('is-done');
+  if (item.weeklyGoal) card.classList.add('is-goal');
+
+  card.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', item.path);
+    e.dataTransfer.effectAllowed = 'move';
+    card.classList.add('is-dragging');
+    document.body.classList.add('iplan-dragging');
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('is-dragging');
+    document.body.classList.remove('iplan-dragging');
+    document.querySelectorAll('.iplan-drop-line').forEach((el) => el.remove());
+  });
+
+  const check = document.createElement('button');
+  check.className = 'iplan-check';
+  check.setAttribute('aria-label', isDone(item) ? 'Reopen' : 'Mark done');
+  check.addEventListener('click', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    plugin.toggleDoneLocal(item.path);
+  });
+
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'iplan-card-body';
+  const titleEl = document.createElement('div');
+  titleEl.className = 'iplan-card-title';
+  titleEl.textContent = item.title;
+  const meta = document.createElement('div');
+  meta.className = 'iplan-card-meta';
+  meta.appendChild(sourceMarkEl(item.source));
+  const due = dueChipText(item, today);
+  if (due) {
+    const chip = document.createElement('span');
+    chip.className = `iplan-chip iplan-due-${dueBucketOf(item.due, today)}`;
+    chip.textContent = due;
+    meta.appendChild(chip);
+  }
+  if (item.priority <= 2) {
+    const pr = document.createElement('span');
+    pr.className = `iplan-chip iplan-prio-${item.priority}`;
+    pr.textContent = `P${item.priority}`;
+    meta.appendChild(pr);
+  }
+  if (item.weeklyGoal) {
+    const goal = document.createElement('span');
+    goal.className = 'iplan-chip iplan-goal-chip';
+    goal.textContent = 'GOAL';
+    meta.appendChild(goal);
+  }
+  bodyEl.appendChild(titleEl);
+  bodyEl.appendChild(meta);
+
+  card.appendChild(check);
+  card.appendChild(bodyEl);
+
+  // Click opens the local note; the source link lives in the context menu.
+  card.addEventListener('click', (e) => {
+    if (e.defaultPrevented) return;
+    const file = plugin.app.vault.getAbstractFileByPath(item.path);
+    if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
+  });
+  card.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showCardMenu(plugin, item, view, { x: e.clientX, y: e.clientY });
+  });
+
+  // Touch long-press opens the same menu: mobile webviews fire neither
+  // contextmenu nor HTML5 drag events, so this is the whole mobile write path.
+  let lpTimer = null, lpStart = null;
+  const lpCancel = () => { if (lpTimer != null) { window.clearTimeout(lpTimer); lpTimer = null; } };
+  card.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    lpStart = { x: e.clientX, y: e.clientY };
+    lpCancel();
+    lpTimer = window.setTimeout(() => {
+      lpTimer = null;
+      card.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); },
+        { once: true, capture: true });
+      showCardMenu(plugin, item, view, lpStart);
+    }, 480);
+  });
+  card.addEventListener('pointermove', (e) => {
+    if (lpTimer != null && lpStart
+      && Math.hypot(e.clientX - lpStart.x, e.clientY - lpStart.y) > 8) lpCancel();
+  });
+  card.addEventListener('pointerup', lpCancel);
+  card.addEventListener('pointercancel', lpCancel);
+  return card;
+}
+
+// The card menu, shared by right-click (desktop) and long-press (touch).
+function showCardMenu(plugin, item, view, pos) {
+  const menu = new Menu();
+  menu.addItem((mi) => mi.setTitle(isDone(item) ? 'Reopen' : 'Mark done')
+    .setIcon('check').onClick(() => plugin.toggleDoneLocal(item.path)));
+  menu.addItem((mi) => mi.setTitle(item.weeklyGoal ? 'Unmark weekly goal' : 'Mark as weekly goal')
+    .setIcon('star').onClick(() => plugin.toggleWeeklyGoal(item.path)));
+  menu.addItem((mi) => mi.setTitle('Plan on...')
+    .setIcon('calendar').onClick(() => showPlanMenu(plugin, item, view, pos)));
+  if (item.plannedDay) {
+    menu.addItem((mi) => mi.setTitle('Send back to tray')
+      .setIcon('inbox').onClick(() => plugin.unassignItem(item.path)));
+  }
+  if (item.url) {
+    menu.addItem((mi) => mi.setTitle(`Open in ${(SOURCES[item.source] || {}).label || item.source}`)
+      .setIcon('external-link').onClick(() => window.open(item.url, '_external')));
+  }
+  menu.addItem((mi) => mi.setTitle('Open note')
+    .setIcon('file-text').onClick(() => {
+      const file = plugin.app.vault.getAbstractFileByPath(item.path);
+      if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
+    }));
+  menu.showAtPosition(pos);
+}
+
+// Tap-to-plan: pick a day and half of the board's current week. The card
+// lands at the end of the lane (order = wall-clock ms, past every hand
+// order); the next drag renormalizes via orderForInsert.
+function showPlanMenu(plugin, item, view, pos) {
+  const weekStart = (view && view.weekStart) || mondayOf(todayStr());
+  const today = todayStr();
+  const days = weekDays(weekStart)
+    .filter((d, i) => plugin.settings.showWeekend || i < 5);
+  const menu = new Menu();
+  days.forEach((day, i) => {
+    const label = `${DAY_NAMES[i]} ${fmtDayNum(day)}${day === today ? ' (today)' : ''}`;
+    for (const half of ['am', 'pm']) {
+      menu.addItem((mi) => mi
+        .setTitle(`${label} · ${half === 'am' ? 'morning' : 'afternoon'}`)
+        .setIcon(half === 'am' ? 'sunrise' : 'sunset')
+        .onClick(() => plugin.assignItem(item.path, day, half, Date.now())));
+    }
+  });
+  menu.showAtPosition(pos);
+}
+
+// Wire one element as a drop lane. onDrop(path, index) receives the insertion
+// index among the lane's current sequence: timed event chips AND non-dragged
+// task cards in DOM order (the same order laneSequence() rendered them in), so
+// a task can be dropped above, between or below calendar events. Event chips
+// are never draggable; they only take part as positions.
+function wireDropLane(laneEl, onDrop) {
+  const clearLine = () => laneEl.querySelectorAll('.iplan-drop-line').forEach((el) => el.remove());
+  const cardsOf = () => Array.from(laneEl.querySelectorAll('.iplan-event, .iplan-card:not(.is-dragging)'));
+  const indexForY = (y) => {
+    const cards = cardsOf();
+    for (let i = 0; i < cards.length; i++) {
+      const r = cards[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) return i;
+    }
+    return cards.length;
+  };
+  laneEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    laneEl.classList.add('is-drop-target');
+    clearLine();
+    const idx = indexForY(e.clientY);
+    const line = document.createElement('div');
+    line.className = 'iplan-drop-line';
+    const cards = cardsOf();
+    if (idx >= cards.length) laneEl.appendChild(line);
+    else laneEl.insertBefore(line, cards[idx]);
+  });
+  laneEl.addEventListener('dragleave', (e) => {
+    if (laneEl.contains(e.relatedTarget)) return;
+    laneEl.classList.remove('is-drop-target');
+    clearLine();
+  });
+  laneEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    laneEl.classList.remove('is-drop-target');
+    const idx = indexForY(e.clientY);
+    clearLine();
+    const path = e.dataTransfer.getData('text/plain');
+    if (path) onDrop(path, idx);
+  });
+}
+
+/* ========================================================================== *
+ * Event detail modal - a calendar chip opens this on click (read-only)
+ * ========================================================================== */
+
+// Deep link into Google Calendar's edit view for an event that arrived via a
+// Google secret iCal feed. The feed URL carries the calendarId
+// (https://calendar.google.com/calendar/ical/<calendarId>/private-<key>/basic.ics);
+// Google's per-event id is the ICS UID's localpart (trailing @google.com
+// stripped), suffixed for expanded recurrences with the occurrence start
+// (UTC basic format for timed, YYYYMMDD for all-day). The edit URL's eid is
+// base64url("<eventId> <calendarId>") with the = padding stripped.
+// Returns null when the feed is not that Google shape (caller falls back to
+// a day-view link).
+function googleCalendarEventUrl(ev, icsUrl) {
+  const normalized = String(icsUrl || '').trim().replace(/^webcal:\/\//i, 'https://');
+  const m = /^https:\/\/calendar\.google\.com\/calendar\/ical\/([^/?#]+)\//i.exec(normalized);
+  if (!m || !ev || !ev.masterUid) return null;
+  const calendarId = decodeURIComponent(m[1]);
+  let eventId = ev.masterUid.replace(/@google\.com$/i, '');
+  if (ev.recurring && ev.occStartUtc) eventId += `_${ev.occStartUtc}`;
+  let b64;
+  try { b64 = btoa(`${eventId} ${calendarId}`); } catch { return null; } // non-Latin1 uid
+  const eid = b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `https://calendar.google.com/calendar/u/0/r/eventedit/${eid}`;
+}
+
+class EventDetailModal extends Modal {
+  constructor(app, ev, icsUrl, inkPluginId) {
+    super(app);
+    this.ev = ev;
+    this.icsUrl = icsUrl || '';
+    this.inkPluginId = inkPluginId || '';
+  }
+  onOpen() {
+    const { contentEl } = this;
+    const ev = this.ev;
+    contentEl.addClass('iplan-event-modal');
+    markInkPlugin(contentEl, this.inkPluginId);
+    const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' GOOGLE CALENDAR' });
+    contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: ev.title });
+    const meta = contentEl.createDiv({ cls: 'iplan-event-modal-meta' });
+    const dayLabel = (() => {
+      const [y, m, d] = ev.day.split('-').map(Number);
+      const idx = (new Date(y, m - 1, d, 12).getDay() + 6) % 7;
+      return `${DAY_NAMES[idx]} ${fmtDayNum(ev.day)}`;
+    })();
+    // Labeled property rows: when / location / conference are first-class
+    // fields, never only buried in the description text.
+    const metaRow = (label, value, href) => {
+      const rowEl = meta.createDiv({ cls: 'iplan-event-modal-row' });
+      rowEl.createSpan({ cls: 'iplan-event-modal-row-label', text: label });
+      if (href) {
+        const a = rowEl.createEl('a', { cls: 'iplan-event-modal-row-value', text: value, href });
+        a.addEventListener('click', (e) => { e.preventDefault(); window.open(href, '_external'); });
+      } else {
+        rowEl.createSpan({ cls: 'iplan-event-modal-row-value', text: value });
+      }
+    };
+    metaRow('WHEN', ev.allDay && !ev.start
+      ? `${dayLabel} ALL DAY`
+      : `${dayLabel} ${fmtTimeHM(ev.start)} - ${fmtTimeHM(ev.end)}`);
+    if (ev.continues) meta.createDiv({ cls: 'iplan-event-modal-when', text: 'CONTINUED FROM AN EARLIER DAY' });
+    if (ev.location) metaRow('WHERE', ev.location);
+    const confUrl = detectConferenceUrl(ev);
+    if (confUrl) metaRow('CONFERENCE', confUrl, confUrl);
+    const descText = htmlishToText(ev.description);
+    if (descText) {
+      const desc = contentEl.createDiv({ cls: 'iplan-event-modal-desc' });
+      linkifyInto(desc, descText);
+    }
+    const row = contentEl.createDiv({ cls: 'iplan-event-modal-actions' });
+    // JOIN MEETING is the primary action when the event carries a meeting URL.
+    if (confUrl) {
+      const btn = row.createEl('button', { cls: 'iplan-event-modal-open is-primary', text: 'JOIN MEETING' });
+      btn.addEventListener('click', () => window.open(confUrl, '_external'));
+    }
+    const gcalUrl = googleCalendarEventUrl(ev, this.icsUrl);
+    if (gcalUrl) {
+      const btn = row.createEl('button', { cls: 'iplan-event-modal-open', text: 'EDIT IN GOOGLE CALENDAR' });
+      btn.addEventListener('click', () => window.open(gcalUrl, '_external'));
+    } else {
+      // Non-Google feed (or unparsable feed URL): land on the day instead.
+      const [y, mo, d] = ev.day.split('-').map(Number);
+      const dayUrl = `https://calendar.google.com/calendar/u/0/r/day/${y}/${mo}/${d}`;
+      const btn = row.createEl('button', { cls: 'iplan-event-modal-open', text: 'OPEN CALENDAR' });
+      btn.addEventListener('click', () => window.open(dayUrl, '_external'));
+    }
+    // A URL property on a Google event points back at the event itself; the
+    // edit button above already covers it, so only render a second button for
+    // genuinely external links (and not for the meeting link again).
+    if (ev.url && ev.url !== confUrl && !(gcalUrl && /google\.com\/calendar/i.test(ev.url))) {
+      const btn = row.createEl('button', { cls: 'iplan-event-modal-open is-secondary', text: 'OPEN EVENT LINK' });
+      btn.addEventListener('click', () => window.open(ev.url, '_external'));
+    }
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ========================================================================== *
+ * Board view - the weekly planner in the main pane
+ * ========================================================================== */
+
+class PlannerBoardView extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.weekStart = mondayOf(todayStr());
+    this.mode = 'week'; // 'week' | 'day'
+    this.day = todayStr();
+  }
+
+  getViewType() { return BOARD_VIEW_TYPE; }
+  getDisplayText() { return 'Planner'; }
+  getIcon() { return 'calendar-range'; }
+
+  async onOpen() {
+    this.contentEl.addClass('iplan-root');
+    markInkPlugin(this.contentEl, this.plugin.manifest.id);
+    this.render();
+    // Minute tick keeps the now-rail honest.
+    this.registerInterval(window.setInterval(() => this.updateNowRail(), 60000));
+    if (this.plugin.anySourceConfigured() && !this.plugin.lastSyncAt && !this.plugin.syncing) {
+      this.plugin.syncNow(false);
+    }
+  }
+
+  async onClose() { this.contentEl.empty(); }
+
+  getState() { return { weekStart: this.weekStart, mode: this.mode, day: this.day }; }
+  async setState(state, result) {
+    if (state) {
+      if (state.weekStart) this.weekStart = state.weekStart;
+      if (state.mode === 'day' || state.mode === 'week') this.mode = state.mode;
+      if (state.day) this.day = state.day;
+      this.render();
+    }
+    return super.setState(state, result);
+  }
+
+  setWeek(weekStart) { this.weekStart = weekStart; this.render(); }
+  setDay(day) { this.day = day; this.weekStart = mondayOf(day); this.render(); }
+  setMode(mode) {
+    this.mode = mode;
+    if (mode === 'day' && !this.day) this.day = todayStr();
+    this.render();
+  }
+
+  render() {
+    const el = this.contentEl;
+    el.empty();
+    const today = todayStr();
+    const isDay = this.mode === 'day';
+    const items = collectItems(this.plugin.app);
+    const splitHour = this.plugin.splitHour();
+    const eventsWeekStart = isDay ? mondayOf(this.day) : this.weekStart;
+    const events = this.plugin.calendarDefs
+      ? icsEventsForWeek(this.plugin.calendarDefs, eventsWeekStart, splitHour)
+      : [];
+
+    /* ---- masthead ---- */
+    const head = el.createDiv({ cls: 'iplan-masthead' });
+    const kicker = head.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' ICOR PLANNER' });
+    const titleRow = head.createDiv({ cls: 'iplan-title-row' });
+    titleRow.createEl('h1', {
+      cls: 'iplan-title',
+      text: isDay
+        ? fmtDayTitle(this.day, today)
+        : (this.weekStart === mondayOf(today) ? 'This Week.' : 'The Week.'),
+    });
+
+    const nav = titleRow.createDiv({ cls: 'iplan-nav' });
+    // WEEK | DAY segment switch
+    const seg = nav.createDiv({ cls: 'iplan-seg' });
+    const mkSeg = (label, mode) => {
+      const b = seg.createEl('button', { cls: 'iplan-seg-btn', text: label });
+      if (this.mode === mode) b.addClass('is-active');
+      b.addEventListener('click', () => this.setMode(mode));
+    };
+    mkSeg('WEEK', 'week');
+    mkSeg('DAY', 'day');
+    const mkNavBtn = (icon, label, fn) => {
+      const b = nav.createEl('button', { cls: 'iplan-nav-btn', attr: { 'aria-label': label } });
+      setIcon(b, icon);
+      b.addEventListener('click', fn);
+      return b;
+    };
+    if (isDay) {
+      mkNavBtn('chevron-left', 'Previous day', () => this.setDay(addDays(this.day, -1)));
+      const todayBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-nav-today', text: 'TODAY' });
+      todayBtn.addEventListener('click', () => this.setDay(todayStr()));
+      mkNavBtn('chevron-right', 'Next day', () => this.setDay(addDays(this.day, 1)));
+      nav.createSpan({ cls: 'iplan-week-label', text: fmtDayLabel(this.day) });
+    } else {
+      mkNavBtn('chevron-left', 'Previous week', () => this.setWeek(addDays(this.weekStart, -7)));
+      const todayBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-nav-today', text: 'TODAY' });
+      todayBtn.addEventListener('click', () => this.setWeek(mondayOf(todayStr())));
+      mkNavBtn('chevron-right', 'Next week', () => this.setWeek(addDays(this.weekStart, 7)));
+      nav.createSpan({ cls: 'iplan-week-label', text: fmtWeekLabel(this.weekStart) });
+    }
+    const syncBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-sync-btn', attr: { 'aria-label': 'Sync now' } });
+    setIcon(syncBtn, 'refresh-cw');
+    if (this.plugin.syncing) syncBtn.addClass('is-syncing');
+    syncBtn.addEventListener('click', () => this.plugin.syncNow(true));
+
+    /* ---- source status line (only when something needs saying) ---- */
+    const notices = [];
+    for (const key of ['todoist', 'clickup', 'email']) {
+      const st = this.plugin.syncStatus[key];
+      if (st && !st.ok && st.reason !== 'no-token') notices.push(`${SOURCES[key].label}: ${st.message}`);
+    }
+    if (this.plugin.calendarStatus && !this.plugin.calendarStatus.ok &&
+        this.plugin.calendarStatus.reason !== 'no-token') {
+      notices.push(`Calendar: ${this.plugin.calendarStatus.message}`);
+    }
+    if (!this.plugin.anySourceConfigured()) {
+      // The SAME sentence the tray leads with, from the same constant. Two
+      // surfaces describing one state in two different sentences is how a
+      // first run starts feeling unfinished, and the old wording said "API
+      // keys" when the calendar takes a URL and the mailbox takes three
+      // fields. The tray beside this carries the two controls; the board
+      // states the fact.
+      notices.push(TRAY_COPY.lead);
+    }
+    if (notices.length) {
+      const bar = el.createDiv({ cls: 'iplan-notices' });
+      for (const n of notices) bar.createDiv({ cls: 'iplan-notice', text: n });
+    }
+
+    /* ---- board ---- */
+    const visibleDays = isDay
+      ? [this.day]
+      : weekDays(this.weekStart).filter((d, i) => this.plugin.settings.showWeekend || i < 5);
+    const board = el.createDiv({ cls: 'iplan-board' });
+    if (isDay) board.addClass('is-day');
+    board.style.setProperty('--iplan-day-count', String(visibleDays.length));
+
+    const itemsByCell = new Map(); // day|half -> items
+    for (const it of items) {
+      if (!it.plannedDay || !it.plannedHalf) continue;
+      const key = `${it.plannedDay}|${it.plannedHalf}`;
+      if (!itemsByCell.has(key)) itemsByCell.set(key, []);
+      itemsByCell.get(key).push(it);
+    }
+    for (const list of itemsByCell.values()) list.sort((a, b) => a.plannedOrder - b.plannedOrder);
+
+    const eventsByCell = new Map();
+    const allDayByDay = new Map();
+    for (const ev of events) {
+      if (ev.allDay || !ev.half) {
+        if (!allDayByDay.has(ev.day)) allDayByDay.set(ev.day, []);
+        allDayByDay.get(ev.day).push(ev);
+      } else {
+        const key = `${ev.day}|${ev.half}`;
+        if (!eventsByCell.has(key)) eventsByCell.set(key, []);
+        eventsByCell.get(key).push(ev);
+      }
+    }
+
+    for (const day of visibleDays) {
+      const dayIdx = (new Date(day + 'T12:00:00').getDay() + 6) % 7;
+      const col = board.createDiv({ cls: 'iplan-day' });
+      if (day === today) col.addClass('is-today');
+      if (day < today) col.addClass('is-past'); // YYYY-MM-DD compares as text
+
+      const colHead = col.createDiv({ cls: 'iplan-day-head' });
+      colHead.createSpan({ cls: 'iplan-day-name', text: DAY_NAMES[dayIdx] });
+      colHead.createSpan({ cls: 'iplan-day-date', text: fmtDayNum(day) });
+      if (day === today) colHead.createSpan({ cls: 'iplan-day-now', text: 'NOW' });
+
+      const allDay = allDayByDay.get(day) || [];
+      if (allDay.length) {
+        const band = col.createDiv({ cls: 'iplan-allday' });
+        for (const ev of allDay) {
+          const chip = band.createDiv({ cls: 'iplan-event iplan-event-allday' });
+          if (ev.continues) chip.addClass('is-continues');
+          chip.createSpan({ cls: 'iplan-event-title', text: ev.title });
+          this.wireEvent(chip, ev);
+        }
+      }
+
+      for (const half of ['am', 'pm']) {
+        if (half === 'pm') {
+          const s = this.plugin.settings;
+          if (s.lunchEnabled) {
+            const band = col.createDiv({ cls: 'iplan-lunch' });
+            band.style.height = `${lunchBandHeight(s.lunchStart, s.lunchEnd)}px`;
+            band.createSpan({
+              cls: 'iplan-split-time',
+              text: `${s.lunchStart || '12:30'} - ${s.lunchEnd || '13:30'} LUNCH`,
+            });
+          } else {
+            const divider = col.createDiv({ cls: 'iplan-split' });
+            divider.createSpan({ cls: 'iplan-split-time', text: s.splitTime || '13:00' });
+          }
+        }
+        const lane = col.createDiv({ cls: 'iplan-lane', attr: { 'data-day': day, 'data-half': half } });
+        const laneEvents = (eventsByCell.get(`${day}|${half}`) || []);
+        const cell = itemsByCell.get(`${day}|${half}`) || [];
+        // One sequential order per lane: event 09:00, task, event 11:00, task.
+        for (const entry of laneSequence(laneEvents, cell)) {
+          if (entry.kind === 'event') {
+            const chip = lane.createDiv({ cls: 'iplan-event' });
+            chip.createSpan({ cls: 'iplan-event-time', text: `${fmtTimeHM(entry.ev.start)}` });
+            chip.createSpan({ cls: 'iplan-event-title', text: entry.ev.title });
+            this.wireEvent(chip, entry.ev);
+          } else {
+            lane.appendChild(renderCard(this.plugin, entry.it, 'board', this));
+          }
+        }
+        if (!laneEvents.length && !cell.length) lane.createDiv({ cls: 'iplan-lane-empty', text: half === 'am' ? 'morning' : 'afternoon' });
+
+        wireDropLane(lane, (path, index) => {
+          // Same mixed sequence the lane was rendered from, minus the dragged
+          // task, so `index` (computed over chips + cards) maps 1:1.
+          const current = laneSequence(laneEvents, cell).filter((x) => x.kind === 'event' || x.path !== path);
+          const order = this.plugin.orderForInsert(current, index);
+          this.plugin.assignItem(path, day, half, order);
+        });
+      }
+
+      if (day === today) {
+        const rail = col.createDiv({ cls: 'iplan-now-rail' });
+        col.dataset.railState = 'on';
+        this._todayCol = col;
+        this._nowRail = rail;
+        // cockpit countdown: time left in the current half, right under the head
+        const cd = document.createElement('div');
+        cd.className = 'iplan-countdown';
+        const track = document.createElement('div');
+        track.className = 'iplan-countdown-track';
+        const fill = document.createElement('div');
+        fill.className = 'iplan-countdown-fill';
+        track.appendChild(fill);
+        const cdLabel = document.createElement('span');
+        cdLabel.className = 'iplan-countdown-label';
+        cd.appendChild(track);
+        cd.appendChild(cdLabel);
+        colHead.insertAdjacentElement('afterend', cd);
+        this._countdown = { wrap: cd, fill, label: cdLabel };
+      }
+    }
+    this.updateNowRail();
+
+    /* ---- foot: last sync stamp ---- */
+    const foot = el.createDiv({ cls: 'iplan-foot' });
+    const stamp = this.plugin.lastSyncAt
+      ? `SYNCED ${fmtTimeHM(this.plugin.lastSyncAt)}`
+      : (this.plugin.syncing ? 'SYNCING...' : 'NOT SYNCED YET');
+    foot.createSpan({ text: stamp });
+    foot.createSpan({ cls: 'iplan-foot-dot', text: ' · ' });
+    foot.createSpan({ text: fmtOpenItems(items.filter((i) => !isDone(i)).length) });
+  }
+
+  wireEvent(chip, ev) {
+    // Cache-rehydrated events render pale + pulsing until a live fetch lands.
+    wireEventChip(this.plugin, chip, ev);
+  }
+
+  // The live day-progress marker on today's column (cockpit's progress rail).
+  updateNowRail() {
+    if (!this._todayCol || !this._nowRail || !this._todayCol.isConnected) return;
+    const parse = (hm, fallback) => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(hm || '');
+      return m ? Number(m[1]) * 60 + Number(m[2]) : fallback;
+    };
+    const start = parse(this.plugin.settings.dayStart, 480);
+    const end = parse(this.plugin.settings.dayEnd, 1080);
+    const now = new Date();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const pct = Math.max(0, Math.min(1, (mins - start) / Math.max(1, end - start)));
+    this._todayCol.style.setProperty('--iplan-now-pct', String(pct));
+    this._todayCol.dataset.railState = mins < start ? 'before' : (mins > end ? 'after' : 'on');
+    if (this._countdown && this._countdown.wrap.isConnected) {
+      const seg = segmentInfo(this.plugin.settings, mins);
+      if (!seg) {
+        this._countdown.wrap.style.display = 'none';
+      } else {
+        this._countdown.wrap.style.display = '';
+        this._countdown.wrap.dataset.seg = seg.name.toLowerCase();
+        this._countdown.fill.style.width = `${Math.round(seg.pct * 100)}%`;
+        this._countdown.label.textContent = `${seg.name} \u00b7 ${fmtLeft(seg.leftMin)}`;
+      }
+    }
+  }
+}
+
+/* ========================================================================== *
+ * Tray view - the right-panel companion, tabbed since 0.6.0:
+ *   TASKS  - weekly goals pinned + unscheduled items by source (the classic
+ *            tray; whole-panel drop unassigns). Internal id 'sync' (pre-0.6.1
+ *            name, kept so no state migration is needed). Since 0.6.1 this
+ *            tab ONLY exists while the planner board is the context
+ *            (trayVisibleTabs); everywhere else the strip is AGENDA | GOALS.
+ *   AGENDA - what is planned for TODAY, chronological: all-day chips, then
+ *            MORNING / AFTERNOON as the board lane's mixed sequence.
+ *            Read-plus-click in v1: no drop targets here.
+ *   GOALS  - only the weekly-goals list.
+ * Default follows context (trayDefaultTab): board active -> TASKS, any other
+ * main-area page -> AGENDA. A manual pick sticks until the context flips.
+ * ========================================================================== */
+
+const TRAY_TABS = ['sync', 'agenda', 'goals'];
+
+// Tom's default rule: with the planner board active the tray assists planning
+// (SYNC); on every other page it answers "what is planned today" (AGENDA).
+// GOALS is never a default anywhere.
+function trayDefaultTab(contextIsBoard) {
+  return contextIsBoard ? 'sync' : 'agenda';
+}
+
+// 0.6.1, Tom's rule: "your tasks" (the TASKS tab) should only show on the
+// planner page; on all other pages only AGENDA and GOALS exist. Pure helper
+// so render() and setTab() share one source of truth.
+function trayVisibleTabs(contextIsBoard) {
+  return contextIsBoard ? TRAY_TABS : TRAY_TABS.filter((t) => t !== 'sync');
+}
+
+// Rendered label per tab id. 'sync' renders as TASKS since 0.6.1 (Tom calls
+// this panel "your tasks"); the id stays 'sync' so nothing persisted or
+// wired to it needs a migration.
+function trayTabLabel(tab) {
+  return tab === 'sync' ? 'TASKS' : tab.toUpperCase();
+}
+
+// The guarded active tab: whatever state claims, a tab that is not visible
+// in this context collapses to the context default - so 'sync' in a
+// non-board context can only ever come out as 'agenda'. Pure so the
+// invariant is testable headless.
+function trayEffectiveTab(contextIsBoard, activeTab) {
+  return trayVisibleTabs(contextIsBoard).includes(activeTab)
+    ? activeTab
+    : trayDefaultTab(contextIsBoard);
+}
+
+/* ---- the tray's honest empty states (2026-08-30) -----------------------------
+ *
+ * The bug this replaces: a fresh vault with no keys showed "WAITING FOR THE
+ * FIRST SYNC." under all three sources. No sync was coming, because no key
+ * existed and syncNow() is never called without one. The message told a new
+ * user to wait for something that could not happen, and made an unconfigured
+ * plugin look like a broken one.
+ *
+ * Four states, three of them previously collapsed into one:
+ *   unconfigured  no credential. Waiting is a lie; the way out is a CTA.
+ *   error         configured, the fetch failed. Say what went wrong.
+ *   unsynced      configured, nothing has run yet. NOW waiting is honest.
+ *   empty         configured, a healthy fetch, genuinely zero items.
+ * and `null`, meaning the list speaks for itself and the tray says nothing.
+ *
+ * Configuration is checked FIRST and beats a stale status: a user who deletes
+ * a key still has last session's ok status in memory, and "Nothing
+ * unscheduled" would be the same class of lie one state over.
+ */
+
+// Copy per the design system, 2026-08-30. `lead` names NO source on purpose: a list in
+// a status line is a settings page leaking into a state report, the section
+// heads below already name each source, and a hardcoded list drifts silently
+// the day a fifth source is added. "Set up" rather than "add a key" because
+// the calendar takes a URL and the mailbox takes a host, an address and an app
+// password; "key" was already wrong for two of the four.
+const TRAY_COPY = {
+  lead: 'Nothing is connected yet. Set up your task sources in settings, or add your own tasks by hand.',
+  leadAction: 'Open settings',
+  unconfigured: () => 'Not connected.',
+  connectAction: 'Connect',
+  unsynced: 'Waiting for the first sync.',
+  empty: 'Nothing unscheduled.',
+  manualEmpty: 'Nothing added yet.',
+  errorFallback: 'Unavailable.',
+};
+
+function trayEmptyState(source, configured, status, count, total) {
+  // Manual has no credential and no fetch. `count` is the unscheduled list;
+  // `total` is every manual item that exists. The live pass 2026-08-30 caught
+  // the two being conflated: with the only manual task dragged onto the board
+  // the tray said "nothing added yet", denying a task that exists. The list
+  // under a source head is the UNSCHEDULED list, so its empty copy states
+  // that ("nothing unscheduled", the same vocabulary as the synced sections)
+  // and never where the items went - a done-but-unscheduled item and a pinned
+  // weekly goal both empty this list without being on the board.
+  if (source === MANUAL_SOURCE) {
+    if (count > 0) return null;
+    const everAdded = (total || 0) > 0;
+    return { kind: 'empty', text: everAdded ? TRAY_COPY.empty : TRAY_COPY.manualEmpty };
+  }
+  if (!configured) return { kind: 'unconfigured', text: TRAY_COPY.unconfigured(source) };
+  // A configured source reporting no-token means settings and the connector
+  // disagree; trust the connector's message rather than inventing one.
+  if (status && !status.ok) {
+    return { kind: 'error', text: status.message || TRAY_COPY.errorFallback };
+  }
+  if (!status) return count > 0 ? null : { kind: 'unsynced', text: TRAY_COPY.unsynced };
+  return count > 0 ? null : { kind: 'empty', text: TRAY_COPY.empty };
+}
+
+// The whole-tray view of the connection state, so the renderer can lead with
+// ONE setup call to action instead of repeating the same sentence under three
+// empty sections. `allCold` is about the three TASK sources only: the calendar
+// has no tray section (it never becomes per-item notes), so a calendar-only
+// setup still leaves the task tray with nothing to show and still earns the
+// lead block.
+function trayConnectionState(settings) {
+  const configured = SYNCED_SOURCES.filter((k) => sourceConfigured(settings, k));
+  return {
+    configured,
+    unconfigured: SYNCED_SOURCES.filter((k) => !sourceConfigured(settings, k)),
+    calendar: sourceConfigured(settings, 'calendar'),
+    allCold: configured.length === 0,
+  };
+}
+
+/* ---- opening the board should reveal the tray ----------------------------
+ *
+ * ...but exactly once per session. A user who collapses the right sidebar or
+ * closes the tray has said no, and re-revealing on every board open is
+ * fighting them. Session-scoped rather than persisted on purpose: a wrongly
+ * recorded "dismissed" that survives a restart is the worse failure, and
+ * onClose also fires on plugin unload and workspace reload, so it cannot tell
+ * a dismissal from a shutdown.
+ *
+ * 'already-visible' does NOT spend the one reveal: nothing was forced on
+ * anyone, so a later collapse-then-reopen still gets its single nudge.
+ */
+function trayRevealDecision(state) {
+  const s = state || {};
+  if (s.autoRevealedThisSession) return 'none';
+  if (!s.trayLeafExists) return 'create-and-reveal';
+  if (s.rightSplitCollapsed) return 'reveal';
+  return 'already-visible';
+}
+
+function trayRevealSpendsTurn(decision) {
+  return decision === 'create-and-reveal' || decision === 'reveal';
+}
+
+// Section model for the AGENDA tab, board-parity by construction: events are
+// the week's expanded set (icsEventsForWeek output), tasks the full item list.
+// Banding mirrors the board exactly - `allDay || !half` goes to the top band
+// (so continuation days of multi-day timed events land there too), timed
+// events join tasks planned for today's half in ONE laneSequence per half.
+// Done tasks stay in (struck at render, like the board); tasks without a
+// planned half are skipped (the board skips them too). Events pass through
+// by reference so the stale treatment and the detail modal see the real
+// objects. No splitHour parameter: expanded events already carry their half.
+function agendaSections(items, events, today) {
+  const allDay = [];
+  const evHalf = { am: [], pm: [] };
+  for (const ev of events || []) {
+    if (ev.day !== today) continue;
+    if (ev.allDay || !ev.half) allDay.push(ev);
+    else evHalf[ev.half === 'am' ? 'am' : 'pm'].push(ev);
+  }
+  const taskHalf = { am: [], pm: [] };
+  for (const it of items || []) {
+    if (it.plannedDay !== today || !it.plannedHalf) continue;
+    taskHalf[it.plannedHalf].push(it);
+  }
+  return {
+    day: today,
+    allDay,
+    am: laneSequence(evHalf.am, taskHalf.am),
+    pm: laneSequence(evHalf.pm, taskHalf.pm),
+  };
+}
+
+class PlannerTrayView extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.collapsed = {};
+    this.composerOpen = false;
+    this.composerDraft = '';
+    this._composerWantsFocus = false;
+    this.contextIsBoard = false;
+    this.activeTab = trayDefaultTab(false);
+  }
+
+  getViewType() { return TRAY_VIEW_TYPE; }
+  getDisplayText() { return 'Your Tasks'; }
+  getIcon() { return 'check-square'; }
+
+  async onOpen() {
+    this.contentEl.addClass('iplan-tray-root');
+    markInkPlugin(this.contentEl, this.plugin.manifest.id);
+
+    // Whole-panel unassign drop target, wired ONCE on the persistent
+    // contentEl (empty() clears children, not the element's own listeners -
+    // wiring inside render() stacked a duplicate set per re-render). Guarded
+    // to the SYNC tab: AGENDA and GOALS are read-plus-click surfaces.
+    const el = this.contentEl;
+    el.addEventListener('dragover', (e) => {
+      if (this.activeTab !== 'sync') return;
+      e.preventDefault();
+      el.classList.add('is-drop-target');
+    });
+    el.addEventListener('dragleave', (e) => {
+      if (!el.contains(e.relatedTarget)) el.classList.remove('is-drop-target');
+    });
+    el.addEventListener('drop', (e) => {
+      el.classList.remove('is-drop-target');
+      if (this.activeTab !== 'sync') return;
+      e.preventDefault();
+      const path = e.dataTransfer.getData('text/plain');
+      if (path) this.plugin.unassignItem(path);
+    });
+
+    // Context default at open: read the most recent MAIN-AREA leaf (the
+    // sidebar neighbors, this tray included, are not context).
+    try {
+      const ctx = typeof this.app.workspace.getMostRecentLeaf === 'function'
+        ? this.app.workspace.getMostRecentLeaf(this.app.workspace.rootSplit)
+        : null;
+      this.contextIsBoard = !!(ctx && ctx.view && typeof ctx.view.getViewType === 'function'
+        && ctx.view.getViewType() === BOARD_VIEW_TYPE);
+    } catch { this.contextIsBoard = false; }
+    this.activeTab = trayDefaultTab(this.contextIsBoard);
+
+    this.registerEvent(this.app.workspace.on('active-leaf-change',
+      (leaf) => this.onActiveLeafChange(leaf)));
+    this.render();
+  }
+  async onClose() { this.contentEl.empty(); }
+
+  // The context default reasserts ONLY when the context flips between board
+  // and non-board; a manual tab pick survives everything else. Sidebar leaves
+  // (this tray itself, the file explorer, ...) never count as context, so
+  // clicking into the tray does not flip tabs.
+  onActiveLeafChange(leaf) {
+    if (!leaf || !leaf.view || leaf.view === this) return;
+    let root = null;
+    try { root = typeof leaf.getRoot === 'function' ? leaf.getRoot() : null; } catch { root = null; }
+    if (!root || root !== this.app.workspace.rootSplit) return;
+    const isBoard = typeof leaf.view.getViewType === 'function'
+      && leaf.view.getViewType() === BOARD_VIEW_TYPE;
+    if (isBoard === this.contextIsBoard) return;
+    this.contextIsBoard = isBoard;
+    this.activeTab = trayDefaultTab(isBoard);
+    this.render();
+  }
+
+  setTab(tab) {
+    if (!trayVisibleTabs(this.contextIsBoard).includes(tab) || tab === this.activeTab) return;
+    this.activeTab = tab;
+    this.render();
+  }
+
+  render() {
+    // Hard guard: 'sync' must never survive into a non-board render, even
+    // through a path that skips onActiveLeafChange (e.g. a direct render()
+    // after some other state change). Falls back to the context default.
+    this.activeTab = trayEffectiveTab(this.contextIsBoard, this.activeTab);
+    const el = this.contentEl;
+    // empty() destroys the composer input. If it held the caret a moment ago -
+    // a sync landing mid-typing is the common way in - hand the caret back
+    // afterwards. This is restoring OUR OWN focus, never taking someone else's:
+    // the flag is only set when the field we are about to destroy had it.
+    try {
+      const active = el.ownerDocument && el.ownerDocument.activeElement;
+      if (active && el.contains(active) && active.classList.contains('iplan-add-input')) {
+        this._composerWantsFocus = true;
+      }
+    } catch { /* no document in a headless context */ }
+    el.empty();
+    const today = todayStr();
+    const items = collectItems(this.plugin.app);
+
+    const head = el.createDiv({ cls: 'iplan-tray-head' });
+    const kicker = head.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' YOUR TASKS ' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ` ${trayTabLabel(this.activeTab)}` });
+    // The sync button stays visible on every tab: it syncs everything.
+    const syncBtn = head.createEl('button', { cls: 'iplan-nav-btn iplan-sync-btn', attr: { 'aria-label': 'Sync now' } });
+    setIcon(syncBtn, 'refresh-cw');
+    if (this.plugin.syncing) syncBtn.addClass('is-syncing');
+    syncBtn.addEventListener('click', () => this.plugin.syncNow(true));
+
+    // Tab strip: same visual family as the board's WEEK | DAY switch.
+    const tabsRow = el.createDiv({ cls: 'iplan-tray-tabs' });
+    const seg = tabsRow.createDiv({ cls: 'iplan-seg', attr: { role: 'tablist', 'aria-label': 'Tray panel' } });
+    for (const tab of trayVisibleTabs(this.contextIsBoard)) {
+      const b = seg.createEl('button', {
+        cls: 'iplan-seg-btn', text: trayTabLabel(tab),
+        attr: { role: 'tab', 'aria-selected': String(this.activeTab === tab) },
+      });
+      if (this.activeTab === tab) b.addClass('is-active');
+      b.addEventListener('click', () => this.setTab(tab));
+    }
+
+    if (this.activeTab === 'agenda') this.renderAgenda(el, items, today);
+    else if (this.activeTab === 'goals') this.renderGoals(el, items);
+    else this.renderSync(el, items, today);
+  }
+
+  /* ---- AGENDA: today's plan, chronological, read-plus-click ---- */
+  renderAgenda(el, items, today) {
+    const events = this.plugin.calendarDefs
+      ? icsEventsForWeek(this.plugin.calendarDefs, mondayOf(today), this.plugin.splitHour())
+      : [];
+    const model = agendaSections(items, events, today);
+
+    const dayHead = el.createDiv({ cls: 'iplan-tray-agenda-head' });
+    dayHead.createSpan({ cls: 'iplan-tray-agenda-title', text: fmtDayTitle(today, today) });
+    dayHead.createSpan({ cls: 'iplan-week-label', text: fmtDayLabel(today) });
+
+    if (model.allDay.length) {
+      const band = el.createDiv({ cls: 'iplan-tray-allday' });
+      for (const ev of model.allDay) {
+        const chip = band.createDiv({ cls: 'iplan-event iplan-event-allday' });
+        if (ev.continues) chip.addClass('is-continues');
+        chip.createSpan({ cls: 'iplan-event-title', text: ev.title });
+        wireEventChip(this.plugin, chip, ev);
+      }
+    }
+
+    for (const half of ['am', 'pm']) {
+      const sec = el.createDiv({ cls: 'iplan-tray-section' });
+      sec.createDiv({ cls: 'iplan-tray-section-head', text: half === 'am' ? 'MORNING' : 'AFTERNOON' });
+      const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
+      const seq = model[half];
+      if (!seq.length) {
+        body.createDiv({ cls: 'iplan-tray-note', text: 'Nothing planned.' });
+        continue;
+      }
+      for (const entry of seq) {
+        if (entry.kind === 'event') {
+          const chip = body.createDiv({ cls: 'iplan-event' });
+          chip.createSpan({ cls: 'iplan-event-time', text: fmtTimeHM(entry.ev.start) });
+          chip.createSpan({ cls: 'iplan-event-title', text: entry.ev.title });
+          wireEventChip(this.plugin, chip, entry.ev);
+        } else {
+          body.appendChild(renderCard(this.plugin, entry.it, 'tray', this));
+        }
+      }
+    }
+  }
+
+  /* ---- GOALS: only the weekly-goals list ---- */
+  renderGoals(el, items) {
+    const goals = items.filter((i) => i.weeklyGoal && !isDone(i));
+    const sec = el.createDiv({ cls: 'iplan-tray-section' });
+    sec.createDiv({ cls: 'iplan-tray-section-head', text: 'WEEKLY GOALS' });
+    const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
+    if (!goals.length) {
+      body.createDiv({ cls: 'iplan-tray-note', text: 'No weekly goals yet. Mark one from a card’s menu.' });
+    }
+    for (const g of goals) body.appendChild(renderCard(this.plugin, g, 'tray', this));
+  }
+
+  /* ---- the add-a-task composer (2026-08-30) ---------------------------------
+   *
+   * Chrome: the first element below the tab strip, and its position never
+   * moves. Clicking the trigger replaces the trigger row with the input row IN
+   * PLACE, so nothing jumps and no new region opens. Escape restores the
+   * trigger. Enter commits and keeps the field open for the next one; Enter on
+   * an empty field does nothing and stays open (no error state, no red).
+   * Commit feedback is the row appearing in MANUAL, nothing more.
+   */
+  openComposer() {
+    this.composerOpen = true;
+    this._composerWantsFocus = true;
+    this.render();
+  }
+
+  closeComposer() {
+    this.composerOpen = false;
+    this.composerDraft = '';
+    this._composerWantsFocus = false;
+    this.render();
+  }
+
+  async commitComposer(value) {
+    const path = await this.plugin.addManualItem(value);
+    if (!path) return false;
+    this.composerDraft = '';
+    // Keep the field open and focused for a second entry: capture is a burst
+    // activity, and reopening the trigger between two tasks costs a click each
+    // time. emitModelChanged re-renders us, so the flag is what survives.
+    this._composerWantsFocus = true;
+    return true;
+  }
+
+  renderComposer(el) {
+    const wrap = el.createDiv({ cls: 'iplan-tray-add' });
+    if (!this.composerOpen) {
+      const btn = wrap.createEl('button', {
+        cls: 'iplan-action is-quiet',
+        attr: { type: 'button', 'aria-label': 'Add a task' },
+      });
+      btn.createSpan({ cls: 'iplan-kicker-marker', text: '+' });
+      btn.createSpan({ text: 'ADD TASK' });
+      btn.addEventListener('click', () => this.openComposer());
+      return;
+    }
+    const input = wrap.createEl('input', {
+      cls: 'iplan-add-input',
+      attr: {
+        type: 'text', placeholder: 'What needs doing?',
+        'aria-label': 'New task title', enterkeyhint: 'done',
+        autocomplete: 'off', spellcheck: 'false',
+      },
+    });
+    input.value = this.composerDraft || '';
+    input.addEventListener('input', () => { this.composerDraft = input.value; });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); this.closeComposer(); return; }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const value = input.value.trim();
+      if (!value) return;              // nothing to say, nothing to complain about
+      input.value = '';
+      this.composerDraft = '';
+      this.commitComposer(value);
+    });
+    // Blur closes an EMPTY field so the trigger comes back; a field with a
+    // draft in it stays, because losing typed text to a stray click is worse
+    // than an input that outstays its welcome.
+    //
+    // Deferred, and that is not cosmetic: blur fires BEFORE click, and
+    // closeComposer re-renders the whole tray. Closing synchronously would
+    // destroy the card the user just pressed on before its click handler ever
+    // ran, so clicking a card while the composer was open would do nothing.
+    input.addEventListener('blur', () => {
+      window.setTimeout(() => {
+        if (this.composerOpen && !(this.composerDraft || '').trim()
+          && document.activeElement !== input) this.closeComposer();
+      }, 120);
+    });
+    // Focus only when WE opened it. A re-render triggered by a sync landing
+    // must never yank the caret out of whatever the user is typing in.
+    if (this._composerWantsFocus) {
+      this._composerWantsFocus = false;
+      input.focus();
+      const n = input.value.length;
+      try { input.setSelectionRange(n, n); } catch { /* not all inputs support it */ }
+    }
+  }
+
+  /* ---- SYNC: the classic tray (goals pinned + unscheduled by source) ---- */
+  renderSync(el, items, today) {
+    const conn = trayConnectionState(this.plugin.settings);
+
+    // 1. The composer. Chrome, first, always, in every connection state.
+    this.renderComposer(el);
+
+    // 2. Nothing connected: ONE call to action, in place of the same sentence
+    //    repeated under three section heads. The three heads do not render at
+    //    all here: a head carrying a count of nothing, in a state where nothing
+    //    can arrive, is three zero-count facts. It sits directly under the
+    //    composer because the sentence points at it.
+    if (conn.allCold) {
+      const lead = el.createDiv({ cls: 'iplan-tray-lead' });
+      lead.createDiv({ cls: 'iplan-tray-lead-text', text: TRAY_COPY.lead });
+      const cta = lead.createEl('button', {
+        cls: 'iplan-action', attr: { type: 'button' }, text: TRAY_COPY.leadAction,
+      });
+      cta.addEventListener('click', () => this.plugin.openPluginSettings());
+    }
+
+    /* ---- weekly goals, pinned on top of the lists ---- */
+    const goals = items.filter((i) => i.weeklyGoal && !isDone(i));
+    if (goals.length) {
+      const sec = el.createDiv({ cls: 'iplan-tray-section' });
+      sec.createDiv({ cls: 'iplan-tray-section-head', text: 'WEEKLY GOALS' });
+      for (const g of goals) sec.appendChild(renderCard(this.plugin, g, 'tray', this));
+    }
+
+    /* ---- unscheduled, by source ---- */
+    const bucketRank = { overdue: 0, today: 1, upcoming: 2, none: 3 };
+    const anyManualEver = items.some((i) => i.source === MANUAL_SOURCE);
+    for (const key of TASK_SOURCES) {
+      // MANUAL is dropped until a manual task has existed: an empty section
+      // under a labelled ADD TASK row says nothing the user cannot already see.
+      if (key === MANUAL_SOURCE && !anyManualEver) continue;
+      // In the all-cold state the synced heads are replaced by the lead block.
+      if (key !== MANUAL_SOURCE && conn.allCold) continue;
+
+      const meta = SOURCES[key];
+      const configured = sourceConfigured(this.plugin.settings, key);
+      const st = this.plugin.syncStatus[key];
+      const list = items
+        .filter((i) => i.source === key && !i.plannedDay && !isDone(i) && !i.weeklyGoal)
+        .sort((a, b) => {
+          const br = bucketRank[dueBucketOf(a.due, today)] - bucketRank[dueBucketOf(b.due, today)];
+          if (br) return br;
+          if (a.priority !== b.priority) return a.priority - b.priority;
+          return (a.due || '9999').localeCompare(b.due || '9999');
+        });
+
+      const sec = el.createDiv({ cls: 'iplan-tray-section' });
+      const headRow = sec.createDiv({ cls: 'iplan-tray-section-head is-clickable' });
+      headRow.appendChild(sourceMarkEl(key));
+      headRow.createSpan({ text: ` ${meta.label.toUpperCase()}` });
+      headRow.createSpan({ cls: 'iplan-tray-count', text: String(list.length) });
+      const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
+      if (this.collapsed[key]) sec.addClass('is-collapsed');
+      headRow.addEventListener('click', () => {
+        this.collapsed[key] = !this.collapsed[key];
+        sec.classList.toggle('is-collapsed', this.collapsed[key]);
+      });
+
+      // The one authority on what this section is allowed to claim.
+      const total = key === MANUAL_SOURCE
+        ? items.filter((i) => i.source === MANUAL_SOURCE).length
+        : undefined;
+      const state = trayEmptyState(key, configured, st, list.length, total);
+      if (state && state.kind === 'unconfigured') {
+        const note = body.createDiv({ cls: 'iplan-tray-note is-unconfigured' });
+        note.createSpan({ text: state.text });
+        const connect = note.createEl('button', {
+          cls: 'iplan-action',
+          attr: { type: 'button', 'aria-label': `Connect ${meta.label}` },
+          text: TRAY_COPY.connectAction,
+        });
+        connect.addEventListener('click', () => this.plugin.openPluginSettings());
+      } else if (state) {
+        body.createDiv({ cls: 'iplan-tray-note', text: state.text });
+      }
+      for (const it of list) body.appendChild(renderCard(this.plugin, it, 'tray', this));
+    }
+
+    const foot = el.createDiv({ cls: 'iplan-tray-foot' });
+    foot.createSpan({ text: 'DRAG A CARD ONTO THE WEEK. DROP IT BACK HERE TO UNSCHEDULE.' });
+  }
+}
+
+/* ========================================================================== *
+ * Settings
+ * ========================================================================== */
+
+class IcorPlannerSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    const secret = (setting, get, set, placeholder) => {
+      setting.addText((t) => {
+        t.setPlaceholder(placeholder || '').setValue(get());
+        t.inputEl.type = 'password';
+        t.inputEl.autocomplete = 'off';
+        t.onChange(async (v) => { set(v.trim()); await this.plugin.saveSettings(); });
+      });
+    };
+
+    new Setting(containerEl).setName('Todoist').setHeading();
+    secret(new Setting(containerEl)
+      .setName('API token')
+      .setDesc('Todoist -> Settings -> Integrations -> Developer -> API token.'),
+      () => this.plugin.settings.todoistToken,
+      (v) => { this.plugin.settings.todoistToken = v; }, 'paste token');
+
+    new Setting(containerEl).setName('ClickUp').setHeading();
+    secret(new Setting(containerEl)
+      .setName('Personal API token')
+      .setDesc('ClickUp -> avatar -> Settings -> Apps -> API Token. Starts with pk_.'),
+      () => this.plugin.settings.clickupToken,
+      (v) => { this.plugin.settings.clickupToken = v; }, 'pk_...');
+    new Setting(containerEl)
+      .setName('Workspace ID (optional)')
+      .setDesc('Leave empty to read every workspace the token can see.')
+      .addText((t) => t.setValue(this.plugin.settings.clickupTeamId)
+        .onChange(async (v) => { this.plugin.settings.clickupTeamId = v.trim(); await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl).setName('Starred email (IMAP)').setHeading();
+    const setup = containerEl.createEl('details', { cls: 'iplan-setup' });
+    setup.createEl('summary', { text: 'Setup guide: app passwords per provider' });
+    const setupBody = setup.createEl('div', { cls: 'iplan-setup-body' });
+    setupBody.createEl('p', {
+      text: 'Any IMAP mailbox works: star or flag an email and it lands in the planner tray as a task. Reading is strictly read-only; the one write is unstarring on complete, and only while "Complete on source" is on. Most providers want an app password here, never your normal one:',
+    });
+    const setupList = setupBody.createEl('ul');
+    const li = (before, linkText, href, after) => {
+      const item = setupList.createEl('li');
+      item.appendText(before);
+      if (href) {
+        const a = item.createEl('a', { text: linkText, href });
+        a.addEventListener('click', (e) => { e.preventDefault(); window.open(href, '_external'); });
+      }
+      if (after) item.appendText(after);
+    };
+    li('Gmail: turn on 2-step verification, then create one at ',
+      'myaccount.google.com/apppasswords', 'https://myaccount.google.com/apppasswords',
+      ' (host imap.gmail.com).');
+    li('iCloud: app-specific password at ',
+      'account.apple.com', 'https://account.apple.com/account/manage',
+      ' (host imap.mail.me.com).');
+    li('Fastmail: Settings, Privacy & Security, app passwords (host imap.fastmail.com).', null, null, null);
+    li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here.', null, null, null);
+    new Setting(containerEl)
+      .setName('IMAP host')
+      .addText((t) => t.setValue(this.plugin.settings.imapHost)
+        .onChange(async (v) => { this.plugin.settings.imapHost = v.trim(); await this.plugin.saveSettings(); }));
+    new Setting(containerEl)
+      .setName('Email address')
+      .addText((t) => t.setValue(this.plugin.settings.imapUser)
+        .onChange(async (v) => { this.plugin.settings.imapUser = v.trim(); await this.plugin.saveSettings(); }));
+    secret(new Setting(containerEl)
+      .setName('App password')
+      .setDesc('Never your normal password. Paste the app password without spaces.'),
+      () => this.plugin.settings.imapPassword,
+      (v) => { this.plugin.settings.imapPassword = v.replace(/\s+/g, ''); }, 'app password');
+
+    new Setting(containerEl).setName('Google Calendar').setHeading();
+    secret(new Setting(containerEl)
+      .setName('Secret iCal URL')
+      .setDesc('Google Calendar -> Settings -> your calendar -> Integrate calendar -> "Secret address in iCal format". Read-only, no OAuth needed. Treat the URL like a password.'),
+      () => this.plugin.settings.icsUrl,
+      (v) => { this.plugin.settings.icsUrl = v; }, 'https://calendar.google.com/calendar/ical/...');
+
+    new Setting(containerEl).setName('Board').setHeading();
+    new Setting(containerEl)
+      .setName('Sync interval (minutes)')
+      .addText((t) => t.setValue(String(this.plugin.settings.syncMinutes))
+        .onChange(async (v) => {
+          const n = Math.max(2, Number(v) || 10);
+          this.plugin.settings.syncMinutes = n;
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName('Upcoming event badge')
+      .setDesc('Shows your next calendar event with a live countdown below the ribbon on the left (desktop only). When the event carries a meeting link (Zoom, Google Meet, Teams, Webex, Whereby, Jitsi), clicking the badge opens the meeting; otherwise it opens the board.')
+      .addToggle((t) => t.setValue(this.plugin.settings.showNextBadge)
+        .onChange(async (v) => {
+          this.plugin.settings.showNextBadge = v;
+          await this.plugin.saveSettings();
+          if (v) this.plugin.setupNextBadge(); else this.plugin.removeNextBadge();
+        }));
+    new Setting(containerEl)
+      .setName('Show weekend')
+      .addToggle((t) => t.setValue(this.plugin.settings.showWeekend)
+        .onChange(async (v) => { this.plugin.settings.showWeekend = v; await this.plugin.saveSettings(); }));
+    new Setting(containerEl)
+      .setName('Morning / afternoon split')
+      .setDesc('HH:MM. Timed events before this hour land in the morning lane.')
+      .addText((t) => t.setValue(this.plugin.settings.splitTime)
+        .onChange(async (v) => {
+          if (/^\d{1,2}:\d{2}$/.test(v.trim())) { this.plugin.settings.splitTime = v.trim(); await this.plugin.saveSettings(); }
+        }));
+    new Setting(containerEl)
+      .setName('Lunch break')
+      .setDesc('Renders a lunch band between morning and afternoon instead of the split line. Its height follows its length.')
+      .addToggle((t) => t.setValue(this.plugin.settings.lunchEnabled)
+        .onChange(async (v) => { this.plugin.settings.lunchEnabled = v; await this.plugin.saveSettings(); }));
+    new Setting(containerEl)
+      .setName('Lunch from / until')
+      .setDesc('HH:MM. With the lunch break on, its start also decides what still counts as morning.')
+      .addText((t) => t.setPlaceholder('12:30').setValue(this.plugin.settings.lunchStart)
+        .onChange(async (v) => {
+          if (/^\d{1,2}:\d{2}$/.test(v.trim())) { this.plugin.settings.lunchStart = v.trim(); await this.plugin.saveSettings(); }
+        }))
+      .addText((t) => t.setPlaceholder('13:30').setValue(this.plugin.settings.lunchEnd)
+        .onChange(async (v) => {
+          if (/^\d{1,2}:\d{2}$/.test(v.trim())) { this.plugin.settings.lunchEnd = v.trim(); await this.plugin.saveSettings(); }
+        }));
+    new Setting(containerEl)
+      .setName('Workday start / end')
+      .setDesc('Drives the live progress marker on today.')
+      .addText((t) => t.setPlaceholder('08:00').setValue(this.plugin.settings.dayStart)
+        .onChange(async (v) => {
+          if (/^\d{1,2}:\d{2}$/.test(v.trim())) { this.plugin.settings.dayStart = v.trim(); await this.plugin.saveSettings(); }
+        }))
+      .addText((t) => t.setPlaceholder('18:00').setValue(this.plugin.settings.dayEnd)
+        .onChange(async (v) => {
+          if (/^\d{1,2}:\d{2}$/.test(v.trim())) { this.plugin.settings.dayEnd = v.trim(); await this.plugin.saveSettings(); }
+        }));
+
+    new Setting(containerEl).setName('Two-way sync').setHeading();
+    new Setting(containerEl)
+      .setName('Complete on source')
+      .setDesc('Checking a card here also closes the task in Todoist / ClickUp and unstars the email. Unchecking reopens or re-stars it. Off = completing stays local to this vault.')
+      .addToggle((t) => t.setValue(this.plugin.settings.completeOnSource)
+        .onChange(async (v) => { this.plugin.settings.completeOnSource = v; await this.plugin.saveSettings(); }));
+    new Setting(containerEl)
+      .setName('Push edits to source')
+      .setDesc('Due date, priority and description edits in the note flow back to Todoist and ClickUp. Only fields you changed since the last sync are pushed; if both sides changed, the source wins.')
+      .addToggle((t) => t.setValue(this.plugin.settings.pushEdits)
+        .onChange(async (v) => { this.plugin.settings.pushEdits = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName('Sync now')
+      .setDesc(this.plugin.lastSyncAt ? `Last sync ${fmtTimeHM(this.plugin.lastSyncAt)}.` : 'No sync yet this session.')
+      .addButton((b) => b.setButtonText('Sync').setCta()
+        .onClick(() => this.plugin.syncNow(true)));
+  }
+}
+
+module.exports = IcorPlannerPlugin;
+
+// Headless test surface (harmless in Obsidian; the test harness reaches the
+// internals through it instead of duplicating them).
+module.exports.__test = {
+  mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel,
+  decodeRfc2047, icsUnescape,
+  todoistPriorityRank, imapSplitResponses, imapQuote,
+  parseIcs, icsParseDate, expandOccurrences, icsEventsForWeek,
+  googleCalendarEventUrl,
+  serializeCalendarDefs, reviveCalendarDefs,
+  buildCalendarCacheContent, parseCalendarCacheContent,
+  detectConferenceUrl, nextUpcomingEvent, fmtBadgeCountdown,
+  CALENDAR_CACHE_FILE, CONFERENCE_URL_PATTERNS,
+  zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
+  threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS,
+  htmlishToText, segmentInfo, fmtLeft, fmtDayTitle, fmtDayLabel,
+  trayDefaultTab, trayVisibleTabs, trayTabLabel, trayEffectiveTab,
+  trayEmptyState, trayConnectionState, TRAY_COPY, fmtOpenItems,
+  trayRevealDecision, trayRevealSpendsTurn,
+  sourceConfigured, isSyncedSource, canPushToSource, canCompleteOnSource,
+  SYNCED_SOURCES, TASK_SOURCES, MANUAL_SOURCE,
+  manualExternalId, manualItemFrontmatter, reconcileStaleIds,
+  itemFromFrontmatter, clampPriorityRank, safeBasename,
+  agendaSections, laneSequence, TRAY_TABS,
+  todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
+  SOURCES, DEFAULT_SETTINGS, PLANNER_FOLDER,
+};

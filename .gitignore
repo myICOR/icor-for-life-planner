@@ -1,0 +1,4 @@
+# API keys and tokens live in data.json - never in git (hard rule 9)
+data.json
+.DS_Store
+node_modules/

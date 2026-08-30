@@ -1,0 +1,948 @@
+/* ICOR Planner - INKLINE grammar for the weekly board and the tray.
+ * Same design language as myICOR Connect: structure carried by typography,
+ * hairlines and whitespace; surfaces only where interaction needs them; the
+ * marker used sparingly. Every color rides an --ink-* token with a stock
+ * Obsidian fallback so the plugin degrades gracefully outside INKLINE. */
+
+/* ------------------------------------------------------------ tokens ---- */
+.iplan-root, .iplan-tray-root {
+  --iplan-marker: var(--ink-marker, #ff5a2d);
+  --iplan-paper: var(--ink-paper, var(--text-normal));
+  --iplan-dim: var(--ink-paper-dim, var(--text-muted));
+  --iplan-faint: var(--ink-paper-faint, var(--text-faint));
+  --iplan-hairline: var(--ink-hairline, var(--background-modifier-border));
+  --iplan-hairline-subtle: var(--ink-hairline-subtle, var(--background-modifier-border));
+  /* the theme's rest-edge token, defined in both rooms: the sanctioned rest
+   * ink for an underline field (2026-08-30) */
+  --iplan-line-rest: var(--ink-line-rest, var(--background-modifier-border-hover));
+  --iplan-surface: var(--ink-2, var(--background-primary-alt));
+  --iplan-track: var(--ink-track, rgba(134, 134, 134, 0.12));
+  --iplan-success: var(--ink-success-dot, #7d9a7f);
+  --iplan-display: var(--ink-font-display, var(--font-interface));
+  --iplan-mono: var(--ink-font-mono, ui-monospace, SFMono-Regular, monospace);
+  --iplan-ease: var(--ink-ease-draw, cubic-bezier(0.22, 1, 0.36, 1));
+  --iplan-wash: color-mix(in srgb, var(--ink-paper, #888) 4%, transparent);
+  --iplan-event: var(--ink-marker, #ff5a2d);
+  --iplan-event-soft: color-mix(in srgb, var(--ink-marker, #ff5a2d) 10%, transparent);
+  --iplan-goal: #c2a35c;
+  --iplan-goal-soft: color-mix(in srgb, #c2a35c 14%, transparent);
+  --iplan-overdue: #b5654f;
+  --iplan-card-radius: 8px;
+}
+
+.iplan-root {
+  padding: 24px 28px 40px;
+  overflow-y: auto;
+  container-type: inline-size;
+  container-name: iplan;
+}
+
+/* mono kicker voice */
+.iplan-kicker, .iplan-week-label, .iplan-day-head, .iplan-chip,
+.iplan-tray-section-head, .iplan-tray-count, .iplan-foot, .iplan-tray-foot,
+.iplan-split-time, .iplan-lane-empty, .iplan-nav-today, .iplan-day-now,
+.iplan-card-meta, .iplan-event-time {
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+}
+
+/* --------------------------------------------------------- masthead ---- */
+.iplan-masthead { margin-bottom: 8px; }
+.iplan-kicker {
+  font-size: 11px;
+  color: var(--iplan-dim);
+  margin-bottom: 6px;
+}
+.iplan-kicker-marker { color: var(--iplan-marker); font-weight: 700; }
+.iplan-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--iplan-hairline);
+  padding-bottom: 14px;
+}
+.iplan-root .iplan-title {
+  font-family: var(--iplan-display);
+  font-size: 2.1em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+  border: none;
+  color: var(--iplan-paper);
+}
+.iplan-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.iplan-week-label { font-size: 11px; color: var(--iplan-dim); }
+
+/* nav buttons: quiet, hairline on hover only */
+.iplan-root button.iplan-nav-btn, .iplan-tray-root button.iplan-nav-btn {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--iplan-dim);
+  font-family: var(--iplan-mono);
+  font-size: 10px;
+}
+.iplan-root button.iplan-nav-btn:hover, .iplan-tray-root button.iplan-nav-btn:hover {
+  color: var(--iplan-paper);
+  background: var(--iplan-wash);
+}
+.iplan-root button.iplan-nav-btn svg, .iplan-tray-root button.iplan-nav-btn svg {
+  width: 15px; height: 15px;
+}
+button.iplan-nav-today { letter-spacing: 0.08em; }
+button.iplan-sync-btn.is-syncing svg {
+  animation: iplan-spin 1.1s linear infinite;
+  color: var(--iplan-marker);
+}
+@keyframes iplan-spin { to { transform: rotate(360deg); } }
+
+/* ---------------------------------------------------------- notices ---- */
+.iplan-notices { margin: 10px 0 0; }
+.iplan-notice {
+  font-family: var(--iplan-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--iplan-dim);
+  padding: 3px 0;
+}
+.iplan-notice::before { content: '\26A0  '; color: var(--iplan-marker); }
+
+/* ------------------------------------------------------------ board ---- */
+.iplan-board {
+  display: grid;
+  grid-template-columns: repeat(var(--iplan-day-count, 5), minmax(190px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+  align-items: start;
+}
+@container iplan (max-width: 900px) {
+  .iplan-board { grid-template-columns: repeat(2, minmax(190px, 1fr)); }
+}
+@container iplan (max-width: 460px) {
+  .iplan-board { grid-template-columns: 1fr; }
+}
+
+.iplan-day {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--iplan-surface);
+  border-radius: 10px;
+  padding: 10px;
+  min-height: 340px;
+}
+.iplan-day.is-today {
+  box-shadow: inset 2px 0 0 var(--iplan-marker);
+}
+/* past days: greyed but still a live drop target; hover lifts it back */
+.iplan-day.is-past {
+  opacity: 0.55;
+  transition: opacity 120ms var(--iplan-ease);
+}
+.iplan-day.is-past:hover,
+.iplan-day.is-past:has(.iplan-lane.is-drop-target) { opacity: 0.85; }
+.iplan-day.is-past .iplan-day-name,
+.iplan-day.is-past .iplan-day-date { color: var(--iplan-dim); }
+
+.iplan-day-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--iplan-dim);
+  padding: 2px 2px 6px;
+  border-bottom: 1px solid var(--iplan-hairline);
+}
+.iplan-day-name { color: var(--iplan-paper); font-weight: 700; }
+.iplan-day.is-today .iplan-day-name { color: var(--iplan-marker); }
+.iplan-day-date { font-size: 10px; }
+.iplan-day-now {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--iplan-marker);
+}
+
+/* all-day band */
+.iplan-allday { display: flex; flex-direction: column; gap: 4px; }
+
+/* lanes */
+.iplan-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 120px;
+  border-radius: 8px;
+  padding: 4px;
+  transition: background 120ms var(--iplan-ease), box-shadow 120ms var(--iplan-ease);
+}
+.iplan-lane.is-drop-target {
+  background: color-mix(in srgb, var(--iplan-marker) 6%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--iplan-marker) 45%, transparent);
+}
+.iplan-lane-empty {
+  font-size: 9.5px;
+  color: var(--iplan-faint);
+  text-align: center;
+  padding: 26px 0;
+  pointer-events: none;
+}
+body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
+
+/* split divider */
+.iplan-split {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0;
+}
+.iplan-split::before, .iplan-split::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--iplan-hairline);
+}
+.iplan-split-time {
+  font-size: 9px;
+  color: var(--iplan-dim);
+  padding: 1px 7px;
+  border: 1px solid var(--iplan-hairline);
+  border-radius: 999px;
+}
+
+/* lunch band: the cockpit's break-fill, height set inline from its length */
+.iplan-lunch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 2px 0;
+  border-radius: 6px;
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0 5px,
+      color-mix(in srgb, var(--iplan-dim) 16%, transparent) 5px 6px
+    );
+  border: 1px solid var(--iplan-hairline);
+}
+.iplan-lunch .iplan-split-time { background: var(--iplan-surface); }
+
+/* drop insertion line */
+.iplan-drop-line {
+  height: 2px;
+  border-radius: 999px;
+  background: var(--iplan-marker);
+  margin: 1px 2px;
+  pointer-events: none;
+}
+
+/* now rail: live day progress down today's column */
+.iplan-now-rail {
+  position: absolute;
+  left: 0;
+  top: calc(38px + var(--iplan-now-pct, 0) * (100% - 48px));
+  width: 100%;
+  height: 0;
+  border-top: 1px dashed color-mix(in srgb, var(--iplan-marker) 55%, transparent);
+  pointer-events: none;
+}
+.iplan-day[data-rail-state='before'] .iplan-now-rail,
+.iplan-day[data-rail-state='after'] .iplan-now-rail { display: none; }
+
+/* ------------------------------------------------------------ cards ---- */
+.iplan-card {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: var(--background-primary);
+  border: 1px solid var(--iplan-hairline);
+  border-radius: var(--iplan-card-radius);
+  padding: 7px 9px;
+  cursor: grab;
+  transition: border-color 120ms var(--iplan-ease), transform 120ms var(--iplan-ease);
+}
+.iplan-card:hover { border-color: var(--iplan-dim); }
+.iplan-card.is-dragging { opacity: 0.35; cursor: grabbing; }
+.iplan-card.is-goal {
+  border-color: color-mix(in srgb, var(--iplan-goal) 50%, transparent);
+  background: var(--iplan-goal-soft);
+}
+.iplan-card.is-done .iplan-card-title {
+  text-decoration: line-through;
+  color: var(--iplan-faint);
+}
+.iplan-card.is-done { opacity: 0.72; }
+
+.iplan-root button.iplan-check, .iplan-tray-root button.iplan-check {
+  all: unset;
+  cursor: pointer;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  border: 1.5px solid var(--iplan-dim);
+  border-radius: 50%;
+  box-sizing: border-box;
+  transition: border-color 120ms, background 120ms;
+}
+.iplan-root button.iplan-check:hover, .iplan-tray-root button.iplan-check:hover {
+  border-color: var(--iplan-success);
+}
+.iplan-card.is-done .iplan-check {
+  background: var(--iplan-success);
+  border-color: var(--iplan-success);
+}
+
+.iplan-card-body { min-width: 0; flex: 1; }
+.iplan-card-title {
+  font-family: var(--iplan-display);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--iplan-paper);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.iplan-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 9px;
+  color: var(--iplan-dim);
+}
+
+.iplan-source-mark { display: inline-flex; width: 12px; height: 12px; color: var(--iplan-dim); }
+.iplan-source-mark svg { width: 100%; height: 100%; fill: currentColor; }
+
+.iplan-chip {
+  font-size: 8.5px;
+  padding: 1px 5px;
+  border: 1px solid var(--iplan-hairline);
+  border-radius: 999px;
+  color: var(--iplan-dim);
+  white-space: nowrap;
+}
+.iplan-chip.iplan-due-overdue {
+  color: var(--iplan-overdue);
+  border-color: color-mix(in srgb, var(--iplan-overdue) 55%, transparent);
+}
+.iplan-chip.iplan-due-today {
+  color: var(--iplan-marker);
+  border-color: color-mix(in srgb, var(--iplan-marker) 55%, transparent);
+}
+.iplan-chip.iplan-prio-1 { color: var(--iplan-overdue); border-color: color-mix(in srgb, var(--iplan-overdue) 55%, transparent); }
+.iplan-chip.iplan-goal-chip { color: var(--iplan-goal); border-color: color-mix(in srgb, var(--iplan-goal) 55%, transparent); }
+
+/* ----------------------------------------------------------- events ---- */
+.iplan-event {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--iplan-event);
+  border-radius: 4px;
+  background: var(--iplan-event-soft);
+  cursor: default;
+  min-width: 0;
+}
+.iplan-event-time { font-size: 9px; color: var(--iplan-event); flex: 0 0 auto; }
+.iplan-event-title {
+  font-size: 11px;
+  color: var(--iplan-paper);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.iplan-event-allday .iplan-event-title { font-size: 10.5px; }
+.iplan-event.is-continues { opacity: 0.6; }
+
+/* stale events: rehydrated from the vault cache, awaiting the live fetch.
+ * Pale + desaturated with a soft opacity pulse. Motion Codex consulted
+ * (search-motion-codex js "pulse", 2026-08-29): only Motion-library loading
+ * examples returned, no CSS keyframe preset - calm 2.2s ease-in-out fallback
+ * consistent with this file's animation vocabulary. */
+.iplan-event.is-stale {
+  opacity: 0.55;
+  filter: saturate(0.35);
+  animation: iplan-stale-pulse 2.2s ease-in-out infinite;
+}
+@keyframes iplan-stale-pulse {
+  50% { opacity: 0.3; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .iplan-event.is-stale { animation: none; } /* just pale, no pulse */
+}
+
+/* ------------------------------------------------------------- foot ---- */
+.iplan-foot {
+  margin-top: 22px;
+  font-size: 9.5px;
+  color: var(--iplan-faint);
+  border-top: 1px solid var(--iplan-hairline);
+  padding-top: 10px;
+}
+
+/* ------------------------------------------------------------- tray ---- */
+.iplan-tray-root {
+  padding: 12px 10px 24px;
+  overflow-y: auto;
+}
+.iplan-tray-root.is-drop-target {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--iplan-marker) 45%, transparent);
+  border-radius: 8px;
+}
+.iplan-tray-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--iplan-hairline);
+  padding-bottom: 8px;
+}
+.iplan-tray-head .iplan-kicker { margin-bottom: 0; }
+
+.iplan-tray-section { margin-bottom: 14px; }
+.iplan-tray-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--iplan-dim);
+  padding: 4px 2px;
+}
+.iplan-tray-section-head.is-clickable { cursor: pointer; }
+.iplan-tray-section-head.is-clickable:hover { color: var(--iplan-paper); }
+.iplan-tray-count {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--iplan-faint);
+}
+.iplan-tray-section-body { display: flex; flex-direction: column; gap: 6px; }
+.iplan-tray-section.is-collapsed .iplan-tray-section-body { display: none; }
+.iplan-tray-note {
+  font-size: 10px;
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--iplan-faint);
+  padding: 6px 2px;
+}
+.iplan-tray-tabs { display: flex; margin: 0 0 12px; }
+.iplan-tray-tabs .iplan-seg { margin-right: 0; }
+
+/* AGENDA tab (0.6.0): today's plan, chronological */
+.iplan-tray-agenda-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 2px 0 12px;
+}
+.iplan-tray-agenda-title {
+  font-family: var(--iplan-display);
+  font-size: 1.35em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--iplan-paper);
+}
+.iplan-tray-allday {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 12px;
+}
+
+.iplan-tray-foot {
+  margin-top: 18px;
+  font-size: 8.5px;
+  color: var(--iplan-faint);
+  line-height: 1.6;
+  border-top: 1px solid var(--iplan-hairline);
+  padding-top: 8px;
+}
+
+/* ======================================================== 2026-08-30 ====
+ * The honest empty state and the add-a-task control (2026-08-30).
+ * Every declaration below follows the design system's standing rules; no
+ * token is minted here, and the two new --iplan-* names are plugin-local
+ * aliases of --ink-* tokens that already exist in both rooms.
+ * ====================================================================== */
+
+/* ------------------------------------------------------ quiet actions ---- */
+/* The design system's instrument-action treatment: an action that invites a
+ * COMMITMENT (going to settings to paste a credential) is bare mono in marker
+ * ink, no background, no border. The tray carries zero filled surfaces; a
+ * pill here would be the heaviest object the plugin has ever drawn, on first
+ * contact. It paints only its glyph, so the sanctioned hit-area expansion is
+ * invisible padding, never a drawn box (coarse-pointer block at the foot of
+ * this section). */
+.iplan-tray-root button.iplan-action {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  font-weight: 500;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--iplan-marker);
+  padding: 4px 2px;          /* 2px optical inset: aligns to the section-head text column */
+  border-radius: 6px;
+  transition: background 120ms var(--iplan-ease), color 120ms var(--iplan-ease);
+}
+/* Hover adds GEOMETRY (a wash); it does not move the hue. Same recipe as
+ * .iplan-nav-btn, so the tray keeps one hover grammar. */
+.iplan-tray-root button.iplan-action:hover { background: var(--iplan-wash); }
+.iplan-tray-root button.iplan-action:focus-visible {
+  outline: 2px solid var(--iplan-marker);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------- not-configured lead --- */
+/* No box, no fill, no border. In this state the block IS the tab body,
+ * so there is nothing to separate it from, and the tray head's hairline above
+ * already closes the masthead. */
+.iplan-tray-lead {
+  padding: 12px 2px 4px;     /* 2px optical inset as above */
+  max-width: 44ch;
+}
+/* The one piece of prose in the tray, and it earns the reading voice. Mono
+ * uppercase is the LABEL voice; a sentence set in it at 10px is unreadable at
+ * sentence length. */
+.iplan-tray-lead-text {
+  font-family: var(--iplan-display);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--iplan-dim);
+  margin-bottom: 8px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* ------------------------------------- per-source not-connected note ---- */
+/* Rides the existing .iplan-tray-note. One row: the state, then the verb. The
+ * section head above already names WHICH source, so the action carries no
+ * source name. Rank is weight, geometry and operability, never a quieter hue:
+ * the state word stays --iplan-faint at FULL alpha and the action stays full
+ * marker. Alpha as a volume dial was measured to collapse against the light
+ * room's paper, so quiet is always a token step, never an opacity. */
+.iplan-tray-note.is-unconfigured {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 2px;
+}
+.iplan-tray-note.is-unconfigured button.iplan-action {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 4px;
+}
+
+/* ------------------------------------------------------ add a task ------ */
+/* The trigger is the first element below the tab strip and its position never
+ * moves: it is chrome, and chrome is what does not change when the view does.
+ * Not a dashed row (the dashed 3 7 track means "something belongs
+ * here and is not drawn yet", the opposite of an add affordance), not beside
+ * the sync button (that row is tray-wide scope), and not inside MANUAL (a
+ * creator cannot live inside the thing it creates: MANUAL does not exist on a
+ * fresh vault, which is exactly when this is needed most). */
+.iplan-tray-add { margin: 4px 0 12px; }
+/* The quiet rest step: this control is PERMANENT chrome, so its resting marker
+ * budget is the + glyph only (the marker must not become the canvas).
+ * The setup CTA above is transient and keeps full marker ink. Same device,
+ * two weights, one family. The + is not ornament: without it, bare ADD TASK in
+ * mono uppercase reads as a section head, and only hue would separate them.
+ * It is the sole carrier of the operable-versus-label distinction, which is
+ * the one case where a glyph earns its place. */
+.iplan-tray-root button.iplan-action.is-quiet { color: var(--iplan-dim); }
+.iplan-tray-root button.iplan-action.is-quiet:hover {
+  color: var(--iplan-paper);
+  background: var(--iplan-wash);
+}
+
+/* ------------------------------------------------- add-task input ------ */
+/* The underline field, not a well. The tray has no filled surface anywhere and
+ * a one-line title does not justify introducing the first one into a 250px
+ * sidebar. Face and size are byte-identical to .iplan-card-title so the text
+ * you type looks like the card it becomes.
+ * REQUIRES data-ink-plugin on .iplan-tray-root (the theme's plugin-surface
+ * contract). Without it the theme's
+ * :is(input[type="text"], ...) well rule at (0,5,1) beats this (0,2,0) rule on
+ * background, border, font-family and both focus properties, and the field
+ * renders as an --ink-input well. Measured against the shipped theme bytes. */
+.iplan-tray-root input.iplan-add-input {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--iplan-line-rest);
+  border-radius: 0;
+  padding: 8px 2px;          /* 2px optical inset, the tray's shared text column */
+  font-family: var(--iplan-display);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--iplan-paper);
+  caret-color: var(--iplan-marker);
+  transition: border-color 140ms var(--iplan-ease), box-shadow 140ms var(--iplan-ease);
+}
+/* Full alpha. The full-alpha rule exempts no placeholder; quiet is a token
+ * step, never an opacity dial. Do NOT copy micor-search-input's opacity: 0.75. */
+.iplan-tray-root input.iplan-add-input::placeholder {
+  color: var(--iplan-faint);
+  opacity: 1;
+}
+/* Focus must change TWO channels, at most one of them hue: hue on the border,
+ * plus a 1px stroke that did not exist at rest, so the line reads 2px. Solid
+ * marker in both rooms, so this is geometry and not the dark-room glow the
+ * system keeps out of the light room, and it reflows nothing.
+ * outline:none is deliberate and is the ONE sanctioned local ring switch-off
+ * in this plugin: the replacement carries both channels at full alpha, and the
+ * pen's rectangle would double-mark a control whose own treatment already
+ * carries both. Not to be generalised anywhere else here. */
+.iplan-tray-root input.iplan-add-input:focus,
+.iplan-tray-root input.iplan-add-input:focus-visible {
+  border-bottom-color: var(--iplan-marker);
+  box-shadow: 0 1px 0 0 var(--iplan-marker);
+  outline: none;
+}
+
+/* ---------------------------------------------- coarse pointer (mobile) -- */
+/* The touch-target minimum: 44px, absolute px, never on a type scale.
+ * any-pointer, never pointer, so a touchscreen laptop still qualifies. */
+@media (any-pointer: coarse) {
+  .iplan-tray-root button.iplan-action { min-height: 44px; }
+  .iplan-tray-root input.iplan-add-input {
+    min-height: 44px;
+    font-size: 16px;   /* platform correction, labelled: below 16px iOS Safari
+                          zooms the viewport on focus and reflows the sidebar */
+  }
+}
+
+/* -------------------------------------------------- settings notes ---- */
+.iplan-settings-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 4px 0 10px;
+}
+
+/* ------------------------------------------------ event detail modal ---- */
+.iplan-event-modal .iplan-kicker {
+  font-family: var(--ink-font-mono, ui-monospace, monospace);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ink-paper-dim, var(--text-muted));
+  margin-bottom: 8px;
+}
+.iplan-event-modal .iplan-kicker-marker { color: var(--ink-marker, #ff5a2d); font-weight: 700; }
+.iplan-event-modal-title {
+  font-family: var(--ink-font-display, var(--font-interface));
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 10px;
+}
+.iplan-event-modal-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: var(--ink-font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  color: var(--ink-paper-dim, var(--text-muted));
+  border-left: 2px solid var(--ink-marker, #ff5a2d);
+  padding-left: 10px;
+  margin-bottom: 12px;
+}
+/* labeled property rows: WHEN / WHERE / CONFERENCE */
+.iplan-event-modal-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.iplan-event-modal-row-label {
+  flex: 0 0 auto;
+  min-width: 74px;
+  text-transform: uppercase;
+  color: var(--ink-paper-faint, var(--text-faint));
+}
+.iplan-event-modal-row-value {
+  color: var(--ink-paper, var(--text-normal));
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+a.iplan-event-modal-row-value {
+  text-decoration: underline;
+  text-decoration-color: var(--ink-marker, #ff5a2d);
+  text-underline-offset: 2px;
+}
+a.iplan-event-modal-row-value:hover { color: var(--ink-marker, #ff5a2d); }
+.iplan-event-modal-desc {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-paper, var(--text-normal));
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow-y: auto;
+  border-top: 1px solid var(--ink-hairline, var(--background-modifier-border));
+  padding-top: 10px;
+}
+.iplan-event-modal button.iplan-event-modal-open {
+  all: unset;
+  cursor: pointer;
+  margin-top: 14px;
+  font-family: var(--ink-font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 5px 12px;
+  border: 1px solid var(--ink-hairline, var(--background-modifier-border));
+  border-radius: 999px;
+  color: var(--ink-paper, var(--text-normal));
+}
+.iplan-event-modal button.iplan-event-modal-open:hover {
+  border-color: var(--ink-marker, #ff5a2d);
+  color: var(--ink-marker, #ff5a2d);
+}
+.iplan-event-modal .iplan-event-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.iplan-event-modal button.iplan-event-modal-open.is-secondary {
+  color: var(--ink-paper-dim, var(--text-muted));
+}
+.iplan-event-modal button.iplan-event-modal-open.is-secondary:hover {
+  color: var(--ink-marker, #ff5a2d);
+}
+/* JOIN MEETING: the primary action when a meeting link was detected */
+.iplan-event-modal button.iplan-event-modal-open.is-primary {
+  border-color: var(--ink-marker, #ff5a2d);
+  color: var(--ink-marker, #ff5a2d);
+  font-weight: 700;
+}
+.iplan-event-modal button.iplan-event-modal-open.is-primary:hover {
+  background: color-mix(in srgb, var(--ink-marker, #ff5a2d) 12%, transparent);
+}
+
+/* ------------------------------------------- next-event ribbon badge ---- */
+/* Sits in the LEFT ribbon below the action stack. The INKLINE theme may
+ * reposition/refine via the .iplan-next-badge hook; these are safe defaults
+ * for the stock ribbon (narrow vertical strip). */
+.iplan-next-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-top: 10px;
+  padding: 6px 3px;
+  max-width: 100%;
+  border: 1px solid var(--ink-hairline, var(--background-modifier-border));
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+  overflow: hidden;
+  transition: border-color 120ms var(--ink-ease-draw, ease), color 120ms var(--ink-ease-draw, ease);
+}
+.iplan-next-badge:hover {
+  border-color: var(--ink-marker, #ff5a2d);
+}
+.iplan-next-badge:focus-visible {
+  outline: 2px solid var(--ink-marker, #ff5a2d);
+  outline-offset: 1px;
+}
+.iplan-next-badge-icon {
+  display: inline-flex;
+  color: var(--ink-paper-dim, var(--text-muted));
+}
+.iplan-next-badge-icon svg { width: 13px; height: 13px; }
+.iplan-next-badge-count {
+  font-family: var(--ink-font-mono, ui-monospace, monospace);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-marker, #ff5a2d);
+  white-space: nowrap;
+}
+.iplan-next-badge-title {
+  font-family: var(--ink-font-mono, ui-monospace, monospace);
+  font-size: 8px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-paper-dim, var(--text-muted));
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.iplan-next-badge:hover .iplan-next-badge-title { color: var(--ink-paper, var(--text-normal)); }
+/* under 5 minutes: subtle marker attention (border carries it, no motion) */
+.iplan-next-badge.is-imminent {
+  border-color: var(--ink-marker, #ff5a2d);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink-marker, #ff5a2d) 35%, transparent);
+}
+.iplan-next-badge.is-now .iplan-next-badge-count { color: var(--ink-success-dot, #7d9a7f); }
+
+/* --------------------------------------------- today countdown bar ---- */
+.iplan-countdown {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 2px 0;
+}
+.iplan-countdown-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--iplan-track);
+  overflow: hidden;
+}
+.iplan-countdown-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--iplan-marker);
+  transition: width 400ms var(--iplan-ease);
+}
+.iplan-countdown[data-seg='lunch'] .iplan-countdown-fill { background: var(--iplan-dim); }
+.iplan-countdown-label {
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 8.5px;
+  color: var(--iplan-dim);
+}
+
+/* modal description links ride the marker on hover */
+.iplan-event-modal-desc a {
+  color: var(--ink-paper, var(--text-normal));
+  text-decoration: underline;
+  text-decoration-color: var(--ink-marker, #ff5a2d);
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+.iplan-event-modal-desc a:hover { color: var(--ink-marker, #ff5a2d); }
+
+/* settings setup list */
+ul.iplan-settings-list {
+  margin: 2px 0 12px;
+  padding-left: 18px;
+}
+ul.iplan-settings-list li { margin: 3px 0; }
+.iplan-settings-note a { color: var(--text-accent); }
+
+
+/* --------------------------------------- foldable setup instructions ---- */
+.vertical-tab-content details.iplan-setup {
+  background: color-mix(in srgb, var(--ink-paper, #888) 2.5%, transparent);
+  border-left: 1px solid var(--ink-hairline-subtle, var(--background-modifier-border));
+  border-right: 1px solid var(--ink-hairline-subtle, var(--background-modifier-border));
+  border-bottom: 1px solid var(--ink-hairline-subtle, var(--background-modifier-border));
+}
+.vertical-tab-content details.iplan-setup summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 16px;
+  font-family: var(--ink-font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-paper-dim, var(--text-muted));
+}
+.vertical-tab-content details.iplan-setup summary::-webkit-details-marker { display: none; }
+.vertical-tab-content details.iplan-setup summary::before {
+  content: '\25B8';
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--ink-marker, #ff5a2d);
+  transition: transform 160ms var(--ink-ease-draw, ease);
+}
+.vertical-tab-content details.iplan-setup[open] summary::before { transform: rotate(90deg); }
+.vertical-tab-content details.iplan-setup summary:hover { color: var(--ink-paper, var(--text-normal)); }
+.iplan-setup-body {
+  padding: 0 16px 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-paper-dim, var(--text-muted));
+}
+.iplan-setup-body ul { margin: 6px 0 0; padding-left: 18px; }
+.iplan-setup-body li { margin: 3px 0; }
+.iplan-setup-body a { color: var(--text-accent); }
+
+/* ------------------------------------------------- WEEK | DAY switch ---- */
+.iplan-seg {
+  display: inline-flex;
+  border: 1px solid var(--iplan-hairline);
+  border-radius: 999px;
+  padding: 2px;
+  gap: 2px;
+  margin-right: 6px;
+}
+.iplan-root button.iplan-seg-btn, .iplan-tray-root button.iplan-seg-btn {
+  all: unset;
+  cursor: pointer;
+  font-family: var(--iplan-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: var(--iplan-dim);
+}
+.iplan-root button.iplan-seg-btn:hover,
+.iplan-tray-root button.iplan-seg-btn:hover { color: var(--iplan-paper); }
+.iplan-root button.iplan-seg-btn.is-active,
+.iplan-tray-root button.iplan-seg-btn.is-active {
+  background: color-mix(in srgb, var(--iplan-marker) 14%, transparent);
+  color: var(--iplan-marker);
+}
+
+/* ----------------------------------------------- day view: zoomed in ---- */
+.iplan-board.is-day {
+  grid-template-columns: minmax(0, 720px);
+  justify-content: center;
+}
+.iplan-board.is-day .iplan-day {
+  padding: 18px;
+  min-height: 480px;
+  gap: 12px;
+}
+.iplan-board.is-day .iplan-day-head { font-size: 14px; padding-bottom: 10px; }
+.iplan-board.is-day .iplan-day-date { font-size: 12px; }
+.iplan-board.is-day .iplan-lane { min-height: 170px; gap: 9px; }
+.iplan-board.is-day .iplan-lane-empty { font-size: 11px; padding: 40px 0; }
+.iplan-board.is-day .iplan-card { padding: 11px 14px; gap: 11px; }
+.iplan-board.is-day .iplan-card-title { font-size: 15px; -webkit-line-clamp: 3; }
+.iplan-board.is-day .iplan-card-meta { font-size: 10.5px; gap: 8px; margin-top: 6px; }
+.iplan-board.is-day .iplan-source-mark { width: 14px; height: 14px; }
+.iplan-board.is-day .iplan-chip { font-size: 10px; padding: 2px 7px; }
+.iplan-board.is-day button.iplan-check { width: 18px; height: 18px; }
+.iplan-board.is-day .iplan-event { padding: 8px 12px; }
+.iplan-board.is-day .iplan-event-time { font-size: 11px; }
+.iplan-board.is-day .iplan-event-title { font-size: 13.5px; }
+.iplan-board.is-day .iplan-split-time { font-size: 10.5px; }
+.iplan-board.is-day .iplan-countdown-label { font-size: 10px; }
+.iplan-board.is-day .iplan-countdown-track { height: 4px; }
