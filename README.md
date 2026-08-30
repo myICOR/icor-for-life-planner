@@ -166,7 +166,7 @@ Edition**: ICOR (Input, Control, Output, Refine), the productivity
 methodology by Paperless Movement / myICOR, implemented as a ready-to-use
 Obsidian vault. Best to be used in combination with:
 
-- **[myICOR INKLINE theme](https://community.obsidian.md/themes/icor-for-life-inkline)**,
+- **[ICOR for Life INKLINE theme](https://community.obsidian.md/themes/icor-for-life-inkline)**,
   the hand-drawn visual system the board is designed against. The
   planner's cards, lanes and tray ride INKLINE's tokens, so the board
   looks native in both light and dark.
