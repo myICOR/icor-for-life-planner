@@ -1122,8 +1122,9 @@ const TLS_ERROR_CODES = new Set([
 // auth-oauth-required, tls, dns, refused, timeout, protocol, unsupported.
 // Pure: reads err.message / err.code / err.stage / err.serverText and the
 // host, touches nothing else.
-function classifyImapError(err, host) {
+function classifyImapError(err, host, opts) {
   const e = err || {};
+  const port = (opts && opts.port) || 993;
   const msg = String(e.message || '');
   const code = String(e.code || '');
   const serverText = String(e.serverText || '');
@@ -1156,12 +1157,29 @@ function classifyImapError(err, host) {
     return out('dns', 'IMAP host not found.', 'Check the host name for typos.');
   }
   if (code === 'ECONNREFUSED' || /server refused/i.test(msg)) {
-    return out('refused', 'IMAP host refused the connection.', 'Check that the host accepts IMAP on port 993.');
+    return out('refused', 'IMAP host refused the connection.', `Check that the host accepts IMAP on port ${port}.`);
   }
   if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
     return out('timeout', 'IMAP host did not answer in time.', 'Check the network, then the host name.');
   }
   return out('protocol', `IMAP host answered unexpectedly${serverText ? ` (${serverText.slice(0, 80)})` : ''}.`);
+}
+
+// Provider presets: one click fills the host and the connection shape for
+// the providers people actually use. `imapPresetFields` maps a preset onto
+// the settings keys; `imapActivePreset` says which chip is pressed.
+const IMAP_PRESETS = [
+  { id: 'gmail', label: 'Gmail', host: 'imap.gmail.com', port: 993, security: 'tls', allowSelfSigned: false },
+  { id: 'icloud', label: 'iCloud', host: 'imap.mail.me.com', port: 993, security: 'tls', allowSelfSigned: false },
+  { id: 'fastmail', label: 'Fastmail', host: 'imap.fastmail.com', port: 993, security: 'tls', allowSelfSigned: false },
+];
+function imapPresetFields(preset) {
+  return { imapHost: preset.host };
+}
+function imapActivePreset(settings) {
+  const opts = imapTransportOptions(settings);
+  const hit = IMAP_PRESETS.find((p) => p.host === opts.host && p.port === opts.port && p.security === opts.security);
+  return hit ? hit.id : null;
 }
 
 // Transport parameters for the mailbox, read once off the settings. Pure.
@@ -1352,31 +1370,57 @@ function imapFetchStarredRaw(opts, user, pass, maxItems, deps) {
 
 // Classifier reason -> connector reason (the contract the UI renders).
 function imapReasonToConnector(reason) {
+  if (reason === 'no-token') return 'no-token';
   if (reason === 'unsupported') return 'unsupported';
   if (/^auth/.test(reason)) return 'misconfigured';
   return 'unreachable';
 }
 
+// What can be said before any socket opens. Pure. Returns null when a
+// session is worth trying, else { reason, message, hint, docUrl } in the
+// classifier's shape: missing fields, or a host that can never accept a
+// password (the failure is known, and a 20 s timeout teaches nothing).
+function imapPreflight(opts, user, pass) {
+  if (!opts.host || !user || !pass) {
+    return { reason: 'no-token', message: 'Starred email is not connected (host, address or app password missing).', hint: null, docUrl: null };
+  }
+  if (imapProviderOf(opts.host).id === 'outlook') {
+    return classifyImapError({ message: 'auth', stage: 'login' }, opts.host, opts);
+  }
+  return null;
+}
+
 async function emailFetchStarred(settings, deps) {
   const opts = imapTransportOptions(settings);
-  const host = opts.host;
   const user = trimmed(settings.imapUser);
   const pass = trimmed(settings.imapPassword);
-  if (!host || !user || !pass) {
-    return degraded('email', 'no-token', 'Starred email is not connected (host, address or app password missing).');
-  }
-  // A host that can never accept a password is answered before any socket
-  // opens: the failure is known, and a 20 s timeout teaches nothing.
-  if (imapProviderOf(host).id === 'outlook') {
-    const c = classifyImapError({ message: 'auth', stage: 'login' }, host);
-    return degraded('email', 'misconfigured', c.message, c.hint, c.docUrl);
-  }
+  const early = imapPreflight(opts, user, pass);
+  if (early) return degraded('email', imapReasonToConnector(early.reason), early.message, early.hint, early.docUrl);
   try {
     const items = await imapFetchStarredRaw(opts, user, pass, 50, deps);
     return okResult('email', items);
   } catch (e) {
-    const c = classifyImapError(e, host);
+    const c = classifyImapError(e, opts.host, opts);
     return degraded('email', imapReasonToConnector(c.reason), c.message, c.hint, c.docUrl);
+  }
+}
+
+// The probe behind the settings tab's Test connection: LOGIN, then LOGOUT.
+// It proves the host, the port, the certificate and the credentials, and it
+// never reads a mailbox (no EXAMINE, no SEARCH, no SELECT). Same preflight
+// and same classifier as the sync, so the two can never disagree.
+async function imapProbe(settings, deps) {
+  const opts = imapTransportOptions(settings);
+  const user = trimmed(settings.imapUser);
+  const pass = trimmed(settings.imapPassword);
+  const out = (ok, c) => ({ ok, reason: c.reason || null, message: c.message, hint: c.hint || null, docUrl: c.docUrl || null });
+  const early = imapPreflight(opts, user, pass);
+  if (early) return out(false, early);
+  try {
+    await imapSession(opts, user, pass, [], deps);
+    return out(true, { message: `Connected as ${user}.` });
+  } catch (e) {
+    return out(false, classifyImapError(e, opts.host, opts));
   }
 }
 
@@ -4378,6 +4422,38 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       ' (host imap.mail.me.com).');
     li('Fastmail: Settings, Privacy & Security, app passwords (host imap.fastmail.com).', null, null, null);
     li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here.', null, null, null);
+    // Presets: one chip per known provider fills the host and the
+    // connection shape. A radio group for the keyboard and the screen reader
+    // (arrow keys move, aria-checked says which is on), rendered on the
+    // planner's own segmented control so it reads like the rest of the plugin.
+    const presetSetting = new Setting(containerEl)
+      .setName('Provider')
+      .setDesc('Fills the host and the connection settings for a known provider. Any other IMAP host works too: type it below.');
+    const presetGroup = presetSetting.controlEl.createDiv({ cls: 'iplan-seg iplan-settings-presets', attr: { role: 'radiogroup', 'aria-label': 'Email provider preset' } });
+    const activePreset = imapActivePreset(this.plugin.settings);
+    const presetButtons = [];
+    for (const preset of IMAP_PRESETS) {
+      const on = preset.id === activePreset;
+      const btn = presetGroup.createEl('button', {
+        cls: `iplan-seg-btn${on ? ' is-active' : ''}`, text: preset.label,
+        attr: { type: 'button', role: 'radio', 'aria-checked': on ? 'true' : 'false', tabindex: on || (!activePreset && preset === IMAP_PRESETS[0]) ? '0' : '-1', 'data-preset': preset.id },
+      });
+      btn.addEventListener('click', async () => {
+        Object.assign(this.plugin.settings, imapPresetFields(preset));
+        await this.plugin.saveSettings();
+        this.display();
+        const again = this.containerEl.querySelector(`[data-preset="${preset.id}"]`);
+        if (again) again.focus();
+      });
+      btn.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        e.preventDefault();
+        const i = presetButtons.indexOf(btn);
+        const nextBtn = presetButtons[(i + (e.key === 'ArrowRight' ? 1 : presetButtons.length - 1)) % presetButtons.length];
+        nextBtn.focus();
+      });
+      presetButtons.push(btn);
+    }
     // The host decides the provider, and the provider decides the one
     // sentence that unblocks most first attempts. It re-renders as the host
     // is typed, so the advice is never about a host the field no longer says.
@@ -4409,6 +4485,33 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .setDesc('Never your normal password. Paste the app password without spaces.'),
       () => this.plugin.settings.imapPassword,
       (v) => { this.plugin.settings.imapPassword = v.replace(/\s+/g, ''); }, 'app password');
+    // Test connection: the probe logs in and straight out, so a wrong host,
+    // port, certificate or password is named here, now, with the same
+    // sentence the tray would show after the next sync. The outcome lands in
+    // a live region so a screen reader hears it without hunting for it.
+    const probeSetting = new Setting(containerEl)
+      .setName('Test connection')
+      .setDesc('Logs in and straight out. Reads nothing, writes nothing.');
+    probeSetting.descEl.setAttribute('aria-live', 'polite');
+    const renderProbe = (r) => {
+      probeSetting.descEl.empty();
+      probeSetting.descEl.toggleClass('is-ok', !!r.ok);
+      probeSetting.descEl.toggleClass('is-failed', !r.ok);
+      probeSetting.descEl.appendText(r.message);
+      if (r.hint) { probeSetting.descEl.createEl('br'); probeSetting.descEl.appendText(r.hint); }
+      if (r.docUrl) {
+        probeSetting.descEl.appendText(' ');
+        const a = probeSetting.descEl.createEl('a', { text: 'Open', href: r.docUrl });
+        a.addEventListener('click', (e) => { e.preventDefault(); window.open(r.docUrl, '_external'); });
+      }
+    };
+    probeSetting.addButton((b) => b.setButtonText('Test').onClick(async () => {
+      b.setDisabled(true);
+      probeSetting.descEl.empty();
+      probeSetting.descEl.appendText('Connecting...');
+      try { renderProbe(await imapProbe(this.plugin.settings)); }
+      finally { b.setDisabled(false); }
+    }));
 
     new Setting(containerEl).setName('Google Calendar').setHeading();
     secret(new Setting(containerEl)
@@ -4515,6 +4618,7 @@ module.exports.__test = {
   todoistPriorityRank, imapSplitResponses, imapQuote,
   imapProviderOf, classifyImapError, imapReplyError, imapReasonToConnector, imapConnect, IMAP_PROVIDERS,
   imapTransportOptions, imapTlsOptions, imapSession, imapItemsFromFetch, imapFetchStarredRaw, imapSetStarredRaw,
+  imapPreflight, imapProbe, IMAP_PRESETS, imapPresetFields, imapActivePreset,
   parseIcs, icsParseDate, expandOccurrences, icsEventsForWeek,
   googleCalendarEventUrl,
   serializeCalendarDefs, reviveCalendarDefs,

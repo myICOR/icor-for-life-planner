@@ -667,6 +667,13 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
 }
 
 /* -------------------------------------------------- settings notes ---- */
+/* The Test connection outcome: the sentence is the result, colour only
+ * confirms it (never the only channel). Existing tokens; no new colour. */
+.setting-item-description.is-ok { color: var(--iplan-success); }
+.setting-item-description.is-failed { color: var(--iplan-overdue); }
+.setting-item-description.is-ok a, .setting-item-description.is-failed a { color: var(--text-accent); }
+.iplan-settings-presets { margin-right: 0; }
+
 .iplan-settings-note {
   font-size: 12px;
   color: var(--text-muted);
@@ -925,7 +932,8 @@ ul.iplan-settings-list li { margin: 3px 0; }
   gap: 2px;
   margin-right: 6px;
 }
-.iplan-root button.iplan-seg-btn, .iplan-tray-root button.iplan-seg-btn {
+.iplan-root button.iplan-seg-btn, .iplan-tray-root button.iplan-seg-btn,
+.iplan-settings-presets button.iplan-seg-btn {
   all: unset;
   cursor: pointer;
   font-family: var(--iplan-mono);
@@ -936,9 +944,16 @@ ul.iplan-settings-list li { margin: 3px 0; }
   color: var(--iplan-dim);
 }
 .iplan-root button.iplan-seg-btn:hover,
-.iplan-tray-root button.iplan-seg-btn:hover { color: var(--iplan-paper); }
+.iplan-tray-root button.iplan-seg-btn:hover,
+.iplan-settings-presets button.iplan-seg-btn:hover { color: var(--iplan-paper); }
+.iplan-settings-presets button.iplan-seg-btn:focus-visible {
+  /* The plugin's two-channel focus: hue on the border, a stroke that was not there at rest. */
+  box-shadow: 0 0 0 1px var(--iplan-marker);
+  color: var(--iplan-paper);
+}
 .iplan-root button.iplan-seg-btn.is-active,
-.iplan-tray-root button.iplan-seg-btn.is-active {
+.iplan-tray-root button.iplan-seg-btn.is-active,
+.iplan-settings-presets button.iplan-seg-btn.is-active {
   background: color-mix(in srgb, var(--iplan-marker) 14%, transparent);
   color: var(--iplan-marker);
 }

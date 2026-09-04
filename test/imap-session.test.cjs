@@ -141,3 +141,67 @@ test('emailFetchStarred drives the read script and classifies its failures', asy
   assert.match(r.message, /app password/);
   assert.equal(r.docUrl, 'https://myaccount.google.com/apppasswords');
 });
+
+/* ---- the probe (Test connection) ---------------------------------------- */
+
+test('THE ASK: the probe logs in and out with a scripted server, and reads nothing', async () => {
+  assert.equal(typeof T.imapProbe, 'function', 'imapProbe must be a function');
+  const sock = fakeSocket({ reply: okReply() });
+  const r = await T.imapProbe({ imapHost: 'mail.example.org', imapUser: 'u', imapPassword: 'p' }, tlsDeps(sock));
+  assert.deepEqual(sock.commands, ['LOGIN "u" "p"', 'LOGOUT'], 'no EXAMINE, no SEARCH, no SELECT, no STORE');
+  assert.deepEqual(r, { ok: true, reason: null, message: 'Connected as u.', hint: null, docUrl: null });
+  assert.equal(sock.ended, true);
+});
+
+test('the probe answers missing fields and an Outlook host before any socket is opened', async () => {
+  assert.equal(typeof T.imapProbe, 'function');
+  let opened = 0;
+  const deps = { tls: { connect: () => { opened += 1; throw new Error('socket opened'); } } };
+  const empty = await T.imapProbe({ imapHost: 'imap.gmail.com', imapUser: '', imapPassword: 'p' }, deps);
+  assert.equal(empty.ok, false);
+  assert.equal(empty.reason, 'no-token');
+  const o = await T.imapProbe({ imapHost: 'outlook.office365.com', imapUser: 'u', imapPassword: 'p' }, deps);
+  assert.equal(o.ok, false);
+  assert.equal(o.reason, 'auth-oauth-required');
+  assert.match(o.hint, /OAuth/);
+  assert.equal(opened, 0);
+  // preflight is one pure function shared by the probe and the sync
+  assert.equal(T.imapPreflight({ host: '', port: 993 }, 'u', 'p').reason, 'no-token');
+  assert.equal(T.imapPreflight({ host: 'outlook.office365.com', port: 993 }, 'u', 'p').reason, 'auth-oauth-required');
+  assert.equal(T.imapPreflight({ host: 'mail.example.org', port: 993 }, 'u', 'p'), null);
+  assert.equal(T.imapReasonToConnector('no-token'), 'no-token');
+});
+
+test('the probe and the sync classify the same failure with the same words', async () => {
+  assert.equal(typeof T.imapProbe, 'function');
+  const alert = (cmd) => (/^LOGIN /.test(cmd) ? ['$TAG NO [ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833'] : ['$TAG OK']);
+  const s = { imapHost: 'imap.gmail.com', imapUser: 'u', imapPassword: 'p' };
+  const p = await T.imapProbe(s, tlsDeps(fakeSocket({ reply: alert })));
+  const f = await T.emailFetchStarred(s, tlsDeps(fakeSocket({ reply: alert })));
+  assert.equal(p.ok, false);
+  assert.equal(p.reason, 'auth-app-password');
+  assert.equal(p.message, f.message);
+  assert.equal(p.hint, f.hint);
+  assert.equal(p.docUrl, 'https://myaccount.google.com/apppasswords');
+  // a refused connection names the port it tried
+  const refused = await T.imapProbe({ ...s, imapHost: 'mail.example.org' }, { tls: { connect: () => { throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }); } } });
+  assert.equal(refused.reason, 'refused');
+  assert.match(refused.hint, /port 993/);
+});
+
+test('the settings tab wires the probe and the presets accessibly', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.match(code, /renderProbe\(await imapProbe\(this\.plugin\.settings\)\)/, 'the Test button runs the probe');
+  assert.match(code, /probeSetting\.descEl\.setAttribute\('aria-live', 'polite'\)/, 'the outcome is announced');
+  assert.match(code, /role: 'radiogroup'/, 'the presets are a radio group');
+  assert.match(code, /role: 'radio'/, 'each preset chip is a radio');
+  assert.match(code, /'aria-checked': on \? 'true' : 'false'/, 'the pressed preset is stated');
+  assert.match(code, /e\.key !== 'ArrowRight' && e\.key !== 'ArrowLeft'/, 'arrow keys move between chips');
+  assert.match(code, /imapPresetFields\(preset\)/, 'a chip applies the preset through the pure mapper');
+  assert.equal((code.match(/= imapPreflight\(opts, user, pass\)/g) || []).length, 2, 'the probe and the sync share one preflight');
+  const css = fs.readFileSync(require('node:path').join(require('node:path').dirname(T.__mainPath), 'styles.css'), 'utf8');
+  assert.match(css, /\.iplan-settings-presets button\.iplan-seg-btn/, 'the chips ride the segmented-control rules');
+  assert.match(css, /\.setting-item-description\.is-ok \{ color: var\(--iplan-success\); \}/, 'the ok colour is a token');
+  assert.match(css, /\.setting-item-description\.is-failed \{ color: var\(--iplan-overdue\); \}/, 'the failed colour is a token');
+});
