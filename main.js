@@ -225,6 +225,16 @@ const DEFAULT_SETTINGS = {
   // next occurrence: 'move' puts it on the new due day (keeping its half),
   // 'drop' sends it back to the tray. See syncCompletionPlan.
   recurringAdvance: 'move',
+  // Routines (2026-09-04): blocks of steps at a time of day, one note each
+  // under <planner folder>/Routines/. The defaults are what a NEW routine
+  // starts with; each routine keeps its own times and weekdays in its note.
+  routinesEnabled: true,
+  routineDefaults: {
+    morning: { start: '06:30', end: '07:30' },
+    afternoon: { start: '13:00', end: '13:30' },
+    evening: { start: '21:00', end: '21:45' },
+  },
+  routineWeekdaysDefault: ['mon', 'tue', 'wed', 'thu', 'fri'],
 };
 
 const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
@@ -268,6 +278,9 @@ function plannerPaths(settings) {
     },
     // A folder boundary, not a prefix: '02 Planner2/x.md' is outside '02 Planner'.
     isInside: (path) => typeof path === 'string' && path.startsWith(`${root}/`),
+    // Routine notes (2026-09-04): one per routine, under the room.
+    routines: `${root}/Routines`,
+    isRoutine: (path) => typeof path === 'string' && path.startsWith(`${root}/Routines/`),
   };
 }
 
@@ -375,18 +388,22 @@ function eventLaneOrder(ev) {
   return d.getHours() * 60 + d.getMinutes();
 }
 
-// One lane = ONE sequence: timed events (order = start minutes) and task
-// cards (order = plannedOrder), ascending; ties put the event first so a task
-// dropped "at 09:00" lands below the 09:00 chip. Both entry kinds expose
-// `plannedOrder` so orderForInsert can rank over the mixed list. Known and
-// accepted: tap-menu planning assigns order = Date.now() (huge), so those
-// tasks land after every event; legacy hand orders like 10/20 render above a
-// 09:00 (540) event until the next drag renormalizes them.
-function laneSequence(laneEvents, cell) {
+// One lane = ONE sequence: timed events (order = start minutes), routine
+// blocks (order = start minutes, 2026-09-04) and task cards (order =
+// plannedOrder), ascending; a tie goes event, routine, task, so a task
+// dropped "at 09:00" lands below the 09:00 chip and below a 09:00 routine.
+// Every entry kind exposes `plannedOrder` so orderForInsert can rank over
+// the mixed list. Known and accepted: tap-menu planning assigns order =
+// Date.now() (huge), so those tasks land after every event; legacy hand
+// orders like 10/20 render above a 09:00 (540) event until the next drag
+// renormalizes them.
+const LANE_KIND_RANK = { event: 0, routine: 1, task: 2 };
+function laneSequence(laneEvents, cell, routines) {
   const seq = laneEvents
     .map((ev) => ({ kind: 'event', ev, plannedOrder: eventLaneOrder(ev) }))
+    .concat((routines || []).map((occ) => ({ kind: 'routine', occ, path: occ.routine.path, plannedOrder: occ.startMin })))
     .concat(cell.map((it) => ({ kind: 'task', it, path: it.path, plannedOrder: it.plannedOrder })));
-  return seq.sort((a, b) => (a.plannedOrder - b.plannedOrder) || (a.kind === b.kind ? 0 : a.kind === 'event' ? -1 : 1));
+  return seq.sort((a, b) => (a.plannedOrder - b.plannedOrder) || (LANE_KIND_RANK[a.kind] - LANE_KIND_RANK[b.kind]));
 }
 
 // Minutes that `tz` is ahead of UTC at the given instant (cockpit types.js port).
@@ -3047,12 +3064,13 @@ function logRowFor(parsed, date) {
 }
 
 // The marker's meaning. Vocabulary from the vault's habit convention: the
-// dash is U+2013 (an en dash) as written there, a plain hyphen counts too.
+// dash is U+2013 as written there (escaped here on purpose), a plain hyphen
+// counts too.
 function markerState(marker) {
   const m = String(marker == null ? '' : marker).trim();
   if (m === '' || m === '_') return 'pending';
   if (/^(Y|✓|✔|G)$/i.test(m)) return 'done';
-  if (/^(N|R|–|-)$/i.test(m)) return 'missed';
+  if (/^(N|R|\u2013|-)$/i.test(m)) return 'missed';
   if (/^S$/i.test(m)) return 'skipped';
   return 'unknown';
 }
@@ -3141,6 +3159,272 @@ function removeLogRow(body, sentinelName, date) {
 }
 
 /* ========================================================================== *
+ * Routines (2026-09-04)
+ *
+ * A routine is a recurring block of steps that takes a place in the day:
+ * from-to, one of three types (morning, afternoon, evening), on chosen
+ * weekdays. It is not a task (never in the tray, never dragged, never synced
+ * anywhere) and not a habit (a habit is one yes or no per day). It renders
+ * in the lane as a time block whose steps check off one by one.
+ *
+ * One note per routine under <planner folder>/Routines/. The frontmatter is
+ * the definition, the "## Steps" checklist is the list of steps (its boxes
+ * are labels only, never state), and the "## Log" table under the
+ * routine-log sentinel is the record: one row per day that had any
+ * interaction, absence meaning nothing happened. Steps are identified by
+ * position; editing the list mid-day changes that day's mapping, and the row
+ * keeps the count that history needs.
+ *
+ * Nothing in sync touches a routine: itemFromFrontmatter refuses the type,
+ * so collectItems, reconcile and the push path never see one.
+ * ========================================================================== */
+
+const ROUTINE_TYPE = 'planner-routine';
+const ROUTINE_TYPES = ['morning', 'afternoon', 'evening'];
+const ROUTINE_LOG_SENTINEL = 'routine-log';
+const ROUTINE_LOG_SECTION = { heading: '## Log', schema: 'steps', header: ['Date', 'Done', 'Steps'] };
+const WEEKDAY_CODES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+const WEEKDAY_NAMES = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
+
+function capitalize(s) { const t = String(s == null ? '' : s); return t.charAt(0).toUpperCase() + t.slice(1); }
+
+// 'mon'..'sun' for a YYYY-MM-DD, the same codes the vault's cadence_days uses.
+function dayCode(dayStr) {
+  const [y, m, d] = String(dayStr).split('-').map(Number);
+  return WEEKDAY_CODES[(new Date(y, m - 1, d, 12).getDay() + 6) % 7];
+}
+
+// Valid codes only, canonical order, no duplicates. Accepts an array or a
+// comma-separated string, any case, full names too ("Monday" -> mon).
+function normalizeWeekdays(raw) {
+  const list = Array.isArray(raw) ? raw : String(raw == null ? '' : raw).split(/[,\s]+/);
+  const set = new Set();
+  for (const v of list) {
+    const code = String(v == null ? '' : v).trim().toLowerCase().slice(0, 3);
+    if (WEEKDAY_CODES.includes(code)) set.add(code);
+  }
+  return WEEKDAY_CODES.filter((c) => set.has(c));
+}
+
+function routineTypeOf(raw) {
+  const t = String(raw == null ? '' : raw).trim().toLowerCase();
+  return ROUTINE_TYPES.includes(t) ? t : 'morning';
+}
+
+// HH:MM with hours 0-23 and minutes 0-59, zero-padded. A number is read as
+// minutes since midnight (what a YAML reader makes of an unquoted 06:30 in
+// some dialects). Anything else is null.
+function normalizeHM(raw) {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw < 1440) {
+    return `${pad2(Math.floor(raw / 60))}:${pad2(raw % 60)}`;
+  }
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(raw == null ? '' : raw).trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mm = Number(m[2]);
+  if (h > 23 || mm > 59) return null;
+  return `${pad2(h)}:${pad2(mm)}`;
+}
+
+function fmtMin(min) { return `${pad2(Math.floor(min / 60))}:${pad2(min % 60)}`; }
+
+// The per-type default times: the stored map merged over the built-in one
+// field by field, so a data.json that names one type or one field keeps the
+// rest, and a malformed time falls back instead of breaking the settings tab.
+function routineDefaultsOf(settings) {
+  const base = DEFAULT_SETTINGS.routineDefaults;
+  const raw = settings && settings.routineDefaults && typeof settings.routineDefaults === 'object' ? settings.routineDefaults : {};
+  const out = {};
+  for (const t of ROUTINE_TYPES) {
+    const r = raw[t] && typeof raw[t] === 'object' ? raw[t] : {};
+    out[t] = { start: normalizeHM(r.start) || base[t].start, end: normalizeHM(r.end) || base[t].end };
+  }
+  return out;
+}
+
+// The weekdays a new routine starts with. An explicit empty list stays
+// empty (the person cleared it); only an absent or malformed setting falls
+// back to the built-in default.
+function routineWeekdaysDefaultOf(settings) {
+  const raw = settings ? settings.routineWeekdaysDefault : undefined;
+  if (Array.isArray(raw)) return normalizeWeekdays(raw);
+  return DEFAULT_SETTINGS.routineWeekdaysDefault.slice();
+}
+
+// The steps: list items under "## Steps" until the next heading. A box is
+// read as a label, never as state; a plain "- item" counts too.
+function routineSteps(body) {
+  const out = [];
+  let inSteps = false;
+  for (const raw of splitLogLines(body)) {
+    const line = raw.replace(/\r$/, '');
+    if (/^#{1,6}\s/.test(line)) { inSteps = /^#{1,6}\s+steps\s*$/i.test(line); continue; }
+    if (!inSteps) continue;
+    const m = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.+?)\s*$/.exec(line);
+    if (m) out.push({ index: out.length + 1, label: m[1] });
+  }
+  return out;
+}
+
+function stripFrontmatter(text) {
+  return String(text == null ? '' : text).replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+}
+
+// The routine a note describes, or null for any other note. `fm` is the
+// metadata cache's frontmatter, `body` the note text (frontmatter allowed).
+function parseRoutineNote(fm, body, path) {
+  if (!fm || fm.type !== ROUTINE_TYPE) return null;
+  const basename = path ? String(path).split('/').pop().replace(/\.md$/i, '') : '';
+  const name = fm.name != null && String(fm.name).trim() ? String(fm.name).trim() : (basename || 'Routine');
+  const text = stripFrontmatter(body);
+  return {
+    path: path || null,
+    name,
+    routineType: routineTypeOf(fm.routine_type),
+    start: normalizeHM(fm.start),
+    end: normalizeHM(fm.end),
+    weekdays: normalizeWeekdays(fm.weekdays),
+    active: fm.active !== false,
+    createdAt: fm.created_at ? String(fm.created_at) : null,
+    steps: routineSteps(text),
+    log: parseLogTable(text, ROUTINE_LOG_SENTINEL),
+  };
+}
+
+// What a log row says about the day: skipped, or which step indices are
+// done. The Steps column is the record; the Done column ("3/3") is the
+// human-readable count and is recomputed on every write. A row with a done
+// marker and no indices (an agent wrote a habit-style Y) means every step.
+function routineRowState(row, total) {
+  if (!row) return { skipped: false, done: [] };
+  const marker = String(row.marker == null ? '' : row.marker).trim();
+  const kind = markerState(marker);
+  if (kind === 'skipped') return { skipped: true, done: [] };
+  const all = () => Array.from({ length: total }, (_, i) => i + 1);
+  const list = String((row.rest && row.rest[0]) || '').trim();
+  if (list) {
+    const set = new Set(list.split(/[,\s]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= total));
+    return { skipped: false, done: Array.from(set).sort((a, b) => a - b) };
+  }
+  if (kind === 'done') return { skipped: false, done: all() };
+  const frac = /^(\d+)\s*\/\s*(\d+)$/.exec(marker);
+  if (frac && total > 0 && Number(frac[1]) >= total) return { skipped: false, done: all() };
+  return { skipped: false, done: [] };
+}
+
+// AM when the routine starts before the split, PM from the split onward.
+// Both arguments are HH:MM strings; minutes since midnight are accepted too.
+function routineHalf(start, splitTime) {
+  const s = typeof start === 'number' ? start : hmToMin(normalizeHM(start), 0);
+  const split = typeof splitTime === 'number' ? splitTime : hmToMin(normalizeHM(splitTime), 13 * 60);
+  return s < split ? 'am' : 'pm';
+}
+
+function routineOccurrence(routine, day, splitTime, defaults) {
+  const d = (defaults && defaults[routine.routineType]) || DEFAULT_SETTINGS.routineDefaults[routine.routineType];
+  const startMin = hmToMin(routine.start, hmToMin(d.start, 0));
+  const endMin = hmToMin(routine.end, hmToMin(d.end, startMin));
+  const state = routineRowState(logRowFor(routine.log, day), routine.steps.length);
+  const steps = routine.steps.map((s) => ({ index: s.index, label: s.label, done: state.done.includes(s.index) }));
+  return {
+    routine, day, half: routineHalf(startMin, splitTime), startMin, endMin, steps,
+    done: steps.filter((s) => s.done).length, total: steps.length, skipped: state.skipped,
+  };
+}
+
+// The instances for one day: every active routine whose weekdays include
+// the day, in start order. A skipped day is an instance that renders as a
+// ghost; a day with no row is an instance with nothing checked yet.
+function routineOccurrences(routines, day, splitTime, defaults) {
+  const code = dayCode(day);
+  return (routines || [])
+    .filter((r) => r && r.active && Array.isArray(r.weekdays) && r.weekdays.includes(code))
+    .map((r) => routineOccurrence(r, day, splitTime, defaults))
+    .sort((a, b) => (a.startMin - b.startMin) || a.routine.name.localeCompare(b.routine.name));
+}
+
+// done: every step checked, and there is at least one. ghost: skipped.
+function routineCardState(occ) {
+  return { ghost: !!occ.skipped, done: !occ.skipped && occ.total > 0 && occ.done === occ.total };
+}
+
+function routineKicker(occ) { return `${occ.routine.routineType.toUpperCase()} ROUTINE`; }
+function routineTimeLabel(occ) { return `${fmtMin(occ.startMin)} - ${fmtMin(occ.endMin)}`; }
+
+// The next body after one step is checked or unchecked. Reads the day's row
+// from the bytes it is given (it runs inside vault.process, so two fast
+// taps cannot clobber each other), toggles the index and writes the row
+// back with the recomputed count.
+function routineLogAfterStep(data, day, index, next, total) {
+  const state = routineRowState(logRowFor(parseLogTable(data, ROUTINE_LOG_SENTINEL), day), total);
+  const set = new Set(state.done);
+  if (next) set.add(index); else set.delete(index);
+  const idx = Array.from(set).filter((n) => n >= 1 && n <= total).sort((a, b) => a - b);
+  return upsertLogRow(data, ROUTINE_LOG_SENTINEL, {
+    date: day, marker: `${idx.length}/${total}`, rest: [idx.join(',')], createWith: ROUTINE_LOG_SECTION,
+  });
+}
+function routineLogSkipped(data, day) {
+  return upsertLogRow(data, ROUTINE_LOG_SENTINEL, { date: day, marker: 'S', rest: [''], createWith: ROUTINE_LOG_SECTION });
+}
+function routineLogReset(data, day) { return removeLogRow(data, ROUTINE_LOG_SENTINEL, day); }
+
+// The New routine dialog's checks, pure so the sentences are testable.
+function validateRoutineInput(input) {
+  const i = input || {};
+  if (!String(i.name == null ? '' : i.name).trim()) return { ok: false, error: 'Give the routine a name.' };
+  const start = normalizeHM(i.start);
+  const end = normalizeHM(i.end);
+  if (!start || !end) return { ok: false, error: 'Times are HH:MM, for example 06:30.' };
+  if (hmToMin(end, 0) <= hmToMin(start, 0)) return { ok: false, error: 'The end must be after the start.' };
+  if (!normalizeWeekdays(i.weekdays).length) return { ok: false, error: 'Pick at least one weekday.' };
+  return { ok: true, error: null };
+}
+
+// The note a new routine starts as. Every contract field is written and
+// explicit. `defaults` is the { start, end } pair for the type, or the whole
+// per-type map. `opts.steps` seeds the list (one placeholder when empty),
+// `opts.nowIso` pins created_at.
+function routineTemplate(name, type, weekdays, defaults, opts) {
+  const o = opts || {};
+  const t = routineTypeOf(type);
+  const times = defaults && defaults.start
+    ? {
+      start: normalizeHM(defaults.start) || DEFAULT_SETTINGS.routineDefaults[t].start,
+      end: normalizeHM(defaults.end) || DEFAULT_SETTINGS.routineDefaults[t].end,
+    }
+    : routineDefaultsOf({ routineDefaults: defaults })[t];
+  const clean = String(name == null ? '' : name).trim() || 'Routine';
+  let days = normalizeWeekdays(weekdays);
+  if (!days.length) days = DEFAULT_SETTINGS.routineWeekdaysDefault.slice();
+  const steps = (Array.isArray(o.steps) ? o.steps : []).map((s) => String(s == null ? '' : s).trim()).filter(Boolean);
+  const nowIso = o.nowIso || new Date().toISOString();
+  return [
+    '---',
+    `type: ${ROUTINE_TYPE}`,
+    `name: ${JSON.stringify(clean)}`,
+    `routine_type: ${t}`,
+    `start: "${times.start}"`,
+    `end: "${times.end}"`,
+    `weekdays: [${days.join(', ')}]`,
+    'active: true',
+    `created_at: ${nowIso}`,
+    '---',
+    '',
+    `# ${clean}`,
+    '',
+    '## Steps',
+    ...(steps.length ? steps : ['First step']).map((s) => `- [ ] ${s}`),
+    '',
+    ROUTINE_LOG_SECTION.heading,
+    `<!-- ${ROUTINE_LOG_SENTINEL}: schema=${ROUTINE_LOG_SECTION.schema} -->`,
+    formatLogRow(ROUTINE_LOG_SECTION.header),
+    formatLogRow(ROUTINE_LOG_SECTION.header.map(() => '---')),
+    '',
+  ].join('\n');
+}
+
+/* ========================================================================== *
  * The plugin
  * ========================================================================== */
 
@@ -3158,6 +3442,8 @@ class IcorPlannerPlugin extends Plugin {
     // data.json beside the settings; never shown in the settings UI.
     if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
     this._pushTimers = new Map();
+    this.routines = [];              // the parsed routine notes (refreshRoutines); render reads this
+    this._routineCache = new Map();  // path -> { mtime, routine }: zero body reads when nothing changed
     this.calendarDefs = null;        // merged, deduplicated defs of every feed (mirrored to the cache note on healthy fetches)
     this.calendarDefsByFeed = {};    // feed id -> that feed's defs; a failed feed keeps its last entry
     this.calendarFeedSyncedAt = {};  // feed id -> ISO time of its last LIVE fetch (per-feed updated_at in the cache)
@@ -3200,6 +3486,9 @@ class IcorPlannerPlugin extends Plugin {
       // Instant calendar: rehydrate the last healthy fetch from the vault
       // cache (rendered pale + pulsing) before the live fetch replaces it.
       this.loadCalendarCache();
+      // The routine notes are read for their body, so they are parsed once
+      // here and re-read only when one changes (the hook below).
+      this.refreshRoutines().then(() => this.emitModelChanged());
       this.setupNextBadge();
       // First sync shortly after startup (never blocking plugin load), then on
       // the configured cadence.
@@ -3213,14 +3502,21 @@ class IcorPlannerPlugin extends Plugin {
     // writes, user edits, or the AI team moving an item by editing
     // frontmatter). The boundary is read at event time (this.paths()).
     const inside = (file) => !!(file && this.paths().isInside(file.path));
-    const notify = (file) => { if (inside(file)) this.emitModelChanged(); };
+    // A change under Routines/ re-reads the routine cache BEFORE the views
+    // re-render, because a routine's steps and log live in the note body,
+    // which the metadata cache does not carry.
+    const settle = (path) => (this.paths().isRoutine(path) ? this.refreshRoutines() : Promise.resolve());
+    const notify = (file) => { if (inside(file)) settle(file.path).then(() => this.emitModelChanged()); };
     this.registerEvent(this.app.metadataCache.on('changed', (file) => {
       notify(file);
-      if (inside(file)) this.schedulePushCheck(file.path);
+      // A routine is never a planner item, so there is nothing to push for it.
+      if (inside(file) && !this.paths().isRoutine(file.path)) this.schedulePushCheck(file.path);
     }));
     this.registerEvent(this.app.vault.on('delete', notify));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
-      if (inside(file) || this.paths().isInside(oldPath)) this.emitModelChanged();
+      if (inside(file) || this.paths().isInside(oldPath)) {
+        Promise.all([settle(file.path), settle(oldPath)]).then(() => this.emitModelChanged());
+      }
     }));
   }
 
@@ -3533,6 +3829,9 @@ class IcorPlannerPlugin extends Plugin {
     for (const key of TASK_SOURCES) {
       await mk(p.sourceFolder(key));
     }
+    // Routines too: a vault with none renders no routine cards, and the
+    // folder is where the New routine command puts the first one.
+    await mk(p.routines);
   }
 
   async syncNow(manual) {
@@ -3957,6 +4256,114 @@ class IcorPlannerPlugin extends Plugin {
     });
   }
 
+  /* ---- routines (2026-09-04): the body write path ------------------------- */
+
+  // The effective split as HH:MM: the lunch start while the lunch band is
+  // on, the split time otherwise. splitHour is the same rule in whole hours.
+  splitHM() {
+    const s = this.settings;
+    return normalizeHM(s.lunchEnabled ? s.lunchStart : s.splitTime) || '13:00';
+  }
+
+  // The routine notes, parsed. render() is synchronous and reads
+  // this.routines; this fills it. The body read is cached by the file's
+  // mtime, so a week render costs zero reads when nothing changed.
+  async refreshRoutines() {
+    const out = [];
+    try {
+      const folder = this.app.vault.getAbstractFileByPath(this.paths().routines);
+      const files = [];
+      const walk = (f) => {
+        for (const c of f.children || []) {
+          if (c instanceof TFolder) walk(c);
+          else if (c instanceof TFile && c.extension === 'md') files.push(c);
+        }
+      };
+      if (folder instanceof TFolder) walk(folder);
+      const seen = new Set();
+      for (const file of files) {
+        const cache = this.app.metadataCache.getFileCache(file);
+        const fm = cache && cache.frontmatter;
+        if (!fm || fm.type !== ROUTINE_TYPE) continue;
+        seen.add(file.path);
+        const mtime = file.stat ? file.stat.mtime : 0;
+        const hit = this._routineCache.get(file.path);
+        if (hit && hit.mtime === mtime) { out.push(hit.routine); continue; }
+        const text = await this.app.vault.cachedRead(file);
+        const routine = parseRoutineNote(fm, text, file.path);
+        if (!routine) continue;
+        routine.file = file;
+        this._routineCache.set(file.path, { mtime, routine });
+        out.push(routine);
+      }
+      for (const key of Array.from(this._routineCache.keys())) if (!seen.has(key)) this._routineCache.delete(key);
+    } catch { /* an unreadable note is skipped; the next change re-reads it */ }
+    this.routines = out;
+    return out;
+  }
+
+  // The day's routine instances for the board and the agenda.
+  routinesFor(day) {
+    if (this.settings.routinesEnabled === false) return [];
+    return routineOccurrences(this.routines || [], day, this.splitHM(), routineDefaultsOf(this.settings));
+  }
+
+  // Every log write goes through vault.process: the transform runs on the
+  // bytes on disk, atomically, never on a body read a moment earlier.
+  async processRoutine(path, fn) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error('the routine note is gone');
+    await this.app.vault.process(file, fn);
+  }
+  toggleRoutineStep(path, day, index, next, total) {
+    return this.processRoutine(path, (data) => routineLogAfterStep(data, day, index, next, total));
+  }
+  skipRoutine(path, day) { return this.processRoutine(path, (data) => routineLogSkipped(data, day)); }
+  unskipRoutine(path, day) { return this.processRoutine(path, (data) => routineLogReset(data, day)); }
+  resetRoutineDay(path, day) { return this.processRoutine(path, (data) => routineLogReset(data, day)); }
+
+  async setRoutineActive(path, active) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    await this.app.fileManager.processFrontMatter(file, (fm) => { fm.active = !!active; });
+  }
+
+  openNewRoutine() { new NewRoutineModal(this.app, this).open(); }
+
+  // Creates the note and returns its path. The parsed routine is put into
+  // the cache right away from the text just written, so the settings list
+  // and the board show it before the metadata cache has indexed the file;
+  // the changed hook re-reads it when that happens (same mtime: no read).
+  async createRoutine(input) {
+    const v = validateRoutineInput(input);
+    if (!v.ok) throw new Error(v.error);
+    await this.ensureFolders();
+    const folder = this.paths().routines;
+    const base = safeBasename(input.name);
+    let path = normalizePath(`${folder}/${base}.md`);
+    for (let n = 2; this.app.vault.getAbstractFileByPath(path) && n < 50; n++) {
+      path = normalizePath(`${folder}/${base}-${n}.md`);
+    }
+    const nowIso = new Date().toISOString();
+    const text = routineTemplate(input.name, input.type, input.weekdays,
+      { start: input.start, end: input.end }, { steps: input.steps, nowIso });
+    const file = await this.app.vault.create(path, text);
+    const fm = {
+      type: ROUTINE_TYPE, name: String(input.name).trim(), routine_type: routineTypeOf(input.type),
+      start: normalizeHM(input.start), end: normalizeHM(input.end),
+      weekdays: normalizeWeekdays(input.weekdays), active: true, created_at: nowIso,
+    };
+    const routine = parseRoutineNote(fm, text, path);
+    if (routine && file instanceof TFile) {
+      routine.file = file;
+      this._routineCache.set(path, { mtime: file.stat ? file.stat.mtime : 0, routine });
+      this.routines = (this.routines || []).filter((r) => r.path !== path).concat([routine]);
+    }
+    this.emitModelChanged();
+    new Notice(`Planner: created the routine "${fm.name}".`);
+    return path;
+  }
+
   /* ---- manual items: the write path with no API key in front of it ------- */
 
   // Create one manual task and return its path (or null on an empty title).
@@ -4203,28 +4610,115 @@ function renderCard(plugin, item, mode, view) {
     showCardMenu(plugin, item, view, { x: e.clientX, y: e.clientY });
   });
 
-  // Touch long-press opens the same menu: mobile webviews fire neither
-  // contextmenu nor HTML5 drag events, so this is the whole mobile write path.
+  wireLongPress(card, (pos) => showCardMenu(plugin, item, view, pos));
+  return card;
+}
+
+// Touch long-press opens the same menu as right-click: mobile webviews fire
+// neither contextmenu nor HTML5 drag events, so this is the whole mobile
+// write path for a card. Shared by task cards and routine cards. The click
+// that ends the press is swallowed (capture, once) so it neither opens the
+// note nor flips a step under the menu.
+function wireLongPress(el, onMenu) {
   let lpTimer = null, lpStart = null;
   const lpCancel = () => { if (lpTimer != null) { window.clearTimeout(lpTimer); lpTimer = null; } };
-  card.addEventListener('pointerdown', (e) => {
+  el.addEventListener('pointerdown', (e) => {
     if (e.pointerType !== 'touch') return;
     lpStart = { x: e.clientX, y: e.clientY };
     lpCancel();
     lpTimer = window.setTimeout(() => {
       lpTimer = null;
-      card.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); },
+      el.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); },
         { once: true, capture: true });
-      showCardMenu(plugin, item, view, lpStart);
+      onMenu(lpStart);
     }, 480);
   });
-  card.addEventListener('pointermove', (e) => {
+  el.addEventListener('pointermove', (e) => {
     if (lpTimer != null && lpStart
       && Math.hypot(e.clientX - lpStart.x, e.clientY - lpStart.y) > 8) lpCancel();
   });
-  card.addEventListener('pointerup', lpCancel);
-  card.addEventListener('pointercancel', lpCancel);
+  el.addEventListener('pointerup', lpCancel);
+  el.addEventListener('pointercancel', lpCancel);
+}
+
+// One routine block (2026-09-04). Not draggable: it sits where its time
+// puts it. Row one the kicker (type and time), row two the name, row three
+// the steps as the shared checklist with its "n of m". Complete strikes
+// like a task; skipped is a ghost with its rows disabled. The type is said
+// by the kicker word and by the lane half it sits in, never by a colour.
+function renderRoutineCard(plugin, occ, view) {
+  const state = routineCardState(occ);
+  const routine = occ.routine;
+  const card = document.createElement('div');
+  card.className = `iplan-card iplan-routine is-${routine.routineType}`;
+  card.setAttribute('data-routine', routine.path);
+  card.setAttribute('data-order', String(occ.startMin));
+  card.draggable = false;
+  if (state.done) card.classList.add('is-done');
+  if (state.ghost) card.classList.add('is-ghost');
+
+  const meta = document.createElement('div');
+  meta.className = 'iplan-card-meta iplan-routine-kicker';
+  const kind = document.createElement('span');
+  kind.textContent = routineKicker(occ);
+  const time = document.createElement('span');
+  time.className = 'iplan-routine-time';
+  time.textContent = routineTimeLabel(occ);
+  meta.appendChild(kind);
+  meta.appendChild(time);
+  if (state.ghost) {
+    const chip = document.createElement('span');
+    chip.className = 'iplan-chip';
+    chip.textContent = 'SKIPPED';
+    meta.appendChild(chip);
+  }
+  const title = document.createElement('div');
+  title.className = 'iplan-card-title';
+  title.textContent = routine.name;
+  card.appendChild(meta);
+  card.appendChild(title);
+
+  const model = checklistModel({
+    rows: occ.steps.map((s) => ({ id: s.index, label: s.label, checked: s.done, disabled: state.ghost })),
+  });
+  renderChecklist(card, model, {
+    ariaLabel: `${routine.name}, ${routineKicker(occ).toLowerCase()} steps`,
+    onToggle: (id, next) => plugin.toggleRoutineStep(routine.path, occ.day, Number(id), next, occ.total),
+    onProgress: (done, total) => card.classList.toggle('is-done', total > 0 && done === total),
+  });
+
+  const openNote = () => {
+    const file = plugin.app.vault.getAbstractFileByPath(routine.path);
+    if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
+  };
+  card.addEventListener('click', (e) => { if (!e.defaultPrevented) openNote(); });
+  card.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showRoutineMenu(plugin, occ, view, { x: e.clientX, y: e.clientY });
+  });
+  wireLongPress(card, (pos) => showRoutineMenu(plugin, occ, view, pos));
   return card;
+}
+
+// The routine menu, shared by right-click and long-press. Skip writes an S
+// row for the day; Unskip and Reset delete the day's row.
+function showRoutineMenu(plugin, occ, view, pos) {
+  const menu = new Menu();
+  const path = occ.routine.path;
+  if (occ.skipped) {
+    menu.addItem((mi) => mi.setTitle('Unskip today').setIcon('rotate-ccw')
+      .onClick(() => plugin.unskipRoutine(path, occ.day)));
+  } else {
+    menu.addItem((mi) => mi.setTitle('Skip today').setIcon('skip-forward')
+      .onClick(() => plugin.skipRoutine(path, occ.day)));
+  }
+  menu.addItem((mi) => mi.setTitle('Reset today').setIcon('eraser')
+    .onClick(() => plugin.resetRoutineDay(path, occ.day)));
+  menu.addItem((mi) => mi.setTitle('Open routine note').setIcon('file-text').onClick(() => {
+    const file = plugin.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
+  }));
+  menu.showAtPosition(pos);
 }
 
 // The card menu, shared by right-click (desktop) and long-press (touch).
@@ -4282,8 +4776,9 @@ function wireDropLane(laneEl, onDrop) {
   const clearLine = () => laneEl.querySelectorAll('.iplan-drop-line').forEach((el) => el.remove());
   // Ghost cards (finished occurrences) sit after the live sequence and take
   // no part in it, so they are excluded here exactly as they are excluded
-  // from the sequence the drop handler ranks over.
-  const cardsOf = () => Array.from(laneEl.querySelectorAll('.iplan-event, .iplan-card:not(.is-dragging):not(.is-ghost)'));
+  // from the sequence the drop handler ranks over. A routine block IS in the
+  // sequence, skipped (ghost) or not, so it is a position like an event chip.
+  const cardsOf = () => Array.from(laneEl.querySelectorAll('.iplan-event, .iplan-card.iplan-routine, .iplan-card:not(.is-dragging):not(.is-ghost)'));
   const indexForY = (y) => {
     const cards = cardsOf();
     for (let i = 0; i < cards.length; i++) {
@@ -4584,6 +5079,16 @@ class PlannerBoardView extends ItemView {
       ghostsByCell.get(key).push(g);
     }
     for (const list of ghostsByCell.values()) list.sort((a, b) => String(a.due || '').localeCompare(String(b.due || '')));
+    // Routines (2026-09-04): the day's instances, by lane, sequenced with
+    // the events and the tasks below.
+    const routinesByCell = new Map();
+    for (const day of visibleDays) {
+      for (const occ of this.plugin.routinesFor(day)) {
+        const key = `${day}|${occ.half}`;
+        if (!routinesByCell.has(key)) routinesByCell.set(key, []);
+        routinesByCell.get(key).push(occ);
+      }
+    }
 
     const eventsByCell = new Map();
     const allDayByDay = new Map();
@@ -4638,25 +5143,29 @@ class PlannerBoardView extends ItemView {
         const lane = col.createDiv({ cls: 'iplan-lane', attr: { 'data-day': day, 'data-half': half } });
         const laneEvents = (eventsByCell.get(`${day}|${half}`) || []);
         const cell = itemsByCell.get(`${day}|${half}`) || [];
-        // One sequential order per lane: event 09:00, task, event 11:00, task.
-        for (const entry of laneSequence(laneEvents, cell)) {
+        const laneRoutines = routinesByCell.get(`${day}|${half}`) || [];
+        // One sequential order per lane: event 09:00, routine 09:00, task,
+        // event 11:00, task.
+        for (const entry of laneSequence(laneEvents, cell, laneRoutines)) {
           if (entry.kind === 'event') {
             const chip = lane.createDiv({ cls: 'iplan-event' });
             chip.createSpan({ cls: 'iplan-event-time', text: `${fmtTimeHM(entry.ev.start)}` });
             chip.createSpan({ cls: 'iplan-event-title', text: entry.ev.title });
             this.wireEvent(chip, entry.ev);
+          } else if (entry.kind === 'routine') {
+            lane.appendChild(renderRoutineCard(this.plugin, entry.occ, this));
           } else {
             lane.appendChild(renderCard(this.plugin, entry.it, 'board', this));
           }
         }
         const ghosts = ghostsByCell.get(`${day}|${half}`) || [];
         for (const g of ghosts) lane.appendChild(renderCard(this.plugin, g, 'board', this));
-        if (!laneEvents.length && !cell.length && !ghosts.length) lane.createDiv({ cls: 'iplan-lane-empty', text: half === 'am' ? 'morning' : 'afternoon' });
+        if (!laneEvents.length && !cell.length && !ghosts.length && !laneRoutines.length) lane.createDiv({ cls: 'iplan-lane-empty', text: half === 'am' ? 'morning' : 'afternoon' });
 
         wireDropLane(lane, (path, index) => {
           // Same mixed sequence the lane was rendered from, minus the dragged
-          // task, so `index` (computed over chips + cards) maps 1:1.
-          const current = laneSequence(laneEvents, cell).filter((x) => x.kind === 'event' || x.path !== path);
+          // task, so `index` (computed over chips, blocks and cards) maps 1:1.
+          const current = laneSequence(laneEvents, cell, laneRoutines).filter((x) => x.kind !== 'task' || x.path !== path);
           const order = this.plugin.orderForInsert(current, index);
           this.plugin.assignItem(path, day, half, order);
         });
@@ -4890,7 +5399,10 @@ function trayRevealSpendsTurn(decision) {
 // planned half are skipped (the board skips them too). Events pass through
 // by reference so the stale treatment and the detail modal see the real
 // objects. No splitHour parameter: expanded events already carry their half.
-function agendaSections(items, events, today) {
+// Routine instances (2026-09-04, routineOccurrences output for `today`) join
+// the same sequence per half, so the AGENDA tab stays board-parity by
+// construction as routines arrive.
+function agendaSections(items, events, today, routineOccs) {
   const allDay = [];
   const evHalf = { am: [], pm: [] };
   for (const ev of events || []) {
@@ -4903,11 +5415,16 @@ function agendaSections(items, events, today) {
     if (it.plannedDay !== today || !it.plannedHalf) continue;
     taskHalf[it.plannedHalf].push(it);
   }
+  const routineHalfOf = { am: [], pm: [] };
+  for (const occ of routineOccs || []) {
+    if (occ.day !== today) continue;
+    routineHalfOf[occ.half === 'am' ? 'am' : 'pm'].push(occ);
+  }
   return {
     day: today,
     allDay,
-    am: laneSequence(evHalf.am, taskHalf.am),
-    pm: laneSequence(evHalf.pm, taskHalf.pm),
+    am: laneSequence(evHalf.am, taskHalf.am, routineHalfOf.am),
+    pm: laneSequence(evHalf.pm, taskHalf.pm, routineHalfOf.pm),
   };
 }
 
@@ -5046,7 +5563,7 @@ class PlannerTrayView extends ItemView {
     const events = this.plugin.calendarDefs
       ? icsEventsForWeek(this.plugin.calendarDefs, mondayOf(today), this.plugin.splitHour())
       : [];
-    const model = agendaSections(items, events, today);
+    const model = agendaSections(items, events, today, this.plugin.routinesFor(today));
 
     const dayHead = el.createDiv({ cls: 'iplan-tray-agenda-head' });
     dayHead.createSpan({ cls: 'iplan-tray-agenda-title', text: fmtDayTitle(today, today) });
@@ -5077,6 +5594,8 @@ class PlannerTrayView extends ItemView {
           chip.createSpan({ cls: 'iplan-event-time', text: fmtTimeHM(entry.ev.start) });
           chip.createSpan({ cls: 'iplan-event-title', text: entry.ev.title });
           wireEventChip(this.plugin, chip, entry.ev);
+        } else if (entry.kind === 'routine') {
+          body.appendChild(renderRoutineCard(this.plugin, entry.occ, this));
         } else {
           body.appendChild(renderCard(this.plugin, entry.it, 'tray', this));
         }
@@ -5787,5 +6306,10 @@ module.exports.__test = {
   agendaSections, laneSequence, TRAY_TABS,
   todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
   checklistModel, checklistProgressText, parseLogTable, logRowFor, upsertLogRow, removeLogRow, markerState,
+  ROUTINE_TYPE, ROUTINE_TYPES, ROUTINE_LOG_SENTINEL, ROUTINE_LOG_SECTION, WEEKDAY_CODES, LANE_KIND_RANK,
+  dayCode, normalizeWeekdays, routineTypeOf, normalizeHM, routineDefaultsOf, routineWeekdaysDefaultOf,
+  routineSteps, parseRoutineNote, routineRowState, routineHalf, routineOccurrence, routineOccurrences,
+  routineCardState, routineKicker, routineTimeLabel, routineLogAfterStep, routineLogSkipped, routineLogReset,
+  validateRoutineInput, routineTemplate,
   SOURCES, DEFAULT_SETTINGS,
 };

@@ -306,7 +306,11 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
 .iplan-tray-note-hint a { color: var(--iplan-marker); text-decoration: none; }
 .iplan-tray-note-hint a:hover { text-decoration: underline; }
 
-.iplan-root button.iplan-check, .iplan-tray-root button.iplan-check {
+/* The check control. A task card's is a button; a checklist row's is a span
+ * inside the row button (2026-09-04). One rule so a step and a task check
+ * are the same drawn object. */
+.iplan-root button.iplan-check, .iplan-tray-root button.iplan-check,
+.iplan-root .iplan-checklist-row .iplan-check, .iplan-tray-root .iplan-checklist-row .iplan-check {
   all: unset;
   cursor: pointer;
   flex: 0 0 auto;
@@ -318,7 +322,8 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
   box-sizing: border-box;
   transition: border-color 120ms, background 120ms;
 }
-.iplan-root button.iplan-check:hover, .iplan-tray-root button.iplan-check:hover {
+.iplan-root button.iplan-check:hover, .iplan-tray-root button.iplan-check:hover,
+.iplan-root .iplan-checklist-row:hover .iplan-check, .iplan-tray-root .iplan-checklist-row:hover .iplan-check {
   border-color: var(--iplan-success);
 }
 .iplan-card.is-done .iplan-check {
@@ -682,6 +687,12 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
     font-size: 16px;   /* platform correction, labelled: below 16px iOS Safari
                           zooms the viewport on focus and reflows the sidebar */
   }
+  /* A checklist row (2026-09-04) is the whole target: 44px tall, the check
+   * circle stays 15px and the row's own height makes up the rest. */
+  .iplan-root button.iplan-checklist-row, .iplan-tray-root button.iplan-checklist-row {
+    min-height: 44px;
+    align-items: center;
+  }
 }
 
 /* -------------------------------------------------- settings notes ---- */
@@ -1019,10 +1030,111 @@ ul.iplan-settings-list li { margin: 3px 0; }
 .iplan-board.is-day .iplan-card-meta { font-size: 10.5px; gap: 8px; margin-top: 6px; }
 .iplan-board.is-day .iplan-source-mark { width: 14px; height: 14px; }
 .iplan-board.is-day .iplan-chip { font-size: 10px; padding: 2px 7px; }
-.iplan-board.is-day button.iplan-check { width: 18px; height: 18px; }
+.iplan-board.is-day button.iplan-check,
+.iplan-board.is-day .iplan-checklist-row .iplan-check { width: 18px; height: 18px; }
+.iplan-board.is-day button.iplan-checklist-row { font-size: 13.5px; padding: 4px 6px 4px 2px; }
+.iplan-board.is-day .iplan-checklist-progress { font-size: 10px; }
 .iplan-board.is-day .iplan-event { padding: 8px 12px; }
 .iplan-board.is-day .iplan-event-time { font-size: 11px; }
 .iplan-board.is-day .iplan-event-title { font-size: 13.5px; }
 .iplan-board.is-day .iplan-split-time { font-size: 10.5px; }
 .iplan-board.is-day .iplan-countdown-label { font-size: 10px; }
 .iplan-board.is-day .iplan-countdown-track { height: 4px; }
+
+/* ======================================================== 2026-09-04 ====
+ * Routines and the shared checklist (2026-09-04).
+ * A routine card has a task card's shape with ONE hairline edge on the left
+ * for all three types: the type is said by the kicker word and by the lane
+ * half the block sits in, never by a colour. The checked step mark is the
+ * success ink, the same as a done task's check. No token is minted here and
+ * no colour literal appears; every value is an --iplan-* alias above.
+ * ====================================================================== */
+
+/* ---------------------------------------------------------- routine card -- */
+/* Not draggable, so no grab hand; the rows inside carry the pointer. Column
+ * layout: kicker, name, steps. */
+.iplan-card.iplan-routine {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  cursor: default;
+  border-left: 2px solid var(--iplan-hairline);
+}
+.iplan-card.iplan-routine .iplan-routine-kicker { margin-top: 0; }
+.iplan-routine-time { color: var(--iplan-faint); }
+
+/* ------------------------------------------------------------ checklist -- */
+.iplan-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 4px;
+}
+/* A row is a button so the keyboard gets it for free. Stated under the two
+ * roots so the theme's button rule stands down, same as every control here. */
+.iplan-root button.iplan-checklist-row, .iplan-tray-root button.iplan-checklist-row {
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 3px 4px 3px 2px;
+  border-radius: 4px;
+  font-family: var(--iplan-display);
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--iplan-paper);
+  text-align: left;
+  transition: background 120ms var(--iplan-ease);
+}
+/* Hover adds geometry (the wash), the same recipe as every hover in this file. */
+.iplan-root button.iplan-checklist-row:hover, .iplan-tray-root button.iplan-checklist-row:hover {
+  background: var(--iplan-wash);
+}
+/* Focus: a stroke that was not there at rest, in the marker hue; the check
+ * inside picks up the success edge from the hover rule above. */
+.iplan-root button.iplan-checklist-row:focus-visible, .iplan-tray-root button.iplan-checklist-row:focus-visible {
+  box-shadow: 0 0 0 1px var(--iplan-marker);
+}
+.iplan-checklist-row .iplan-check { margin-top: 1px; }
+.iplan-checklist-label { flex: 1; min-width: 0; }
+.iplan-checklist-row[aria-checked="true"] .iplan-check {
+  background: var(--iplan-success);
+  border-color: var(--iplan-success);
+}
+.iplan-checklist-row[aria-checked="true"] .iplan-checklist-label {
+  text-decoration: line-through;
+  color: var(--iplan-faint);
+}
+/* A row that cannot be checked (a skipped day): no hand, no hover wash, the
+ * quiet ink as a token step and never an opacity dial. */
+.iplan-root button.iplan-checklist-row[aria-disabled="true"],
+.iplan-tray-root button.iplan-checklist-row[aria-disabled="true"] {
+  cursor: default;
+  color: var(--iplan-faint);
+}
+.iplan-root button.iplan-checklist-row[aria-disabled="true"]:hover,
+.iplan-tray-root button.iplan-checklist-row[aria-disabled="true"]:hover { background: transparent; }
+/* Recorded as not done: the dash marker's own shape, drawn as a dashed ring. */
+.iplan-checklist-row.is-missed .iplan-check { border-style: dashed; }
+.iplan-checklist-progress {
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 8.5px;
+  color: var(--iplan-dim);
+  padding: 2px 2px 0;
+}
+.iplan-checklist.is-compact button.iplan-checklist-row { font-size: 11px; padding: 2px 4px 2px 2px; }
+
+/* ------------------------------------------- weekday row and the modal -- */
+.iplan-weekdays { margin-right: 0; }
+.iplan-settings .iplan-weekdays button.iplan-seg-btn { min-width: 20px; text-align: center; }
+.iplan-routine-modal-error {
+  font-size: 12px;
+  color: var(--iplan-overdue);
+  min-height: 1.4em;
+  margin: 2px 0 6px;
+}
