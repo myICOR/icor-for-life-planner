@@ -103,7 +103,7 @@ const CONNECTORS = {
     // The star flag is the one write the mailbox ever sees; closing = unstar.
     setClosed: async (s, item, closed, deps) => {
       try {
-        await imapSetStarredRaw(trimmed(s.imapHost), trimmed(s.imapUser), trimmed(s.imapPassword), item.id, !closed, deps);
+        await imapSetStarredRaw(imapTransportOptions(s), trimmed(s.imapUser), trimmed(s.imapPassword), item.id, !closed, deps);
       } catch (e) {
         if (/tls unavailable/i.test((e && e.message) || '')) {
           throw new Error('the email star can only be written from the desktop app');
@@ -1164,14 +1164,33 @@ function classifyImapError(err, host) {
   return out('protocol', `IMAP host answered unexpectedly${serverText ? ` (${serverText.slice(0, 80)})` : ''}.`);
 }
 
-// The one place a mailbox socket is opened, for both sessions. `deps.connect`
-// lets a test script the transport (or prove no socket was opened at all);
-// the default is implicit TLS on 993. Throws 'tls unavailable' on mobile.
-function imapConnect(host, deps) {
-  if (deps && typeof deps.connect === 'function') return deps.connect({ host, port: 993, servername: host });
-  let tls;
-  try { tls = require('tls'); } catch { throw new Error('tls unavailable'); }
-  return tls.connect({ host, port: 993, servername: host });
+// Transport parameters for the mailbox, read once off the settings. Pure.
+function imapTransportOptions(settings) {
+  const s = settings || {};
+  return { host: trimmed(s.imapHost), port: 993, security: 'tls' };
+}
+
+// The object handed to tls.connect for a direct TLS connection. Pure, so
+// the suite can read what the transport would be asked to do.
+function imapTlsOptions(opts) {
+  return { host: opts.host, port: opts.port, servername: opts.host };
+}
+
+// The one place a mailbox socket is opened, for every session. Resolves
+// { socket, greeted }: `greeted` says whether the server's greeting line was
+// already consumed by the connector (false for implicit TLS: the session
+// waits for it). `deps.tls` lets a test script the transport, or prove no
+// socket was opened at all; the default is implicit TLS on the configured
+// port. Rejects 'tls unavailable' where the runtime has no tls module
+// (the mobile app).
+function imapConnect(opts, deps) {
+  return new Promise((resolve, reject) => {
+    let tlsMod = deps && deps.tls;
+    if (!tlsMod) { try { tlsMod = require('tls'); } catch { return reject(new Error('tls unavailable')); } }
+    let socket;
+    try { socket = tlsMod.connect(imapTlsOptions(opts)); } catch (e) { return reject(e); }
+    resolve({ socket, greeted: false });
+  });
 }
 
 // A tagged non-OK reply as an Error that keeps what the server said and
@@ -1182,115 +1201,153 @@ function imapReplyError(stage, statusLine) {
   });
 }
 
-// One short read-only IMAP session. Returns normalized task items.
-function imapFetchStarredRaw(host, user, pass, maxItems, deps) {
+// One IMAP session, the only state machine the mailbox ever meets. Connects,
+// waits for the greeting, LOGINs, runs `steps` in order, LOGOUTs, resolves
+// the shared `ctx`. A step is { stage, cmd(ctx) -> string | null,
+// untagged?(entry, ctx) }: `cmd` returning null ends the session early
+// (nothing left to ask, for instance no starred mail to fetch). A tagged
+// non-OK reply rejects with imapReplyError(stage, line); a `* BYE` greeting
+// rejects 'server refused connection'; 20 s of silence rejects 'timeout'.
+// The read, the star write and the probe are step lists over this one
+// machine, so their greeting / login / error handling cannot drift apart.
+function imapSession(opts, user, pass, steps, deps) {
   return new Promise((resolve, reject) => {
-    let socket;
-    try { socket = imapConnect(host, deps); } catch (e) { return reject(e); }
+    const ctx = {};
+    let socket = null;
     let buffer = '';
-    let stage = 'greeting';
+    let stage = 'connect';
     let tagN = 0;
     let pendingTag = null;
-    const fetched = []; // raw FETCH entries
-    let uids = [];
-    const items = [];
-    const timer = setTimeout(() => { try { socket.destroy(); } catch {} reject(new Error('timeout')); }, 20000);
-    const fail = (err) => { clearTimeout(timer); try { socket.destroy(); } catch {} reject(err); };
-    const finish = () => { clearTimeout(timer); try { socket.end(); } catch {} resolve(items); };
-
+    let stepIndex = -1;
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (socket) { try { socket.destroy(); } catch {} }
+      reject(err);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.end(); } catch {}
+      resolve(ctx);
+    };
+    const timer = setTimeout(() => fail(new Error('timeout')), 20000);
     const send = (cmd) => {
       tagN += 1;
       pendingTag = `A${tagN}`;
       socket.write(`${pendingTag} ${cmd}\r\n`);
     };
-
-    const step = (statusLine) => {
-      const okTagged = statusLine.startsWith(`${pendingTag} OK`);
-      if (!okTagged) return fail(imapReplyError(stage, statusLine));
-      if (stage === 'login') {
-        stage = 'examine';
-        send('EXAMINE INBOX');
-      } else if (stage === 'examine') {
-        stage = 'search';
-        send('UID SEARCH FLAGGED');
-      } else if (stage === 'search') {
-        if (!uids.length) return finish();
-        const take = uids.slice(-maxItems);
-        stage = 'fetch';
-        send(`UID FETCH ${take.join(',')} (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])`);
-      } else if (stage === 'fetch') {
-        for (const entry of fetched) {
-          const um = /UID (\d+)/.exec(entry);
-          const uid = um ? um[1] : null;
-          if (!uid) continue;
-          // The literal (header block) was inlined after the first \n.
-          const headerText = entry.includes('\n') ? entry.slice(entry.indexOf('\n') + 1) : '';
-          const unfolded = headerText.replace(/\r?\n[ \t]+/g, ' ');
-          const header = (name) => {
-            const hm = new RegExp(`^${name}:\\s*(.*)$`, 'im').exec(unfolded);
-            return hm ? hm[1].trim() : null;
-          };
-          const subject = decodeRfc2047(header('Subject') || '') || '(no subject)';
-          const from = decodeRfc2047(header('From') || '');
-          const date = header('Date');
-          const messageId = (header('Message-ID') || '').replace(/^<|>$/g, '');
-          const dateLine = date ? (() => { const d = new Date(date); return isNaN(d) ? null : localDayStr(d); })() : null;
-          let url = null;
-          if (/gmail|googlemail/i.test(host) && messageId) {
-            url = `https://mail.google.com/mail/u/0/#search/rfc822msgid:${encodeURIComponent(messageId)}`;
-          }
-          items.push({
-            source: 'email',
-            id: String(uid),
-            title: subject,
-            description: [from && `From: ${from}`, dateLine && `Received: ${dateLine}`].filter(Boolean).join('\n'),
-            due: null,
-            priority: 4,
-            url,
-            tags: [],
-            status: null,
-            recurring: false,
-            dueString: null,
-          });
-        }
-        items.reverse(); // newest first
-        stage = 'logout';
-        send('LOGOUT');
-      } else if (stage === 'logout') {
-        finish();
+    const login = () => { stage = 'login'; send(`LOGIN ${imapQuote(user)} ${imapQuote(pass)}`); };
+    const logout = () => { stage = 'logout'; send('LOGOUT'); };
+    const next = () => {
+      stepIndex += 1;
+      if (stepIndex >= steps.length) return logout();
+      const step = steps[stepIndex];
+      let cmd;
+      try { cmd = step.cmd(ctx); } catch (e) { return fail(e); }
+      if (cmd == null) return logout();
+      stage = step.stage;
+      send(cmd);
+    };
+    const onEntry = (entry) => {
+      if (stage === 'greeting') {
+        if (entry.startsWith('* OK') || entry.startsWith('* PREAUTH')) return login();
+        if (entry.startsWith('* BYE')) return fail(new Error('server refused connection'));
+        return;
+      }
+      if (pendingTag && entry.startsWith(`${pendingTag} `)) {
+        if (!entry.startsWith(`${pendingTag} OK`)) return fail(imapReplyError(stage, entry));
+        if (stage === 'logout') return finish();
+        return next();
+      }
+      const step = stepIndex >= 0 ? steps[stepIndex] : null;
+      if (step && step.untagged && entry.startsWith('* ')) {
+        try { step.untagged(entry, ctx); } catch (e) { fail(e); }
       }
     };
-
-    socket.on('secureConnect', () => { /* wait for greeting line */ });
-    socket.on('data', (chunk) => {
-      buffer += chunk.toString('binary');
-      const { entries, rest } = imapSplitResponses(buffer);
-      buffer = rest;
-      for (const entry of entries) {
-        if (stage === 'greeting') {
-          if (entry.startsWith('* OK') || entry.startsWith('* PREAUTH')) {
-            stage = 'login';
-            send(`LOGIN ${imapQuote(user)} ${imapQuote(pass)}`);
-          } else if (entry.startsWith('* BYE')) {
-            return fail(new Error('server refused connection'));
-          }
-          continue;
-        }
-        if (entry.startsWith('* SEARCH')) {
-          uids = entry.slice(8).trim().split(/\s+/).filter((x) => /^\d+$/.test(x));
-          continue;
-        }
-        if (/^\* \d+ FETCH/.test(entry)) {
-          fetched.push(Buffer.from(entry, 'binary').toString('utf8'));
-          continue;
-        }
-        if (pendingTag && entry.startsWith(`${pendingTag} `)) {
-          step(entry);
-        }
-      }
-    });
-    socket.on('error', (err) => fail(err));
+    imapConnect(opts, deps).then(({ socket: sock, greeted }) => {
+      if (settled) { try { sock.destroy(); } catch {} return; }
+      socket = sock;
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString('binary');
+        const { entries, rest } = imapSplitResponses(buffer);
+        buffer = rest;
+        for (const entry of entries) { if (settled) break; onEntry(entry); }
+      });
+      socket.on('error', (err) => fail(err));
+      if (greeted) login(); else stage = 'greeting';
+    }, fail);
   });
+}
+
+// Raw FETCH entries (header block inlined after the first newline) to the
+// normalized item shape, newest first. Pure.
+function imapItemsFromFetch(fetched, host) {
+  const items = [];
+  for (const entry of fetched) {
+    const um = /UID (\d+)/.exec(entry);
+    const uid = um ? um[1] : null;
+    if (!uid) continue;
+    const headerText = entry.includes('\n') ? entry.slice(entry.indexOf('\n') + 1) : '';
+    const unfolded = headerText.replace(/\r?\n[ \t]+/g, ' ');
+    const header = (name) => {
+      const hm = new RegExp(`^${name}:\\s*(.*)$`, 'im').exec(unfolded);
+      return hm ? hm[1].trim() : null;
+    };
+    const subject = decodeRfc2047(header('Subject') || '') || '(no subject)';
+    const from = decodeRfc2047(header('From') || '');
+    const date = header('Date');
+    const messageId = (header('Message-ID') || '').replace(/^<|>$/g, '');
+    const dateLine = date ? (() => { const d = new Date(date); return isNaN(d) ? null : localDayStr(d); })() : null;
+    let url = null;
+    if (/gmail|googlemail/i.test(host) && messageId) {
+      url = `https://mail.google.com/mail/u/0/#search/rfc822msgid:${encodeURIComponent(messageId)}`;
+    }
+    items.push({
+      source: 'email',
+      id: String(uid),
+      title: subject,
+      description: [from && `From: ${from}`, dateLine && `Received: ${dateLine}`].filter(Boolean).join('\n'),
+      due: null,
+      priority: 4,
+      url,
+      tags: [],
+      status: null,
+      recurring: false,
+      dueString: null,
+    });
+  }
+  items.reverse(); // newest first
+  return items;
+}
+
+// The read script: EXAMINE (read-only), UID SEARCH FLAGGED, one UID FETCH
+// of header fields only. Returns normalized task items.
+function imapFetchStarredRaw(opts, user, pass, maxItems, deps) {
+  const steps = [
+    { stage: 'examine', cmd: () => 'EXAMINE INBOX' },
+    {
+      stage: 'search', cmd: () => 'UID SEARCH FLAGGED',
+      untagged: (entry, ctx) => {
+        if (entry.startsWith('* SEARCH')) ctx.uids = entry.slice(8).trim().split(/\s+/).filter((x) => /^\d+$/.test(x));
+      },
+    },
+    {
+      stage: 'fetch',
+      cmd: (ctx) => {
+        const uids = ctx.uids || [];
+        if (!uids.length) return null;
+        return `UID FETCH ${uids.slice(-maxItems).join(',')} (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])`;
+      },
+      untagged: (entry, ctx) => {
+        if (/^\* \d+ FETCH/.test(entry)) (ctx.fetched = ctx.fetched || []).push(Buffer.from(entry, 'binary').toString('utf8'));
+      },
+    },
+  ];
+  return imapSession(opts, user, pass, steps, deps).then((ctx) => imapItemsFromFetch(ctx.fetched || [], opts.host));
 }
 
 // Classifier reason -> connector reason (the contract the UI renders).
@@ -1301,9 +1358,10 @@ function imapReasonToConnector(reason) {
 }
 
 async function emailFetchStarred(settings, deps) {
-  const host = (settings.imapHost || '').trim();
-  const user = (settings.imapUser || '').trim();
-  const pass = (settings.imapPassword || '').trim();
+  const opts = imapTransportOptions(settings);
+  const host = opts.host;
+  const user = trimmed(settings.imapUser);
+  const pass = trimmed(settings.imapPassword);
   if (!host || !user || !pass) {
     return degraded('email', 'no-token', 'Starred email is not connected (host, address or app password missing).');
   }
@@ -1314,7 +1372,7 @@ async function emailFetchStarred(settings, deps) {
     return degraded('email', 'misconfigured', c.message, c.hint, c.docUrl);
   }
   try {
-    const items = await imapFetchStarredRaw(host, user, pass, 50, deps);
+    const items = await imapFetchStarredRaw(opts, user, pass, 50, deps);
     return okResult('email', items);
   } catch (e) {
     const c = classifyImapError(e, host);
@@ -1322,46 +1380,15 @@ async function emailFetchStarred(settings, deps) {
   }
 }
 
-// Set or clear \Flagged on one message. The ONLY write the mailbox ever
-// sees, armed by completeOnSource. SELECT (not EXAMINE) + UID STORE.
-function imapSetStarredRaw(host, user, pass, uid, starred, deps) {
-  return new Promise((resolve, reject) => {
-    let socket;
-    try { socket = imapConnect(host, deps); } catch (e) { return reject(e); }
-    let buffer = '';
-    let stage = 'greeting';
-    let tagN = 0;
-    let pendingTag = null;
-    const timer = setTimeout(() => { try { socket.destroy(); } catch {} reject(new Error('timeout')); }, 20000);
-    const fail = (err) => { clearTimeout(timer); try { socket.destroy(); } catch {} reject(err); };
-    const finish = () => { clearTimeout(timer); try { socket.end(); } catch {} resolve(); };
-    const send = (cmd) => { tagN += 1; pendingTag = `A${tagN}`; socket.write(`${pendingTag} ${cmd}\r\n`); };
-    socket.on('data', (chunk) => {
-      buffer += chunk.toString('binary');
-      const { entries, rest } = imapSplitResponses(buffer);
-      buffer = rest;
-      for (const entry of entries) {
-        if (stage === 'greeting') {
-          if (entry.startsWith('* OK') || entry.startsWith('* PREAUTH')) {
-            stage = 'login';
-            send(`LOGIN ${imapQuote(user)} ${imapQuote(pass)}`);
-          } else if (entry.startsWith('* BYE')) return fail(new Error('server refused connection'));
-          continue;
-        }
-        if (pendingTag && entry.startsWith(`${pendingTag} `)) {
-          if (!entry.startsWith(`${pendingTag} OK`)) return fail(imapReplyError(stage, entry));
-          if (stage === 'login') { stage = 'select'; send('SELECT INBOX'); }
-          else if (stage === 'select') {
-            stage = 'store';
-            send(`UID STORE ${uid} ${starred ? '+' : '-'}FLAGS (\\Flagged)`);
-          }
-          else if (stage === 'store') { stage = 'logout'; send('LOGOUT'); }
-          else if (stage === 'logout') finish();
-        }
-      }
-    });
-    socket.on('error', (err) => fail(err));
-  });
+// The star-write script. Set or clear \Flagged on one message: the ONLY
+// write the mailbox ever sees, armed by completeOnSource. SELECT (not
+// EXAMINE) + exactly one UID STORE.
+function imapSetStarredRaw(opts, user, pass, uid, starred, deps) {
+  const steps = [
+    { stage: 'select', cmd: () => 'SELECT INBOX' },
+    { stage: 'store', cmd: () => `UID STORE ${uid} ${starred ? '+' : '-'}FLAGS (\\Flagged)` },
+  ];
+  return imapSession(opts, user, pass, steps, deps).then(() => undefined);
 }
 
 /* ========================================================================== *
@@ -4487,6 +4514,7 @@ module.exports.__test = {
   decodeRfc2047, icsUnescape,
   todoistPriorityRank, imapSplitResponses, imapQuote,
   imapProviderOf, classifyImapError, imapReplyError, imapReasonToConnector, imapConnect, IMAP_PROVIDERS,
+  imapTransportOptions, imapTlsOptions, imapSession, imapItemsFromFetch, imapFetchStarredRaw, imapSetStarredRaw,
   parseIcs, icsParseDate, expandOccurrences, icsEventsForWeek,
   googleCalendarEventUrl,
   serializeCalendarDefs, reviveCalendarDefs,

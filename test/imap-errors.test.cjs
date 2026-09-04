@@ -96,7 +96,7 @@ test('the provider is read off the host', () => {
 
 test('an outlook host says OAuth is needed before any socket is opened', async () => {
   let opened = 0;
-  const deps = { connect: () => { opened += 1; throw new Error('socket opened'); } };
+  const deps = { tls: { connect: () => { opened += 1; throw new Error('socket opened'); } } };
   const r = await T.emailFetchStarred({ imapHost: 'outlook.office365.com', imapUser: 'a@b.c', imapPassword: 'x' }, deps);
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'misconfigured');
@@ -109,7 +109,7 @@ test('an outlook host says OAuth is needed before any socket is opened', async (
   assert.equal(g.reason, 'unreachable');
   // A DNS failure thrown by the transport reads as DNS.
   const d = await T.emailFetchStarred({ imapHost: 'nope.example.org', imapUser: 'a@b.c', imapPassword: 'x' },
-    { connect: () => { throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }); } });
+    { tls: { connect: () => { throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }); } } });
   assert.equal(d.reason, 'unreachable');
   assert.equal(d.message, 'IMAP host not found.');
   assert.equal(d.hint, 'Check the host name for typos.');
@@ -128,12 +128,14 @@ test('the tagged reply and the stage ride the Error', () => {
   assert.equal(e2.stage, 'search');
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
-  // Both sessions (the read and the star write) must build failures through it.
-  assert.equal((code.match(/fail\(imapReplyError\(stage, /g) || []).length, 2, 'both IMAP sessions must keep the server text');
+  // The one session machine builds every failure through it, and there IS
+  // only one machine: one greeting handler, one place the reply is judged.
+  assert.equal((code.match(/fail\(imapReplyError\(stage, /g) || []).length, 1, 'the session must keep the server text');
+  assert.equal((code.match(/stage === 'greeting'/g) || []).length, 1, 'exactly one IMAP state machine');
   assert.doesNotMatch(code, /new Error\(authFail \? 'auth'/, 'the old text-dropping error is back');
-  // and both sessions open their socket through the one injectable connector
-  assert.equal((code.match(/socket = imapConnect\(host, deps\)/g) || []).length, 2, 'the read session and the star write both use the shared connector');
-  assert.equal((code.match(/tls\.connect\(/g) || []).length, 1, 'exactly one raw tls.connect call site');
+  // and the machine opens its socket through the one injectable connector
+  assert.match(code, /imapConnect\(opts, deps\)\.then\(/, 'the session uses the shared connector');
+  assert.equal((code.match(/tlsMod\.connect\(/g) || []).length, 1, 'exactly one raw tls connect call site');
 });
 
 test('the hint reaches the tray note and the board notice', () => {
