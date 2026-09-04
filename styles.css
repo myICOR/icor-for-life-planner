@@ -976,6 +976,30 @@ ul.iplan-settings-list li { margin: 3px 0; }
   color: var(--iplan-marker);
 }
 
+/* ------------------------------------------- calendar rows (settings) ---- */
+/* One settings row hosts name, address, the swatch picker, the toggle and
+ * remove; it wraps instead of overflowing on a narrow pane. */
+.iplan-settings-feed .setting-item-control {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.iplan-settings-feed .setting-item-control input[type="text"],
+.iplan-settings-feed .setting-item-control input[type="password"] { min-width: 0; width: 150px; }
+/* The swatch picker is the segmented control above, each button carrying
+ * its lens as a left edge: the lens is shown as an edge because that is the
+ * only place it ever appears on the board. Text stays in the dim ink. */
+.iplan-settings-swatches { margin-right: 0; }
+.iplan-settings-swatches button.iplan-seg-btn {
+  border-radius: 4px;
+  padding-left: 7px;
+  border-left: 3px solid var(--iplan-event);
+}
+.iplan-settings-swatches button.iplan-swatch-1 { border-left-color: var(--iplan-cal-1); }
+.iplan-settings-swatches button.iplan-swatch-2 { border-left-color: var(--iplan-cal-2); }
+.iplan-settings-swatches button.iplan-swatch-3 { border-left-color: var(--iplan-cal-3); }
+.iplan-settings-swatches button.iplan-swatch-4 { border-left-color: var(--iplan-cal-4); }
+
 /* ----------------------------------------------- day view: zoomed in ---- */
 .iplan-board.is-day {
   grid-template-columns: minmax(0, 720px);

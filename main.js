@@ -2184,6 +2184,18 @@ function calendarAggregateStatus(feeds, results, merged, now) {
   return { ok: true, reason: null, message: null, warning: warnings.length ? warnings.join(' ') : null, perFeed };
 }
 
+// The settings row's status sentence for one feed, from its last sync.
+function calendarFeedStatusText(feed, st) {
+  if (!feed || !trimmed(feed.url)) return 'Paste the iCal address to connect this calendar.';
+  if (feed.enabled === false) return 'Off: its events are hidden until it is switched on.';
+  if (!st) return 'Not synced yet this session.';
+  if (!st.ok) return `Failed: ${st.message || 'no reply.'}`;
+  const n = Number(st.count) || 0;
+  let text = `${n} event${n === 1 ? '' : 's'}`;
+  if (st.at) text += `, synced ${fmtTimeHM(st.at)}`;
+  return st.warning ? `${text}. ${st.warning}` : `${text}.`;
+}
+
 // The calendar's ConnectorResult for the sync loop: every feed fetched,
 // merged over the previous per-feed defs, one status. Items are the merged,
 // deduplicated defs; byFeed and perFeed ride along for the plugin state.
@@ -4975,12 +4987,16 @@ class IcorPlannerSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    // The token aliases (styles.css) reach the tab through this class, so
+    // the segmented controls and the calendar swatches resolve what they name.
+    containerEl.addClass('iplan-settings');
 
-    const secret = (setting, get, set, placeholder) => {
+    const secret = (setting, get, set, placeholder, label) => {
       setting.addText((t) => {
         t.setPlaceholder(placeholder || '').setValue(get());
         t.inputEl.type = 'password';
         t.inputEl.autocomplete = 'off';
+        if (label) t.inputEl.setAttribute('aria-label', label);
         t.onChange(async (v) => { set(v.trim()); await this.plugin.saveSettings(); });
       });
     };
@@ -5207,12 +5223,134 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       finally { b.setDisabled(false); }
     }));
 
-    new Setting(containerEl).setName('Google Calendar').setHeading();
-    secret(new Setting(containerEl)
-      .setName('Secret iCal URL')
-      .setDesc('Google Calendar -> Settings -> your calendar -> Integrate calendar -> "Secret address in iCal format". Read-only, no OAuth needed. Treat the URL like a password.'),
-      () => this.plugin.settings.icsUrl,
-      (v) => { this.plugin.settings.icsUrl = v; }, 'https://calendar.google.com/calendar/ical/...');
+    // Calendars: one row per feed. Name, the secret address, the four-swatch
+    // lens picker (a radio group: arrow keys move, aria-checked says which is
+    // on), an on/off toggle, remove, and the feed's own status line from the
+    // last sync. The list is normalised in place first so every row has an
+    // id to key its controls and its status by.
+    new Setting(containerEl).setName('Calendars').setHeading();
+    this.plugin.settings.calendars = calendarFeeds(this.plugin.settings);
+    const feedList = this.plugin.settings.calendars;
+    const perFeed = (this.plugin.calendarStatus && this.plugin.calendarStatus.perFeed) || {};
+    const focusLater = (selector) => {
+      const el = this.containerEl.querySelector(selector);
+      if (el) el.focus();
+    };
+    feedList.forEach((feed, i) => {
+      const row = new Setting(containerEl)
+        .setName(`Calendar ${i + 1}`)
+        .setClass('iplan-settings-feed');
+      row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id]));
+      row.descEl.setAttribute('aria-live', 'polite');
+      row.addText((t) => {
+        t.setPlaceholder('Name').setValue(feed.name);
+        t.inputEl.setAttribute('aria-label', `Name of calendar ${i + 1}`);
+        t.inputEl.setAttribute('data-feed-name', feed.id);
+        t.onChange(async (v) => {
+          feed.name = v.trim() || `Calendar ${i + 1}`;
+          await this.plugin.saveSettings();
+          // The board's chips and the cache carry the name; retag now.
+          for (const d of this.plugin.calendarDefsByFeed[feed.id] || []) d.feedName = feed.name;
+          this.plugin.emitModelChanged();
+        });
+      });
+      secret(row, () => feed.url, (v) => { feed.url = v; },
+        'https://... or webcal://...', `iCal address of calendar ${i + 1} (kept secret)`);
+      const group = row.controlEl.createDiv({
+        cls: 'iplan-seg iplan-settings-presets iplan-settings-swatches',
+        attr: { role: 'radiogroup', 'aria-label': `Colour of calendar ${i + 1}` },
+      });
+      const swatchButtons = [];
+      for (let c = 1; c <= CALENDAR_SWATCHES; c++) {
+        const on = clampSwatch(feed.color) === c;
+        const btn = group.createEl('button', {
+          cls: `iplan-seg-btn iplan-swatch iplan-swatch-${c}${on ? ' is-active' : ''}`, text: String(c),
+          attr: {
+            type: 'button', role: 'radio', 'aria-checked': on ? 'true' : 'false',
+            'aria-label': CALENDAR_SWATCH_NAMES[c - 1], tabindex: on ? '0' : '-1',
+            'data-swatch': `${feed.id}:${c}`,
+          },
+        });
+        btn.addEventListener('click', async () => {
+          feed.color = c;
+          await this.plugin.saveSettings();
+          for (const d of this.plugin.calendarDefsByFeed[feed.id] || []) d.feedColor = c;
+          this.plugin.emitModelChanged();
+          this.display();
+          focusLater(`[data-swatch="${feed.id}:${c}"]`);
+        });
+        btn.addEventListener('keydown', (e) => {
+          if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+          e.preventDefault();
+          const k = swatchButtons.indexOf(btn);
+          const nextBtn = swatchButtons[(k + (e.key === 'ArrowRight' ? 1 : swatchButtons.length - 1)) % swatchButtons.length];
+          nextBtn.focus();
+        });
+        swatchButtons.push(btn);
+      }
+      row.addToggle((t) => {
+        t.setValue(feed.enabled !== false).setTooltip('Show this calendar');
+        t.toggleEl.setAttribute('aria-label', `Show calendar ${i + 1}`);
+        t.onChange(async (v) => {
+          feed.enabled = v;
+          await this.plugin.saveSettings();
+          this.plugin.recomputeCalendarDefs();
+          row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id]));
+        });
+      });
+      // Remove is two presses: the first arms it and says so, the second
+      // removes; the arm drops after a few seconds. No browser dialog.
+      row.addExtraButton((b) => {
+        let armed = false;
+        let disarm = null;
+        const rest = () => { armed = false; b.setIcon('trash').setTooltip('Remove this calendar'); b.extraSettingsEl.setAttribute('aria-label', 'Remove this calendar'); };
+        rest();
+        b.onClick(async () => {
+          if (!armed) {
+            armed = true;
+            b.setIcon('alert-triangle').setTooltip('Press again to remove');
+            b.extraSettingsEl.setAttribute('aria-label', 'Press again to remove');
+            disarm = window.setTimeout(() => { disarm = null; rest(); }, 5000);
+            return;
+          }
+          if (disarm) window.clearTimeout(disarm);
+          const at = feedList.indexOf(feed);
+          if (at >= 0) feedList.splice(at, 1);
+          await this.plugin.saveSettings();
+          this.plugin.recomputeCalendarDefs();
+          new Notice(`Planner: removed ${feed.name}.`);
+          this.display();
+          focusLater('[data-add-calendar]');
+        });
+      });
+    });
+    new Setting(containerEl)
+      .setName('Add calendar')
+      .setDesc(feedList.length
+        ? 'One row per feed. A calendar present in two feeds shows each event once.'
+        : 'Paste one iCal address per calendar. Events render read-only on the board.')
+      .addButton((b) => {
+        b.setButtonText('Add').buttonEl.setAttribute('data-add-calendar', '1');
+        b.onClick(async () => {
+          const id = newCalendarId(feedList);
+          feedList.push({ id, name: `Calendar ${feedList.length + 1}`, url: '', color: leastUsedSwatch(feedList), enabled: true, kind: 'ics' });
+          await this.plugin.saveSettings();
+          this.display();
+          focusLater(`[data-feed-name="${id}"]`);
+        });
+      });
+    // Where the address comes from, per provider. Short, and only what is
+    // known to hold: a calendar is one address, and a private iCloud
+    // calendar has no address of this kind yet.
+    const calNote = containerEl.createDiv({ cls: 'iplan-settings-note' });
+    calNote.appendText('Where to find the address (one per calendar):');
+    const calList = calNote.createEl('ul', { cls: 'iplan-settings-list' });
+    for (const line of [
+      'Google: Settings, the calendar, Integrate calendar, "Secret address in iCal format". Treat it like a password.',
+      'Apple: iCloud Calendar, share the calendar as a Public Calendar, copy the webcal link. A calendar you have not shared cannot be read this way yet.',
+      'Proton: Calendar, share via link. Sharing by link needs a paid Proton plan.',
+      'Outlook: Publish calendar, copy the ICS link.',
+    ]) calList.createEl('li', { text: line });
 
     new Setting(containerEl).setName('Board').setHeading();
     new Setting(containerEl)
@@ -5319,7 +5457,7 @@ module.exports.__test = {
   CALENDAR_SWATCHES, CALENDAR_SWATCH_NAMES, CALENDAR_SOURCES, clampSwatch, leastUsedSwatch, newCalendarId,
   calendarNameForUrl, normalizeCalendarFeed, calendarFeeds, enabledCalendarFeeds, calendarFeedConfigured,
   migrateCalendarSettings, calendarFeedFor, tagCalendarDefs, calendarFetchFeed, calendarFetchAll,
-  dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus,
+  dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus, calendarFeedStatusText,
   serializeCalendarDefs, reviveCalendarDefs,
   buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
   detectConferenceUrl, nextUpcomingEvent, fmtBadgeCountdown,
