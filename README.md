@@ -22,7 +22,12 @@ for defects. It gets fixed fast.
   one on the board. The planner is useful on a fresh vault before you have
   connected anything.
 - Syncs open tasks from Todoist and ClickUp, starred emails from any IMAP
-  mailbox, and events from a Google Calendar secret iCal feed.
+  mailbox, and events from as many calendars as you paste, one iCal
+  address each (Google, iCloud, Proton, Outlook, or any other feed).
+- Several calendars at once: each one has a name and one of four edge
+  colours on its chips, the event card names it, an event present in two
+  calendars shows once, and one calendar failing to load leaves the
+  others live and says which one failed.
 - Email providers: Gmail, iCloud and Fastmail have one-click presets and
   want an app password, never your account password (the settings tab
   says which and links where). Any other IMAP host works by typing it.
@@ -100,7 +105,7 @@ services (reads always; writes only through the two toggles above):
   the toggle on; for starred emails, headers only; the sole write is the
   star flag, and only when "Complete on source" is on. Test connection
   opens the same connection, logs in and logs out.
-- the Google Calendar secret iCal URL you paste, for your events
+- the iCal URLs you paste (one per calendar), for your events
 
 No telemetry, no other endpoints. Without keys the plugin makes no network
 requests at all.
@@ -116,7 +121,7 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `imapPort` | the IMAP port | `993` |
 | `imapSecurity` | `tls` (encrypted from the first byte) or `starttls` (plain connect, upgraded before login, never a plain login) | `tls` |
 | `imapAllowSelfSigned` | accept the host's own certificate; honoured only when the host is loopback, enforced in the transport code, not just in the settings tab | `false` |
-| `icsUrl` | the calendar's secret iCal address | empty |
+| `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the secret iCal address, `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics`. An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and is read nowhere else | empty |
 | `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
 
 The board preferences (sync interval, weekend, split, lunch, workday,
@@ -176,16 +181,24 @@ which no Todoist, ClickUp or IMAP id can produce.
 
 ## The calendar cache (`02 Planner/Calendar Events.md`)
 
-One note, rewritten on every healthy calendar fetch (never per-event
-notes): frontmatter (`type: calendar-cache`, `updated_at`, event count,
-`planner_folder` so a reader knows where the item notes live),
-a readable list of the next 14 days (day, time, title, location,
-meeting link), then a fenced `json` block the plugin uses to restore the
-board instantly on relaunch. It is safe to read for AI / schedule
-context and **secret-free by contract**: event data only, never the
-calendar feed URL or its private key. Do not edit it; the next sync
-overwrites it. Until the first live fetch of a session confirms the
-cache, its events render pale and pulsing on the board.
+One note, rewritten whenever at least one calendar fetches healthily
+(never per-event notes): frontmatter (`type: calendar-cache`,
+`source: ics`, `updated_at`, event count, `feeds` count, `planner_folder`
+so a reader knows where the item notes live), a short list of the
+calendars with their event counts, a readable list of the next 14 days
+(day, time, title, the calendar's name in brackets, location, meeting
+link), then a fenced `json` block the plugin uses to restore the board
+instantly on relaunch. Since 0.8.0 that block is version 2: `{ version,
+updated_at, feeds: [{ id, name, color, updated_at, defs }] }`, one entry
+per calendar, each with its own `updated_at` (a calendar kept from an
+earlier sync because its last fetch failed keeps its older time). A cache
+written by an earlier release (a bare array) still loads and belongs to
+the first calendar. It is safe to read for AI / schedule context and
+**secret-free by contract**: a calendar is named by its id, name and
+colour index only, never its feed URL or private key. Names and colours
+always come from the settings, not from this note. Do not edit it; the
+next sync overwrites it. Until the first live fetch of a session confirms
+the cache, its events render pale and pulsing on the board.
 
 ## Install
 
