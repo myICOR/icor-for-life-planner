@@ -1422,10 +1422,17 @@ function imapStarttlsError(statusLine) {
 // at all. Rejects 'tls unavailable' where the runtime has no tls module
 // (the mobile app).
 //
+// The two Node modules below are asked for only on desktop, and the check
+// is the first statement of the function: that is the guard shape the
+// community directory's scanner recognises for a plugin that keeps
+// isDesktopOnly false. The mobile app rejects here, before any require, and
+// the caller reports the source as unsupported.
+//
 // STARTTLS: plain connect, read `* OK`, send `A0 STARTTLS`, and ONLY on
 // `A0 OK` wrap the socket in TLS. Any other answer (BAD, NO, a PREAUTH
 // greeting) rejects before a LOGIN exists; there is no plaintext fallback.
 function imapConnect(opts, deps) {
+  if (!Platform.isDesktop) return Promise.reject(new Error('tls unavailable'));
   return new Promise((resolve, reject) => {
     let tlsMod = deps && deps.tls;
     if (!tlsMod) { try { tlsMod = require('tls'); } catch { return reject(new Error('tls unavailable')); } }

@@ -44,3 +44,6 @@ const target = process.env.PLANNER_MAIN
 
 module.exports = require(target).__test;
 module.exports.__mainPath = target;
+// The stub itself, so a test can flip what main.js sees (Platform.isDesktop
+// is the one a test needs today). Restore what you change.
+module.exports.__obsidian = stub;

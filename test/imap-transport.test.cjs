@@ -163,3 +163,54 @@ test('exactly one raw TLS connect site and one raw plain connect site; the setti
   }
   assert.ok(!/[–—]/.test(main), 'no em dash or en dash in the source');
 });
+
+/* ---- the socket is asked for only on desktop --------------------------- */
+
+test('imapConnect checks Platform.isDesktop before the first require, and no other Node module is required anywhere', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  const start = code.indexOf('function imapConnect(');
+  assert.ok(start >= 0, 'imapConnect must exist');
+  const rest = code.slice(start);
+  const endRel = rest.search(/\n(function |\/\* =)/);
+  const fn = endRel >= 0 ? rest.slice(0, endRel) : rest;
+  const firstRequire = fn.indexOf('require(');
+  assert.ok(firstRequire >= 0, 'imapConnect asks for the Node modules');
+  const guard = fn.indexOf('Platform.isDesktop');
+  assert.ok(guard >= 0 && guard < firstRequire, 'Platform.isDesktop must be checked before the first require');
+  assert.match(fn.slice(0, firstRequire), /if \(!Platform\.isDesktop\) return Promise\.reject\(/, 'the early exit is the first statement');
+  // every other require in the bundle is the obsidian import
+  const outside = code.slice(0, start) + code.slice(start + fn.length);
+  const others = (outside.match(/require\([^)]*\)/g) || []).filter((r) => r !== "require('obsidian')");
+  assert.deepEqual(others, [], 'a Node module required outside the guarded function');
+});
+
+test('THE ASK: off desktop, starred email degrades as unsupported and no socket is opened', async () => {
+  const P = T.__obsidian.Platform;
+  const was = P.isDesktop;
+  let connects = 0;
+  const deps = {
+    tls: { connect: () => { connects += 1; throw new Error('must not connect'); } },
+    net: { connect: () => { connects += 1; throw new Error('must not connect'); } },
+  };
+  const settings = { imapHost: 'imap.gmail.com', imapUser: 'me@gmail.com', imapPassword: 'pw' };
+  try {
+    P.isDesktop = false;
+    for (const s of [settings, BRIDGE]) {
+      const r = await T.emailFetchStarred(s, deps);
+      assert.equal(r.ok, false);
+      assert.equal(r.reason, 'unsupported', JSON.stringify(r));
+      assert.match(r.message, /desktop app/);
+      assert.deepEqual(r.items, []);
+    }
+    assert.equal(connects, 0, 'no socket, TLS or plain, was asked for');
+    await assert.rejects(T.imapConnect(T.imapTransportOptions(settings), deps), /tls unavailable/);
+  } finally {
+    P.isDesktop = was;
+  }
+  // and on desktop the same deps are used, so the guard is the only difference
+  const r = await T.emailFetchStarred(settings, deps);
+  assert.equal(r.ok, false);
+  assert.notEqual(r.reason, 'unsupported');
+  assert.equal(connects, 1, 'desktop reaches the transport');
+});
