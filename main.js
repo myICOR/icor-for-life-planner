@@ -264,6 +264,269 @@ function zonedToUtc(y, m, d, hh, mm, ss, tz) {
 }
 
 /* ========================================================================== *
+ * Time zone resolution for ICS feeds (2026-09-04)
+ *
+ * Outlook, Exchange, and any calendar that re-exports a subscription to one
+ * of them, write WINDOWS display names into TZID ("W. Australia Standard
+ * Time"). Intl rejects those. Until now the rejection was caught and the wall
+ * clock was reinterpreted in the machine's own zone, silently: a Perth 08:30
+ * rendered as 08:30 on a Sydney machine, two hours early, with no marker.
+ *
+ * The resolver tries, in order: an IANA id, the CLDR Windows-to-IANA table,
+ * a VTIMEZONE block from the feed itself, a fixed offset spelled inside the
+ * id ("(UTC+08:00) Perth"). Whatever still fails is FLAGGED (tzUnresolved)
+ * and rendered as written, never as a confident guess. A calendar-level
+ * X-WR-TIMEZONE fills a MISSING TZID only; it never silently replaces an id
+ * the feed did write, because a wrong zone stated with confidence is the
+ * exact defect this block exists to remove.
+ * ========================================================================== */
+
+// CLDR windowsZones.xml, territory 001 rows only (the canonical IANA id per
+// Windows zone). Generated from unicode-org/cldr main at commit c33a1f0a
+// (2025-04-10), file typeVersion 2021a, by a one-line script over the XML.
+// Regenerate the whole table rather than hand-editing rows.
+const WINDOWS_TZ_TO_IANA = {
+  'Dateline Standard Time': 'Etc/GMT+12',
+  'UTC-11': 'Etc/GMT+11',
+  'Aleutian Standard Time': 'America/Adak',
+  'Hawaiian Standard Time': 'Pacific/Honolulu',
+  'Marquesas Standard Time': 'Pacific/Marquesas',
+  'Alaskan Standard Time': 'America/Anchorage',
+  'UTC-09': 'Etc/GMT+9',
+  'Pacific Standard Time (Mexico)': 'America/Tijuana',
+  'UTC-08': 'Etc/GMT+8',
+  'Pacific Standard Time': 'America/Los_Angeles',
+  'US Mountain Standard Time': 'America/Phoenix',
+  'Mountain Standard Time (Mexico)': 'America/Mazatlan',
+  'Mountain Standard Time': 'America/Denver',
+  'Yukon Standard Time': 'America/Whitehorse',
+  'Central America Standard Time': 'America/Guatemala',
+  'Central Standard Time': 'America/Chicago',
+  'Easter Island Standard Time': 'Pacific/Easter',
+  'Central Standard Time (Mexico)': 'America/Mexico_City',
+  'Canada Central Standard Time': 'America/Regina',
+  'SA Pacific Standard Time': 'America/Bogota',
+  'Eastern Standard Time (Mexico)': 'America/Cancun',
+  'Eastern Standard Time': 'America/New_York',
+  'Haiti Standard Time': 'America/Port-au-Prince',
+  'Cuba Standard Time': 'America/Havana',
+  'US Eastern Standard Time': 'America/Indianapolis',
+  'Turks And Caicos Standard Time': 'America/Grand_Turk',
+  'Paraguay Standard Time': 'America/Asuncion',
+  'Atlantic Standard Time': 'America/Halifax',
+  'Venezuela Standard Time': 'America/Caracas',
+  'Central Brazilian Standard Time': 'America/Cuiaba',
+  'SA Western Standard Time': 'America/La_Paz',
+  'Pacific SA Standard Time': 'America/Santiago',
+  'Newfoundland Standard Time': 'America/St_Johns',
+  'Tocantins Standard Time': 'America/Araguaina',
+  'E. South America Standard Time': 'America/Sao_Paulo',
+  'SA Eastern Standard Time': 'America/Cayenne',
+  'Argentina Standard Time': 'America/Buenos_Aires',
+  'Greenland Standard Time': 'America/Godthab',
+  'Montevideo Standard Time': 'America/Montevideo',
+  'Magallanes Standard Time': 'America/Punta_Arenas',
+  'Saint Pierre Standard Time': 'America/Miquelon',
+  'Bahia Standard Time': 'America/Bahia',
+  'UTC-02': 'Etc/GMT+2',
+  'Azores Standard Time': 'Atlantic/Azores',
+  'Cape Verde Standard Time': 'Atlantic/Cape_Verde',
+  'UTC': 'Etc/UTC',
+  'GMT Standard Time': 'Europe/London',
+  'Greenwich Standard Time': 'Atlantic/Reykjavik',
+  'Sao Tome Standard Time': 'Africa/Sao_Tome',
+  'Morocco Standard Time': 'Africa/Casablanca',
+  'W. Europe Standard Time': 'Europe/Berlin',
+  'Central Europe Standard Time': 'Europe/Budapest',
+  'Romance Standard Time': 'Europe/Paris',
+  'Central European Standard Time': 'Europe/Warsaw',
+  'W. Central Africa Standard Time': 'Africa/Lagos',
+  'Jordan Standard Time': 'Asia/Amman',
+  'GTB Standard Time': 'Europe/Bucharest',
+  'Middle East Standard Time': 'Asia/Beirut',
+  'Egypt Standard Time': 'Africa/Cairo',
+  'E. Europe Standard Time': 'Europe/Chisinau',
+  'Syria Standard Time': 'Asia/Damascus',
+  'West Bank Standard Time': 'Asia/Hebron',
+  'South Africa Standard Time': 'Africa/Johannesburg',
+  'FLE Standard Time': 'Europe/Kiev',
+  'Israel Standard Time': 'Asia/Jerusalem',
+  'South Sudan Standard Time': 'Africa/Juba',
+  'Kaliningrad Standard Time': 'Europe/Kaliningrad',
+  'Sudan Standard Time': 'Africa/Khartoum',
+  'Libya Standard Time': 'Africa/Tripoli',
+  'Namibia Standard Time': 'Africa/Windhoek',
+  'Arabic Standard Time': 'Asia/Baghdad',
+  'Turkey Standard Time': 'Europe/Istanbul',
+  'Arab Standard Time': 'Asia/Riyadh',
+  'Belarus Standard Time': 'Europe/Minsk',
+  'Russian Standard Time': 'Europe/Moscow',
+  'E. Africa Standard Time': 'Africa/Nairobi',
+  'Iran Standard Time': 'Asia/Tehran',
+  'Arabian Standard Time': 'Asia/Dubai',
+  'Astrakhan Standard Time': 'Europe/Astrakhan',
+  'Azerbaijan Standard Time': 'Asia/Baku',
+  'Russia Time Zone 3': 'Europe/Samara',
+  'Mauritius Standard Time': 'Indian/Mauritius',
+  'Saratov Standard Time': 'Europe/Saratov',
+  'Georgian Standard Time': 'Asia/Tbilisi',
+  'Volgograd Standard Time': 'Europe/Volgograd',
+  'Caucasus Standard Time': 'Asia/Yerevan',
+  'Afghanistan Standard Time': 'Asia/Kabul',
+  'West Asia Standard Time': 'Asia/Tashkent',
+  'Ekaterinburg Standard Time': 'Asia/Yekaterinburg',
+  'Pakistan Standard Time': 'Asia/Karachi',
+  'Qyzylorda Standard Time': 'Asia/Qyzylorda',
+  'India Standard Time': 'Asia/Calcutta',
+  'Sri Lanka Standard Time': 'Asia/Colombo',
+  'Nepal Standard Time': 'Asia/Katmandu',
+  'Central Asia Standard Time': 'Asia/Bishkek',
+  'Bangladesh Standard Time': 'Asia/Dhaka',
+  'Omsk Standard Time': 'Asia/Omsk',
+  'Myanmar Standard Time': 'Asia/Rangoon',
+  'SE Asia Standard Time': 'Asia/Bangkok',
+  'Altai Standard Time': 'Asia/Barnaul',
+  'W. Mongolia Standard Time': 'Asia/Hovd',
+  'North Asia Standard Time': 'Asia/Krasnoyarsk',
+  'N. Central Asia Standard Time': 'Asia/Novosibirsk',
+  'Tomsk Standard Time': 'Asia/Tomsk',
+  'China Standard Time': 'Asia/Shanghai',
+  'North Asia East Standard Time': 'Asia/Irkutsk',
+  'Singapore Standard Time': 'Asia/Singapore',
+  'W. Australia Standard Time': 'Australia/Perth',
+  'Taipei Standard Time': 'Asia/Taipei',
+  'Ulaanbaatar Standard Time': 'Asia/Ulaanbaatar',
+  'Aus Central W. Standard Time': 'Australia/Eucla',
+  'Transbaikal Standard Time': 'Asia/Chita',
+  'Tokyo Standard Time': 'Asia/Tokyo',
+  'North Korea Standard Time': 'Asia/Pyongyang',
+  'Korea Standard Time': 'Asia/Seoul',
+  'Yakutsk Standard Time': 'Asia/Yakutsk',
+  'Cen. Australia Standard Time': 'Australia/Adelaide',
+  'AUS Central Standard Time': 'Australia/Darwin',
+  'E. Australia Standard Time': 'Australia/Brisbane',
+  'AUS Eastern Standard Time': 'Australia/Sydney',
+  'West Pacific Standard Time': 'Pacific/Port_Moresby',
+  'Tasmania Standard Time': 'Australia/Hobart',
+  'Vladivostok Standard Time': 'Asia/Vladivostok',
+  'Lord Howe Standard Time': 'Australia/Lord_Howe',
+  'Bougainville Standard Time': 'Pacific/Bougainville',
+  'Russia Time Zone 10': 'Asia/Srednekolymsk',
+  'Magadan Standard Time': 'Asia/Magadan',
+  'Norfolk Standard Time': 'Pacific/Norfolk',
+  'Sakhalin Standard Time': 'Asia/Sakhalin',
+  'Central Pacific Standard Time': 'Pacific/Guadalcanal',
+  'Russia Time Zone 11': 'Asia/Kamchatka',
+  'New Zealand Standard Time': 'Pacific/Auckland',
+  'UTC+12': 'Etc/GMT-12',
+  'Fiji Standard Time': 'Pacific/Fiji',
+  'Chatham Islands Standard Time': 'Pacific/Chatham',
+  'UTC+13': 'Etc/GMT-13',
+  'Tonga Standard Time': 'Pacific/Tongatapu',
+  'Samoa Standard Time': 'Pacific/Apia',
+  'Line Islands Standard Time': 'Pacific/Kiritimati',
+};
+
+// Strip the decorations feeds wrap around a zone id: surrounding quotes, a
+// leading slash, the Mozilla and libical registry prefixes, doubled spaces.
+function normalizeTzid(raw) {
+  let s = String(raw == null ? '' : raw).trim();
+  s = s.replace(/^"(.*)"$/, '$1').trim();
+  s = s.replace(/^\/(mozilla\.org\/[^/]+\/|freeassociation\.sourceforge\.net\/(Tzfile\/)?)/i, '');
+  s = s.replace(/^\//, '');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+// "(UTC+08:00) Perth" -> 480, "(UTC-03:30) Newfoundland" -> -210,
+// "(UTC) Coordinated Universal Time" -> 0, anything else -> null.
+function tzidUtcPrefixOffset(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (/^\(UTC\)/i.test(s)) return 0;
+  const m = /^\(UTC([+-])(\d{2}):(\d{2})\)/i.exec(s);
+  if (!m) return null;
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]));
+}
+
+// RFC 5545 UTC-OFFSET ("+0800", "-0330", "+053000") -> minutes east of UTC.
+function icsUtcOffsetToMinutes(s) {
+  const m = /^([+-])(\d{2})(\d{2})?(\d{2})?$/.exec(String(s == null ? '' : s).trim());
+  if (!m) return null;
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0));
+}
+
+// Does Intl know this id? Memoized: the probe constructs a formatter.
+const _ianaProbe = new Map();
+function isIanaZone(tz) {
+  if (!tz) return false;
+  if (_ianaProbe.has(tz)) return _ianaProbe.get(tz);
+  let ok = false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); ok = true; } catch { ok = false; }
+  _ianaProbe.set(tz, ok);
+  return ok;
+}
+
+// A VTIMEZONE reduced to its two offsets (minutes east of UTC) names a zone
+// only by its behaviour, so the search is over the IANA ids the CLDR table
+// knows: the first one whose January and July offsets are the same pair, in
+// either order (the southern hemisphere has its standard time in July).
+const _offsetPairMatch = new Map();
+function ianaForOffsets(standardOffset, daylightOffset) {
+  const key = `${standardOffset}/${daylightOffset}`;
+  if (_offsetPairMatch.has(key)) return _offsetPairMatch.get(key);
+  const year = new Date().getFullYear();
+  const jan = new Date(Date.UTC(year, 0, 15, 12));
+  const jul = new Date(Date.UTC(year, 6, 15, 12));
+  let hit = null;
+  for (const tz of new Set(Object.values(WINDOWS_TZ_TO_IANA))) {
+    if (!isIanaZone(tz)) continue;
+    const a = tzOffsetMinutes(jan, tz);
+    const b = tzOffsetMinutes(jul, tz);
+    if ((a === standardOffset && b === daylightOffset) || (b === standardOffset && a === daylightOffset)) {
+      hit = tz;
+      break;
+    }
+  }
+  _offsetPairMatch.set(key, hit);
+  return hit;
+}
+
+// -> { tz: IANA id | null, fixedOffsetMin: minutes | null, unresolved: the id
+// as written | null }. Exactly one of tz / fixedOffsetMin / unresolved is set
+// for a non-empty id. `ctx.vtimezones` is what parseIcs collected from the
+// feed, keyed by the VTIMEZONE's own TZID (raw and normalized).
+function resolveTzid(tzid, ctx) {
+  const c = ctx || {};
+  const raw = String(tzid == null ? '' : tzid).trim();
+  const name = normalizeTzid(raw);
+  const none = { tz: null, fixedOffsetMin: null, unresolved: null };
+  if (!name) return none;
+  if (isIanaZone(name)) return { tz: name, fixedOffsetMin: null, unresolved: null };
+  const mapped = WINDOWS_TZ_TO_IANA[name];
+  if (mapped) return { tz: mapped, fixedOffsetMin: null, unresolved: null };
+  const vt = c.vtimezones ? (c.vtimezones[raw] || c.vtimezones[name] || null) : null;
+  if (vt) {
+    if (vt.standardOffset != null && vt.daylightOffset != null) {
+      const tz = ianaForOffsets(vt.standardOffset, vt.daylightOffset);
+      if (tz) return { tz, fixedOffsetMin: null, unresolved: null };
+    }
+    // STANDARD only, or a pair no known zone produces: a fixed offset, no DST.
+    if (vt.standardOffset != null) return { tz: null, fixedOffsetMin: vt.standardOffset, unresolved: null };
+  }
+  const prefixed = tzidUtcPrefixOffset(name);
+  if (prefixed != null) return { tz: null, fixedOffsetMin: prefixed, unresolved: null };
+  return { tz: null, fixedOffsetMin: null, unresolved: raw };
+}
+
+// The one warning line the board shows after a sync with unresolved zones.
+// One line for the whole feed, never a Notice per event.
+function calendarTzWarning(defs) {
+  const flagged = (defs || []).filter((d) => d && d.tzUnresolved);
+  if (!flagged.length) return null;
+  const n = flagged.length;
+  return `${n} event${n === 1 ? ' uses' : 's use'} an unknown time zone (${flagged[0].tzUnresolved}); times are shown as written.`;
+}
+
+/* ========================================================================== *
  * Text helpers
  * ========================================================================== */
 
@@ -409,11 +672,18 @@ function clampPriorityRank(n) {
  * Connector results (cockpit contract: never throw upward)
  * ========================================================================== */
 
-function degraded(source, reason, message) {
-  return { ok: false, source, reason, message, items: [] };
+// `hint` (optional) is the second line a failure may carry: what to DO about
+// it, when the classifier knows. `warning` (optional) rides a HEALTHY result
+// whose data is complete but deserves one line on the board.
+function degraded(source, reason, message, hint) {
+  const out = { ok: false, source, reason, message, items: [] };
+  if (hint) out.hint = hint;
+  return out;
 }
-function okResult(source, items) {
-  return { ok: true, source, items };
+function okResult(source, items, warning) {
+  const out = { ok: true, source, items };
+  if (warning) out.warning = warning;
+  return out;
 }
 
 /* ========================================================================== *
@@ -902,16 +1172,33 @@ function imapSetStarredRaw(host, user, pass, uid, starred) {
  * the master occurrence only", never to a crash.
  * ========================================================================== */
 
+// The parse context: VTIMEZONE blocks collected from the feed (keyed by their
+// TZID, raw and normalized) and the calendar-level default zone from
+// X-WR-TIMEZONE, itself resolved through the same chain as every TZID.
 function parseIcs(text) {
   // Unfold: CRLF (or LF) followed by space/tab continues the line.
   const unfolded = String(text || '').replace(/\r?\n[ \t]/g, '');
   const lines = unfolded.split(/\r?\n/);
   const events = [];
-  let cur = null;
+  const ctx = { vtimezones: {}, defaultTz: null };
+  let cur = null;       // the open VEVENT
+  let vtz = null;       // the open VTIMEZONE
+  let vtzPart = null;   // 'STANDARD' | 'DAYLIGHT' while inside one
+  let wrTimezone = null;
   for (const line of lines) {
     if (line === 'BEGIN:VEVENT') { cur = { props: [] }; continue; }
     if (line === 'END:VEVENT') { if (cur) events.push(cur); cur = null; continue; }
-    if (!cur) continue;
+    if (line === 'BEGIN:VTIMEZONE') { vtz = { tzid: null, standardOffset: null, daylightOffset: null }; vtzPart = null; continue; }
+    if (line === 'END:VTIMEZONE') {
+      if (vtz && vtz.tzid) {
+        ctx.vtimezones[vtz.tzid] = vtz;
+        ctx.vtimezones[normalizeTzid(vtz.tzid)] = vtz;
+      }
+      vtz = null; vtzPart = null;
+      continue;
+    }
+    if (vtz && (line === 'BEGIN:STANDARD' || line === 'BEGIN:DAYLIGHT')) { vtzPart = line.slice(6); continue; }
+    if (vtz && (line === 'END:STANDARD' || line === 'END:DAYLIGHT')) { vtzPart = null; continue; }
     const idx = line.indexOf(':');
     if (idx === -1) continue;
     const left = line.slice(0, idx);
@@ -922,40 +1209,76 @@ function parseIcs(text) {
       const eq = p.indexOf('=');
       if (eq !== -1) params[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1);
     }
-    cur.props.push({ name: name.toUpperCase(), params, value });
+    const upper = name.toUpperCase();
+    if (vtz) {
+      if (upper === 'TZID' && !vtzPart) vtz.tzid = value.trim();
+      // Feeds with full history list several STANDARD / DAYLIGHT blocks, oldest
+      // first; the last one listed is the rule in force now.
+      else if (upper === 'TZOFFSETTO' && vtzPart) {
+        const off = icsUtcOffsetToMinutes(value);
+        if (off != null) vtz[vtzPart === 'DAYLIGHT' ? 'daylightOffset' : 'standardOffset'] = off;
+      }
+      continue;
+    }
+    if (!cur) {
+      if (upper === 'X-WR-TIMEZONE') wrTimezone = value.trim();
+      continue;
+    }
+    cur.props.push({ name: upper, params, value });
   }
-  return events.map(icsEventDef).filter(Boolean);
+  if (wrTimezone) ctx.defaultTz = resolveTzid(wrTimezone, ctx).tz || null;
+  return events.map((ev) => icsEventDef(ev, ctx)).filter(Boolean);
 }
 
-// DTSTART value + params -> { instant: Date|null, day: 'YYYY-MM-DD'|null, allDay }
-function icsParseDate(value, params) {
+// DTSTART value + params -> { instant: Date|null, day: 'YYYY-MM-DD'|null,
+// allDay, tzUnresolved: the TZID as written when no zone could be resolved
+// for it (the instant is then the wall clock in the machine's zone) }.
+function icsParseDate(value, params, ctx) {
   const isDate = (params.VALUE === 'DATE') || /^\d{8}$/.test(value);
   if (isDate) {
     const y = Number(value.slice(0, 4)), m = Number(value.slice(4, 6)), d = Number(value.slice(6, 8));
-    return { allDay: true, day: `${y}-${pad2(m)}-${pad2(d)}`, instant: new Date(y, m - 1, d) };
+    return { allDay: true, day: `${y}-${pad2(m)}-${pad2(d)}`, instant: new Date(y, m - 1, d), tzUnresolved: null };
   }
   const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/.exec(value);
   if (!m) return null;
   const [, y, mo, d, hh, mm, ss, z] = m;
   if (z === 'Z') {
-    return { allDay: false, day: null, instant: new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mm, +ss)) };
+    return { allDay: false, day: null, instant: new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mm, +ss)), tzUnresolved: null };
   }
-  if (params.TZID) {
+  const c = ctx || {};
+  const tzid = params.TZID != null && String(params.TZID).trim() !== '' ? String(params.TZID) : null;
+  // A missing TZID on a timed value is a floating time; the calendar's own
+  // default zone is the right reading of it when the feed states one.
+  const res = tzid
+    ? resolveTzid(tzid, c)
+    : (c.defaultTz ? { tz: c.defaultTz, fixedOffsetMin: null, unresolved: null } : null);
+  if (res && res.tz) {
     try {
-      return { allDay: false, day: null, instant: zonedToUtc(+y, +mo, +d, +hh, +mm, +ss, params.TZID) };
-    } catch { /* unknown zone: fall through to floating */ }
+      return { allDay: false, day: null, instant: zonedToUtc(+y, +mo, +d, +hh, +mm, +ss, res.tz), tzUnresolved: null };
+    } catch { /* the probe passed but the formatter did not: flagged below */ }
   }
-  return { allDay: false, day: null, instant: new Date(+y, +mo - 1, +d, +hh, +mm, +ss) };
+  if (res && res.fixedOffsetMin != null) {
+    const utc = Date.UTC(+y, +mo - 1, +d, +hh, +mm, +ss) - res.fixedOffsetMin * 60000;
+    return { allDay: false, day: null, instant: new Date(utc), tzUnresolved: null };
+  }
+  // Floating (no TZID, no calendar default) or unresolved: the wall clock in
+  // the machine's zone. Only the unresolved case carries a flag; a floating
+  // time IS a local time by definition.
+  return {
+    allDay: false, day: null,
+    instant: new Date(+y, +mo - 1, +d, +hh, +mm, +ss),
+    tzUnresolved: tzid ? tzid.trim() : null,
+  };
 }
 
-function icsEventDef(ev) {
+function icsEventDef(ev, ctx) {
   const prop = (n) => ev.props.find((p) => p.name === n) || null;
   const dtstart = prop('DTSTART');
   if (!dtstart) return null;
-  const start = icsParseDate(dtstart.value, dtstart.params);
+  const start = icsParseDate(dtstart.value, dtstart.params, ctx);
   if (!start) return null;
   const dtend = prop('DTEND');
-  const end = dtend ? icsParseDate(dtend.value, dtend.params) : null;
+  const end = dtend ? icsParseDate(dtend.value, dtend.params, ctx) : null;
   const rruleProp = prop('RRULE');
   const rrule = rruleProp ? Object.fromEntries(
     rruleProp.value.split(';').map((kv) => {
@@ -966,7 +1289,7 @@ function icsEventDef(ev) {
   const exdates = new Set();
   for (const p of ev.props.filter((x) => x.name === 'EXDATE')) {
     for (const v of p.value.split(',')) {
-      const parsed = icsParseDate(v.trim(), p.params);
+      const parsed = icsParseDate(v.trim(), p.params, ctx);
       if (parsed) exdates.add(parsed.allDay ? parsed.day : localDayStr(parsed.instant));
     }
   }
@@ -978,8 +1301,11 @@ function icsEventDef(ev) {
     location: icsUnescape((prop('LOCATION') || { value: '' }).value) || null,
     url: ((prop('URL') || { value: '' }).value || '').trim() || null,
     start, end, rrule, exdates,
+    // The TZID as written when start or end could not be resolved; the board,
+    // the modal and the cache all carry it so the fallback is never silent.
+    tzUnresolved: start.tzUnresolved || (end && end.tzUnresolved) || null,
     recurrenceDay: recurrenceId ? (() => {
-      const r = icsParseDate(recurrenceId.value, recurrenceId.params);
+      const r = icsParseDate(recurrenceId.value, recurrenceId.params, ctx);
       return r ? (r.allDay ? r.day : localDayStr(r.instant)) : null;
     })() : null,
   };
@@ -1004,7 +1330,7 @@ function expandOccurrences(def, winStart, winEnd) {
   const count = def.rrule.COUNT ? Number(def.rrule.COUNT) : null;
   let until = null;
   if (def.rrule.UNTIL) {
-    const u = icsParseDate(def.rrule.UNTIL, {});
+    const u = icsParseDate(def.rrule.UNTIL, {}, null); // UNTIL is UTC or date-only by spec
     until = u ? (u.allDay ? new Date(u.instant.getTime() + 86400000) : u.instant) : null;
   }
   const out = [];
@@ -1095,6 +1421,7 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
       const occStartUtc = allDay
         ? occDay.replace(/-/g, '')
         : occStart.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '');
+      const tzUnresolved = eff.tzUnresolved || def.tzUnresolved || null;
       if (allDay) {
         // DTEND is exclusive for all-day events; emit one card per spanned day.
         const startDay = ov ? ov.start.day : occDay;
@@ -1107,7 +1434,7 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
             uid: `${def.uid}::${day}`, title: eff.title, description: eff.description,
             start: null, end: null, allDay: true, day, half: null,
             location: eff.location, url: eff.url, continues: i > 0,
-            masterUid: def.uid, recurring, occStartUtc,
+            masterUid: def.uid, recurring, occStartUtc, tzUnresolved,
           });
         }
       } else {
@@ -1125,7 +1452,7 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
               allDay: !first, day,
               half: first ? (effStart.getHours() < splitHour ? 'am' : 'pm') : null,
               location: eff.location, url: eff.url, continues: !first,
-              masterUid: def.uid, recurring, occStartUtc,
+              masterUid: def.uid, recurring, occStartUtc, tzUnresolved,
             });
           }
           day = addDays(day, 1);
@@ -1155,7 +1482,9 @@ async function calendarFetchDefs(settings) {
       return degraded('calendar', 'unreachable', `Calendar feed returned HTTP ${res.status}.`);
     }
     const defs = parseIcs(res.text || '');
-    return okResult('calendar', defs);
+    // Healthy fetch, but some zones could not be resolved: the result stays
+    // ok (the events render, as written) and carries ONE warning line.
+    return okResult('calendar', defs, calendarTzWarning(defs));
   } catch {
     return degraded('calendar', 'unreachable', 'Calendar feed unreachable.');
   }
@@ -1233,6 +1562,7 @@ function serializeCalendarDefs(defs) {
     rrule: def.rrule || null,
     exdates: Array.from(def.exdates || []),
     recurrenceDay: def.recurrenceDay || null,
+    tzUnresolved: def.tzUnresolved || null,
   }));
 }
 
@@ -1257,6 +1587,7 @@ function reviveCalendarDefs(raw) {
       rrule: d.rrule && typeof d.rrule === 'object' ? d.rrule : null,
       exdates: new Set(Array.isArray(d.exdates) ? d.exdates : []),
       recurrenceDay: d.recurrenceDay || null,
+      tzUnresolved: d.tzUnresolved ? String(d.tzUnresolved) : null,
     });
   }
   return out;
@@ -1300,7 +1631,9 @@ function buildCalendarCacheContent(defs, now) {
       ? (ev.continues ? 'CONT.' : 'ALL DAY')
       : `${fmtTimeHM(ev.start)}-${fmtTimeHM(ev.end)}`;
     const conf = detectConferenceUrl(ev);
-    const bits = [`- ${when} ${ev.title}`];
+    // [tz?]: the feed named a zone the plugin could not resolve; the time is
+    // the wall clock as written, in the machine's zone.
+    const bits = [`- ${when} ${ev.title}${ev.tzUnresolved ? ' [tz?]' : ''}`];
     if (ev.location) bits.push(`  - location: ${ev.location}`);
     if (conf) bits.push(`  - conference: ${conf}`);
     lines.push(...bits);
@@ -1874,7 +2207,10 @@ class IcorPlannerPlugin extends Plugin {
       // clears the stale look and rewrites the ONE cache file. A failed fetch
       // keeps whatever renders now (cached or previous) - never prune on a blip.
       const cal = await calendarFetchDefs(s);
-      this.calendarStatus = { ok: cal.ok, reason: cal.reason || null, message: cal.message || null, at: new Date().toISOString() };
+      this.calendarStatus = {
+        ok: cal.ok, reason: cal.reason || null, message: cal.message || null,
+        warning: cal.warning || null, at: new Date().toISOString(),
+      };
       if (cal.ok) {
         this.calendarDefs = cal.items;
         this.calendarStale = false;
@@ -2308,7 +2644,11 @@ function dueChipText(item, today) {
 // the Google edit deep-link can be built).
 function wireEventChip(plugin, chip, ev) {
   if (plugin.calendarStale) chip.addClass('is-stale');
-  chip.setAttribute('aria-label', `${ev.title}${ev.location ? ', ' + ev.location : ''}`);
+  // An unresolved zone is visible on the chip itself (dashed edge, a mark)
+  // and spoken in the label; the modal names the zone.
+  if (ev.tzUnresolved) chip.addClass('is-tz-unresolved');
+  chip.setAttribute('aria-label',
+    `${ev.title}${ev.location ? ', ' + ev.location : ''}${ev.tzUnresolved ? ', time zone not recognised, shown as written' : ''}`);
   chip.addEventListener('click', () => new EventDetailModal(plugin.app, ev, plugin.settings.icsUrl, plugin.manifest.id).open());
 }
 
@@ -2565,6 +2905,7 @@ class EventDetailModal extends Modal {
       ? `${dayLabel} ALL DAY`
       : `${dayLabel} ${fmtTimeHM(ev.start)} - ${fmtTimeHM(ev.end)}`);
     if (ev.continues) meta.createDiv({ cls: 'iplan-event-modal-when', text: 'CONTINUED FROM AN EARLIER DAY' });
+    if (ev.tzUnresolved) metaRow('TIME ZONE', `${ev.tzUnresolved} (not recognised, shown as written)`);
     if (ev.location) metaRow('WHERE', ev.location);
     const confUrl = detectConferenceUrl(ev);
     if (confUrl) metaRow('CONFERENCE', confUrl, confUrl);
@@ -2718,6 +3059,9 @@ class PlannerBoardView extends ItemView {
     if (this.plugin.calendarStatus && !this.plugin.calendarStatus.ok &&
         this.plugin.calendarStatus.reason !== 'no-token') {
       notices.push(`Calendar: ${this.plugin.calendarStatus.message}`);
+    } else if (this.plugin.calendarStatus && this.plugin.calendarStatus.warning) {
+      // A healthy fetch with unresolved zones: one line, not one per event.
+      notices.push(`Calendar: ${this.plugin.calendarStatus.warning}`);
     }
     if (!this.plugin.anySourceConfigured()) {
       // The SAME sentence the tray leads with, from the same constant. Two
@@ -3612,6 +3956,8 @@ module.exports.__test = {
   detectConferenceUrl, nextUpcomingEvent, fmtBadgeCountdown,
   CALENDAR_CACHE_FILE, CONFERENCE_URL_PATTERNS,
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
+  WINDOWS_TZ_TO_IANA, normalizeTzid, isIanaZone, resolveTzid, tzidUtcPrefixOffset,
+  icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult,
   threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS,
   htmlishToText, segmentInfo, fmtLeft, fmtDayTitle, fmtDayLabel,
   trayDefaultTab, trayVisibleTabs, trayTabLabel, trayEffectiveTab,

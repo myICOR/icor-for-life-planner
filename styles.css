@@ -374,6 +374,20 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
 .iplan-event-allday .iplan-event-title { font-size: 10.5px; }
 .iplan-event.is-continues { opacity: 0.6; }
 
+/* an event whose TZID the plugin could not resolve: its time is the wall
+ * clock as written, so the chip says so with a dashed edge and a mono mark,
+ * and the aria label speaks it. Same ink as the event edge; no new colour. */
+.iplan-event.is-tz-unresolved { border-left-style: dashed; }
+.iplan-event.is-tz-unresolved::after {
+  content: 'TZ?';
+  font-family: var(--iplan-mono);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  color: var(--iplan-event);
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
 /* stale events: rehydrated from the vault cache, awaiting the live fetch.
  * Pale + desaturated with a soft opacity pulse. Motion Codex consulted
  * (search-motion-codex js "pulse", 2026-08-29): only Motion-library loading
