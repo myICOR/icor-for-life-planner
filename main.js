@@ -3462,6 +3462,7 @@ class IcorPlannerPlugin extends Plugin {
     this.addCommand({ id: 'open-tray', name: 'Open planner tray', callback: () => this.openTray(true) });
     this.addCommand({ id: 'sync-now', name: 'Sync planner sources now', callback: () => this.syncNow(true) });
     this.addCommand({ id: 'add-manual-task', name: 'Add a task', callback: () => this.focusAddTask() });
+    this.addCommand({ id: 'new-routine', name: 'New routine', callback: () => this.openNewRoutine() });
 
     this.addSettingTab(new IcorPlannerSettingTab(this.app, this));
 
@@ -4918,6 +4919,135 @@ class EventDetailModal extends Modal {
 }
 
 /* ========================================================================== *
+ * New routine modal (2026-09-04) and the weekday row it shares with settings
+ * ========================================================================== */
+
+// Seven toggle buttons, M T W T F S S, each with aria-pressed and the full
+// day name as its label. `get()` returns the current codes, `set(codes)`
+// keeps them (may be async); the buttons repaint from get() after a press.
+function weekdayToggleRow(container, get, set, groupLabel) {
+  const group = container.createDiv({
+    cls: 'iplan-seg iplan-settings-presets iplan-weekdays',
+    attr: { role: 'group', 'aria-label': groupLabel },
+  });
+  const buttons = [];
+  const paint = () => {
+    const on = get();
+    for (const b of buttons) {
+      const is = on.includes(b.dataset.day);
+      b.classList.toggle('is-active', is);
+      b.setAttribute('aria-pressed', is ? 'true' : 'false');
+    }
+  };
+  for (const code of WEEKDAY_CODES) {
+    const b = group.createEl('button', {
+      cls: 'iplan-seg-btn', text: WEEKDAY_NAMES[code].charAt(0),
+      attr: { type: 'button', 'aria-label': WEEKDAY_NAMES[code], 'aria-pressed': 'false', 'data-day': code },
+    });
+    b.addEventListener('click', async () => {
+      const on = new Set(get());
+      if (on.has(code)) on.delete(code); else on.add(code);
+      await set(normalizeWeekdays(Array.from(on)));
+      paint();
+    });
+    buttons.push(b);
+  }
+  paint();
+  return group;
+}
+
+// Name, type, times (prefilled from the settings for the type), weekdays
+// and the steps, one per line. Validation speaks in a live region; no
+// browser dialog anywhere.
+class NewRoutineModal extends Modal {
+  constructor(app, plugin, onCreated) {
+    super(app);
+    this.plugin = plugin;
+    this.onCreated = typeof onCreated === 'function' ? onCreated : null;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass('iplan-routine-modal');
+    contentEl.addClass('iplan-settings');
+    markInkPlugin(contentEl, this.plugin.manifest.id);
+    const defaults = routineDefaultsOf(this.plugin.settings);
+    const state = {
+      name: '', type: 'morning',
+      start: defaults.morning.start, end: defaults.morning.end,
+      weekdays: routineWeekdaysDefaultOf(this.plugin.settings), steps: '',
+    };
+    const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' NEW ROUTINE' });
+    contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: 'A block of steps, at a time of day.' });
+    let nameInput = null;
+    new Setting(contentEl).setName('Name').addText((t) => {
+      nameInput = t.inputEl;
+      t.setPlaceholder('Morning launch').onChange((v) => { state.name = v; });
+      t.inputEl.setAttribute('aria-label', 'Routine name');
+    });
+    let fromText = null;
+    let untilText = null;
+    new Setting(contentEl)
+      .setName('Type')
+      .setDesc('Prefills the times below from the settings.')
+      .addDropdown((d) => {
+        for (const t of ROUTINE_TYPES) d.addOption(t, capitalize(t));
+        d.setValue(state.type).onChange((v) => {
+          state.type = routineTypeOf(v);
+          state.start = defaults[state.type].start;
+          state.end = defaults[state.type].end;
+          if (fromText) fromText.setValue(state.start);
+          if (untilText) untilText.setValue(state.end);
+        });
+        d.selectEl.setAttribute('aria-label', 'Routine type');
+      });
+    new Setting(contentEl)
+      .setName('From / until')
+      .setDesc('HH:MM.')
+      .addText((t) => {
+        fromText = t;
+        t.setValue(state.start).onChange((v) => { state.start = v; });
+        t.inputEl.setAttribute('aria-label', 'From');
+      })
+      .addText((t) => {
+        untilText = t;
+        t.setValue(state.end).onChange((v) => { state.end = v; });
+        t.inputEl.setAttribute('aria-label', 'Until');
+      });
+    const wd = new Setting(contentEl).setName('Weekdays');
+    weekdayToggleRow(wd.controlEl, () => state.weekdays, (codes) => { state.weekdays = codes; }, 'Weekdays');
+    new Setting(contentEl)
+      .setName('Steps')
+      .setDesc('One per line. Edit them any time in the note.')
+      .addTextArea((t) => {
+        t.setPlaceholder('Water, 500 ml\nOne journal page\nPlan the day on the board').onChange((v) => { state.steps = v; });
+        t.inputEl.rows = 4;
+        t.inputEl.setAttribute('aria-label', 'Steps, one per line');
+      });
+    const error = contentEl.createDiv({ cls: 'iplan-routine-modal-error', attr: { 'aria-live': 'polite' } });
+    const actions = new Setting(contentEl);
+    actions.addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
+    actions.addButton((b) => b.setButtonText('Create').setCta().onClick(() => this.submit(state, error, b)));
+    if (nameInput) window.setTimeout(() => nameInput.focus(), 0);
+  }
+  async submit(state, errorEl, btn) {
+    const v = validateRoutineInput(state);
+    if (!v.ok) { errorEl.setText(v.error); return; }
+    btn.setDisabled(true);
+    try {
+      await this.plugin.createRoutine({ ...state, steps: String(state.steps || '').split('\n') });
+      this.close();
+      if (this.onCreated) this.onCreated();
+    } catch (e) {
+      errorEl.setText(`Could not create the routine: ${(e && e.message) || e}`);
+      btn.setDisabled(false);
+    }
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ========================================================================== *
  * Board view - the weekly planner in the main pane
  * ========================================================================== */
 
@@ -6234,6 +6364,67 @@ class IcorPlannerSettingTab extends PluginSettingTab {
         .onChange(async (v) => {
           if (/^\d{1,2}:\d{2}$/.test(v.trim())) { this.plugin.settings.dayEnd = v.trim(); await this.plugin.saveSettings(); }
         }));
+
+    /* ---- routines (2026-09-04) ---- */
+    new Setting(containerEl).setName('Routines').setHeading();
+    new Setting(containerEl)
+      .setName('Show routines')
+      .setDesc('A routine is a block of steps at a time of day, on the weekdays you pick. It sits in the morning or afternoon lane at its time and its steps check off one by one. Off hides the cards; the notes stay.')
+      .addToggle((t) => t.setValue(this.plugin.settings.routinesEnabled !== false)
+        .onChange(async (v) => { this.plugin.settings.routinesEnabled = v; await this.plugin.saveSettings(); }));
+    const rd = routineDefaultsOf(this.plugin.settings);
+    this.plugin.settings.routineDefaults = rd;
+    for (const type of ROUTINE_TYPES) {
+      const row = new Setting(containerEl).setName(`${capitalize(type)} routine from / until`);
+      if (type === 'morning') row.setDesc('HH:MM. The times a new routine of this type starts with; each routine keeps its own in its note.');
+      const timeField = (t, key) => {
+        t.setPlaceholder(rd[type][key]).setValue(rd[type][key]);
+        t.inputEl.setAttribute('aria-label', `${capitalize(type)} routine ${key === 'start' ? 'from' : 'until'}`);
+        t.onChange(async (v) => {
+          const hm = normalizeHM(v);
+          if (!hm) return;
+          this.plugin.settings.routineDefaults[type][key] = hm;
+          await this.plugin.saveSettings();
+        });
+      };
+      row.addText((t) => timeField(t, 'start'));
+      row.addText((t) => timeField(t, 'end'));
+    }
+    const wd = new Setting(containerEl)
+      .setName('Weekdays for a new routine')
+      .setDesc('What a new routine starts with; each routine keeps its own list in its note.');
+    weekdayToggleRow(wd.controlEl,
+      () => routineWeekdaysDefaultOf(this.plugin.settings),
+      async (codes) => { this.plugin.settings.routineWeekdaysDefault = codes; await this.plugin.saveSettings(); },
+      'Weekdays for a new routine');
+    const routineList = (this.plugin.routines || []).slice().sort((a, b) =>
+      (ROUTINE_TYPES.indexOf(a.routineType) - ROUTINE_TYPES.indexOf(b.routineType))
+      || String(a.start || '').localeCompare(String(b.start || ''))
+      || a.name.localeCompare(b.name));
+    if (!routineList.length) {
+      containerEl.createDiv({ cls: 'iplan-settings-note', text: 'No routines yet.' });
+    }
+    for (const r of routineList) {
+      const days = r.weekdays.length ? r.weekdays.map((c) => WEEKDAY_NAMES[c].slice(0, 3)).join(' ') : 'no weekdays';
+      const steps = `${r.steps.length} step${r.steps.length === 1 ? '' : 's'}`;
+      const row = new Setting(containerEl)
+        .setName(r.name)
+        .setDesc(`${capitalize(r.routineType)}, ${r.start || rd[r.routineType].start} - ${r.end || rd[r.routineType].end}, ${days}, ${steps}.`);
+      row.addToggle((t) => {
+        t.setValue(r.active).setTooltip('Active');
+        t.toggleEl.setAttribute('aria-label', `${r.name} active`);
+        t.onChange((v) => this.plugin.setRoutineActive(r.path, v));
+      });
+      row.addButton((b) => b.setButtonText('Open').onClick(() => {
+        const file = this.app.vault.getAbstractFileByPath(r.path);
+        if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
+      }));
+    }
+    new Setting(containerEl)
+      .setName('New routine')
+      .setDesc(`Creates a note under ${this.plugin.paths().routines}/ with the steps and a log table. The steps are edited in the note; the log is written when you check them off.`)
+      .addButton((b) => b.setButtonText('New routine').setCta()
+        .onClick(() => new NewRoutineModal(this.app, this.plugin, () => this.display()).open()));
 
     new Setting(containerEl).setName('Two-way sync').setHeading();
     new Setting(containerEl)
