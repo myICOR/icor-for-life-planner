@@ -42,11 +42,12 @@ for defects. It gets fixed fast.
   weekly board, and brings the tray up in the right sidebar with it. That
   happens once per session: if you close the tray or collapse the sidebar,
   opening the board again leaves it alone.
-- The tray has three tabs. TASKS holds the unscheduled items grouped by
-  source, with your weekly goals pinned on top. AGENDA answers "what is
+- The tray has four tabs. TASKS holds the unscheduled items grouped by
+  source, with your weekly goals pinned on top. HABITS plans the week's
+  habits: one row per habit, seven weekday toggles. AGENDA answers "what is
   planned today", in order. GOALS is the weekly-goals list on its own.
-  TASKS shows while the board is the active page; AGENDA and GOALS follow
-  you everywhere else.
+  TASKS and HABITS show while the board is the active page; AGENDA and
+  GOALS follow you everywhere else.
 - Drag a card onto a day's AM or PM lane to plan it; drag it back to the
   tray to unschedule. On mobile, long-press a card and pick "Plan on...".
   Calendar events render read-only in their lanes.
@@ -55,6 +56,22 @@ for defects. It gets fixed fast.
   `02 Planner/Routines/`; its block sits in the lane at its time, its steps
   check off one by one with the count on the card, and every day's result
   is a row in the note, readable by you and by the AI team.
+- Habits: the habit notes in your vault's Habits room
+  (`04 Inner World/My Life/Habits` by default) appear as an all-day HABITS
+  block under each day they are scheduled for, on the board and in the
+  AGENDA tab. Checking one writes a row into the habit note's log table,
+  the same row the AI team writes when it asks you in chat, so the two are
+  one record; a streak count comes from that table and is never stored.
+  The HABITS tab moves a habit from one weekday to another by writing
+  `cadence` and `cadence_days` into its note.
+- Subtasks: a Todoist or ClickUp subtask is a card that names its parent
+  above its own title, and the parent card reads "n of m subtasks" with a
+  chevron that opens the list; checking a row there is the same check as
+  on the subtask's own card, and a subtask planned on another day shows
+  that day (or TRAY). Dragging a parent moves the parent alone. ClickUp
+  subtasks are fetched only when you turn that on. A recurring task wears
+  a repeat mark, and when its due date moves on, its subtasks come back
+  unchecked with it.
 - Every synced task becomes a markdown note in `02 Planner/<Source>/`
   with the plan state in frontmatter, so the AI team can read and move
   items too.
@@ -131,6 +148,11 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `routinesEnabled` | show routine blocks on the board and in the agenda; off hides them, the notes stay | `true` |
 | `routineDefaults` | the times a new routine starts with, per type: `{ morning: { start, end }, afternoon: { start, end }, evening: { start, end } }`, each `HH:MM`; each routine keeps its own times in its note | `06:30` to `07:30`, `13:00` to `13:30`, `21:00` to `21:45` |
 | `routineWeekdaysDefault` | the weekdays a new routine starts with, lowercase three-letter codes | `[mon, tue, wed, thu, fri]` |
+| `habitsEnabled` | show the HABITS block under each day and the HABITS tab; off hides both, the notes stay | `true` |
+| `habitsFolder` | the vault's Habits room, one note per habit, read flat (no subfolders); validated like the planner folder (never empty, never under `.obsidian`) | `04 Inner World/My Life/Habits` |
+| `habitStreaks` | show `STREAK n` on a habit row, computed from the note's log at render, never written | `true` |
+| `clickupIncludeSubtasks` | also fetch ClickUp subtasks assigned to you (`subtasks=true` on the task query); off so an existing board does not fill up on upgrade | `false` |
+| `subtaskChecklist` | the "n of m subtasks" row and its list on a parent card; off leaves the counter out, subtask cards keep their parent line | `true` |
 
 The board preferences (sync interval, weekend, split, lunch, workday,
 badge, the two-way toggles) sit beside them under their own names.
@@ -162,6 +184,7 @@ Every item note carries `type: planner-item` plus:
 | `reopen_pending` | `true` between unchecking a source-closed card and the source confirming the reopen; reconcile stands down while set | board, cleared by sync |
 | `last_completed_due` | the due date of the most recently finished occurrence of a recurring task | sync |
 | `occurrences` | finished occurrences of a recurring task, oldest first, at most 30: `due`, `planned_day`, `planned_half`, `done_at`. Each one with a plan renders read-only on the board | sync |
+| `parent_id` | the parent task's `external_id` within the same source (Todoist `parent_id`, ClickUp `parent`), or `null`. A child card names its parent; a parent card counts its children | sync |
 
 Editing `planned_day` / `planned_half` in any editor moves the card; the
 board re-renders live off the metadata cache.
@@ -255,6 +278,64 @@ was not asked to; a person or an agent may append a row by hand in the
 same shape (a `Y` with no step numbers counts as every step done), and
 the board shows it on the next render. Nothing here is ever sent to
 Todoist, ClickUp, the mailbox or a calendar.
+
+## Habits (`04 Inner World/My Life/Habits/`)
+
+A habit is one yes or no per day. It is defined in your vault's Habits
+room, not in the planner: one markdown note per habit, the folder being
+the identity. The planner reads that room and writes into it, and both
+halves are narrow on purpose.
+
+**What it reads.** Any note in the folder whose frontmatter says
+`type: habit` or carries a `cadence`. `INDEX.md`, `README.md` and names
+starting with `_` are skipped, and subfolders are not read. The fields:
+
+| field | meaning |
+| --- | --- |
+| `name` | the label on the row; the file name when absent |
+| `cadence` | `daily`, `weekdays`, `weekly`, `monthly` or `adhoc` (`weekday` is read as `weekdays`) |
+| `cadence_days` | the weekdays, lowercase three-letter codes `mon` to `sun`; read for `weekly` and `adhoc` |
+| `status` | `active` shows; `paused` and `abandoned` do not |
+| `started_on` (or `since`) | when the habit began |
+
+`daily` lands on every day, `weekdays` on Monday to Friday, `weekly` and
+`adhoc` on the days in `cadence_days`, `monthly` on none (it is not a
+weekday habit; the HABITS tab lists it greyed).
+
+**What it writes.** Two things, and nothing else in the note.
+
+1. The check-in, into the note **body**, as one row in the log table under
+   the `habit-log` sentinel. Checking a row writes `Y` for that date;
+   unchecking writes `_` (pending) when the row carries no text, `N` when
+   it does, so a note you typed on the row survives. A note with no log
+   yet gains this section on the first check, exactly:
+
+```markdown
+## Daily log
+<!-- habit-log: schema=streak -->
+| Date | Y/N | Note |
+| --- | --- | --- |
+| 2026-09-09 | Y |  |
+```
+
+   Newest on top; a table that is oldest on top keeps its order. A row an
+   agent wrote in chat (`Y`, a check mark, `G` for done; `N`, `R` or a dash
+   for not done) shows on the board on the next render, and a row the board
+   wrote is not asked about again. A table whose sentinel says
+   `schema=process` has a third column for the trigger; the planner leaves
+   it empty and shows no streak for that habit. The check-in never touches
+   frontmatter.
+
+2. From the HABITS tab only, `cadence` and `cadence_days` in the
+   frontmatter: all seven days becomes `cadence: daily` with the field
+   removed, exactly Monday to Friday becomes `weekdays` with the field
+   removed, anything else becomes `weekly` with the list.
+
+A day still ahead shows its habits with the rows disabled; past days stay
+checkable. `STREAK n` on a row is the run of consecutive scheduled days
+with a done mark ending today or yesterday, skipping days the habit is not
+scheduled for (a weekday habit's Friday and Monday join), computed from the
+table at render and never written anywhere.
 
 ## The calendar cache (`02 Planner/Calendar Events.md`)
 
