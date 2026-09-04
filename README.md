@@ -23,6 +23,16 @@ for defects. It gets fixed fast.
   connected anything.
 - Syncs open tasks from Todoist and ClickUp, starred emails from any IMAP
   mailbox, and events from a Google Calendar secret iCal feed.
+- Email providers: Gmail, iCloud and Fastmail have one-click presets and
+  want an app password, never your account password (the settings tab
+  says which and links where). Any other IMAP host works by typing it.
+  Proton Mail connects through Proton Bridge: pick the Proton Bridge
+  preset (host 127.0.0.1, port 1143, STARTTLS, the Bridge's own
+  certificate accepted because the host is this machine) and use the
+  mailbox password shown inside the Bridge app, with Bridge running.
+  Outlook / Microsoft 365 retired password IMAP and cannot connect yet.
+  A Test connection button logs in and straight out, reads nothing, and
+  names what went wrong within one attempt.
 - A "Planner" entry in the file tree (between INBOX and WiP) opens the
   weekly board, and brings the tray up in the right sidebar with it. That
   happens once per session: if you close the tray or collapse the sidebar,
@@ -78,13 +88,33 @@ services (reads always; writes only through the two toggles above):
 
 - `api.todoist.com` (Todoist REST API v1) for your open tasks
 - `api.clickup.com` (ClickUp API v2) for your open tasks
-- your IMAP host, default `imap.gmail.com`, port 993 TLS, for starred
-  emails, headers only; the sole write is the star flag, and only when
-  "Complete on source" is on
+- your IMAP host and port, default `imap.gmail.com` on 993; STARTTLS or
+  TLS as configured (STARTTLS never falls back to a plain login: if the
+  host refuses the upgrade nothing is sent); a self-signed certificate is
+  accepted only for a loopback host (127.0.0.1, localhost) and only with
+  the toggle on; for starred emails, headers only; the sole write is the
+  star flag, and only when "Complete on source" is on. Test connection
+  opens the same connection, logs in and logs out.
 - the Google Calendar secret iCal URL you paste, for your events
 
 No telemetry, no other endpoints. Without keys the plugin makes no network
 requests at all.
+
+## Settings the plugin stores (`data.json`)
+
+The connection settings, for anyone reading or scripting `data.json`:
+
+| key | meaning | default |
+| --- | --- | --- |
+| `todoistToken`, `clickupToken`, `clickupTeamId` | the task-source credentials; the workspace id is optional | empty |
+| `imapHost`, `imapUser`, `imapPassword` | the mailbox: host, address, app password | `imap.gmail.com`, empty, empty |
+| `imapPort` | the IMAP port | `993` |
+| `imapSecurity` | `tls` (encrypted from the first byte) or `starttls` (plain connect, upgraded before login, never a plain login) | `tls` |
+| `imapAllowSelfSigned` | accept the host's own certificate; honoured only when the host is loopback, enforced in the transport code, not just in the settings tab | `false` |
+| `icsUrl` | the calendar's secret iCal address | empty |
+
+The board preferences (sync interval, weekend, split, lunch, workday,
+badge, the two-way toggles) sit beside them under their own names.
 
 ## Secrets
 

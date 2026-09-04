@@ -179,6 +179,14 @@ const DEFAULT_SETTINGS = {
   imapHost: 'imap.gmail.com',
   imapUser: '',
   imapPassword: '',
+  // Transport (Proton Bridge and other local or unusual hosts). The defaults
+  // are exactly what every earlier release did: 993, implicit TLS, the
+  // certificate verified. The self-signed allowance is honoured for a
+  // loopback host only, and that rule is enforced in the transport code,
+  // not just in the settings tab.
+  imapPort: 993,
+  imapSecurity: 'tls',
+  imapAllowSelfSigned: false,
   icsUrl: '',
   syncMinutes: 10,
   showWeekend: false,
@@ -1067,6 +1075,14 @@ function imapQuote(s) {
 // the path inside the app in words.
 const IMAP_PROVIDERS = [
   {
+    // Proton Bridge listens on the machine itself; a loopback host IS the
+    // provider. The password is the one Bridge generates and shows, never
+    // the Proton account password.
+    id: 'proton-bridge', label: 'Proton Bridge', test: (h) => isLoopbackHost(h),
+    appPasswordUrl: null,
+    hint: 'Use the mailbox password shown inside the Bridge app, not your Proton password. Bridge must be running.',
+  },
+  {
     id: 'gmail', label: 'Gmail', test: /gmail|googlemail/i,
     appPasswordUrl: 'https://myaccount.google.com/apppasswords',
     hint: 'Gmail needs an app password, not your account password. Turn on 2-step verification, then create one at myaccount.google.com/apppasswords.',
@@ -1108,7 +1124,8 @@ function imapProviderOf(host) {
   const h = String(host == null ? '' : host).trim();
   if (!h) return IMAP_GENERIC_PROVIDER;
   for (const p of IMAP_PROVIDERS) {
-    if (p.test.test(h)) return { id: p.id, label: p.label, appPasswordUrl: p.appPasswordUrl, hint: p.hint };
+    const hit = typeof p.test === 'function' ? p.test(h) : p.test.test(h);
+    if (hit) return { id: p.id, label: p.label, appPasswordUrl: p.appPasswordUrl, hint: p.hint };
   }
   return IMAP_GENERIC_PROVIDER;
 }
@@ -1136,6 +1153,10 @@ function classifyImapError(err, host, opts) {
   if (provider.id === 'outlook') {
     return out('auth-oauth-required', 'Outlook / Microsoft 365 cannot sign in with a password over IMAP.', provider.hint);
   }
+  if (e.stage === 'starttls') {
+    return out('protocol', 'The IMAP host does not offer STARTTLS on this port.',
+      'Switch the security setting to TLS, or use the port the host offers STARTTLS on. The login was not sent.');
+  }
   if (e.stage === 'login' || /^auth$/i.test(msg)) {
     if (/app(lication)?[- ]specific password|app password/i.test(serverText)) {
       const urlInReply = (/https?:\/\/\S+/.exec(serverText) || [null])[0];
@@ -1151,13 +1172,16 @@ function classifyImapError(err, host, opts) {
   }
   if (TLS_ERROR_CODES.has(code) || /certificate|self.signed/i.test(msg)) {
     return out('tls', 'The IMAP host presented a certificate this app does not trust.',
-      'A self-signed or expired certificate, or a host name that does not match it. Check the host name; a company or local mail server may need its certificate installed on this machine.');
+      isLoopbackHost(host)
+        ? 'A local bridge uses its own certificate. Turn on "Accept a self-signed certificate" (it only ever applies to a host on this machine).'
+        : 'A self-signed or expired certificate, or a host name that does not match it. Check the host name; a company or local mail server may need its certificate installed on this machine.');
   }
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
     return out('dns', 'IMAP host not found.', 'Check the host name for typos.');
   }
   if (code === 'ECONNREFUSED' || /server refused/i.test(msg)) {
-    return out('refused', 'IMAP host refused the connection.', `Check that the host accepts IMAP on port ${port}.`);
+    return out('refused', 'IMAP host refused the connection.',
+      provider.id === 'proton-bridge' ? provider.hint : `Check that the host accepts IMAP on port ${port}.`);
   }
   if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
     return out('timeout', 'IMAP host did not answer in time.', 'Check the network, then the host name.');
@@ -1172,9 +1196,10 @@ const IMAP_PRESETS = [
   { id: 'gmail', label: 'Gmail', host: 'imap.gmail.com', port: 993, security: 'tls', allowSelfSigned: false },
   { id: 'icloud', label: 'iCloud', host: 'imap.mail.me.com', port: 993, security: 'tls', allowSelfSigned: false },
   { id: 'fastmail', label: 'Fastmail', host: 'imap.fastmail.com', port: 993, security: 'tls', allowSelfSigned: false },
+  { id: 'proton-bridge', label: 'Proton Bridge', host: '127.0.0.1', port: 1143, security: 'starttls', allowSelfSigned: true },
 ];
 function imapPresetFields(preset) {
-  return { imapHost: preset.host };
+  return { imapHost: preset.host, imapPort: preset.port, imapSecurity: preset.security, imapAllowSelfSigned: preset.allowSelfSigned };
 }
 function imapActivePreset(settings) {
   const opts = imapTransportOptions(settings);
@@ -1182,32 +1207,119 @@ function imapActivePreset(settings) {
   return hit ? hit.id : null;
 }
 
-// Transport parameters for the mailbox, read once off the settings. Pure.
-function imapTransportOptions(settings) {
-  const s = settings || {};
-  return { host: trimmed(s.imapHost), port: 993, security: 'tls' };
+// A host on this machine: the only place a self-signed certificate may be
+// accepted. 127.0.0.0/8, ::1 and localhost; nothing that merely starts
+// with those (127.0.0.1.example.com is a remote host).
+function isLoopbackHost(host) {
+  const h = trimmed(host).toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '::1') return true;
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  return !!m && m.slice(1).every((o) => Number(o) <= 255);
+}
+// An IP literal gets no SNI server name: node rejects a servername that is
+// not a host name, and there is no name to verify against anyway.
+function isIpLiteral(host) {
+  const h = trimmed(host).replace(/^\[|\]$/g, '');
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':');
 }
 
-// The object handed to tls.connect for a direct TLS connection. Pure, so
-// the suite can read what the transport would be asked to do.
-function imapTlsOptions(opts) {
-  return { host: opts.host, port: opts.port, servername: opts.host };
+// Transport parameters for the mailbox, read once off the settings. Pure.
+// The port is clamped to a valid one (else 993), the security to one of the
+// two modes (else implicit TLS), and the self-signed allowance is dropped
+// here already unless the host is loopback, so a hand-edited data.json
+// cannot widen it to a remote host.
+function imapTransportOptions(settings) {
+  const s = settings || {};
+  const host = trimmed(s.imapHost);
+  const portN = Number(s.imapPort);
+  const port = Number.isInteger(portN) && portN > 0 && portN < 65536 ? portN : 993;
+  const security = s.imapSecurity === 'starttls' ? 'starttls' : 'tls';
+  const allowSelfSigned = !!s.imapAllowSelfSigned && isLoopbackHost(host);
+  return { host, port, security, allowSelfSigned };
+}
+
+// The object handed to tls.connect: a direct connection (host + port) or an
+// upgrade of an already-open plain socket (STARTTLS). Pure, so the suite
+// can read what the transport would be asked to do. Certificate
+// verification is on unless the allowance holds AND the host is loopback;
+// the second check is deliberate belt over braces.
+function imapTlsOptions(opts, socket) {
+  const o = { rejectUnauthorized: !(opts.allowSelfSigned && isLoopbackHost(opts.host)) };
+  if (socket) o.socket = socket; else { o.host = opts.host; o.port = opts.port; }
+  if (!isIpLiteral(opts.host)) o.servername = opts.host;
+  return o;
+}
+
+// The server would not upgrade: the login is never sent in the clear.
+function imapStarttlsError(statusLine) {
+  return Object.assign(new Error('server does not offer STARTTLS'), { stage: 'starttls', serverText: String(statusLine || '') });
 }
 
 // The one place a mailbox socket is opened, for every session. Resolves
 // { socket, greeted }: `greeted` says whether the server's greeting line was
-// already consumed by the connector (false for implicit TLS: the session
-// waits for it). `deps.tls` lets a test script the transport, or prove no
-// socket was opened at all; the default is implicit TLS on the configured
-// port. Rejects 'tls unavailable' where the runtime has no tls module
+// already consumed here (STARTTLS: yes, the plain greeting was read to get
+// the upgrade; implicit TLS: no, the session waits for it). `deps.tls` and
+// `deps.net` let a test script the transport, or prove no socket was opened
+// at all. Rejects 'tls unavailable' where the runtime has no tls module
 // (the mobile app).
+//
+// STARTTLS: plain connect, read `* OK`, send `A0 STARTTLS`, and ONLY on
+// `A0 OK` wrap the socket in TLS. Any other answer (BAD, NO, a PREAUTH
+// greeting) rejects before a LOGIN exists; there is no plaintext fallback.
 function imapConnect(opts, deps) {
   return new Promise((resolve, reject) => {
     let tlsMod = deps && deps.tls;
     if (!tlsMod) { try { tlsMod = require('tls'); } catch { return reject(new Error('tls unavailable')); } }
-    let socket;
-    try { socket = tlsMod.connect(imapTlsOptions(opts)); } catch (e) { return reject(e); }
-    resolve({ socket, greeted: false });
+    // The one raw TLS call site: a direct connection (no plain socket) or
+    // the upgrade of one.
+    const secure = (plainSocket) => tlsMod.connect(imapTlsOptions(opts, plainSocket));
+    if (opts.security !== 'starttls') {
+      let socket;
+      try { socket = secure(null); } catch (e) { return reject(e); }
+      return resolve({ socket, greeted: false });
+    }
+    let netMod = deps && deps.net;
+    if (!netMod) { try { netMod = require('net'); } catch { return reject(new Error('tls unavailable')); } }
+    let plain;
+    try { plain = netMod.connect({ host: opts.host, port: opts.port }); } catch (e) { return reject(e); }
+    let buffer = '';
+    let phase = 'greeting';
+    let settled = false;
+    const abort = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { plain.destroy(); } catch {}
+      reject(err);
+    };
+    const timer = setTimeout(() => abort(new Error('timeout')), 15000);
+    const onError = (err) => abort(err);
+    const onData = (chunk) => {
+      buffer += chunk.toString('binary');
+      const { entries, rest } = imapSplitResponses(buffer);
+      buffer = rest;
+      for (const entry of entries) {
+        if (settled) return;
+        if (phase === 'greeting') {
+          if (entry.startsWith('* BYE')) return abort(new Error('server refused connection'));
+          if (entry.startsWith('* PREAUTH')) return abort(imapStarttlsError(entry));
+          if (entry.startsWith('* OK')) { phase = 'starttls'; plain.write('A0 STARTTLS\r\n'); }
+          continue;
+        }
+        if (phase === 'starttls' && entry.startsWith('A0 ')) {
+          if (!entry.startsWith('A0 OK')) return abort(imapStarttlsError(entry));
+          settled = true;
+          clearTimeout(timer);
+          plain.removeListener('data', onData);
+          plain.removeListener('error', onError);
+          let socket;
+          try { socket = secure(plain); } catch (e) { try { plain.destroy(); } catch {} return reject(e); }
+          return resolve({ socket, greeted: true });
+        }
+      }
+    };
+    plain.on('data', onData);
+    plain.on('error', onError);
   });
 }
 
@@ -4421,6 +4533,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       'account.apple.com', 'https://account.apple.com/account/manage',
       ' (host imap.mail.me.com).');
     li('Fastmail: Settings, Privacy & Security, app passwords (host imap.fastmail.com).', null, null, null);
+    li('Proton Mail: install Proton Bridge, pick the Proton Bridge preset above the host, and use the mailbox password Bridge shows (host 127.0.0.1, port 1143, STARTTLS, its own certificate).', null, null, null);
     li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here.', null, null, null);
     // Presets: one chip per known provider fills the host and the
     // connection shape. A radio group for the keyboard and the screen reader
@@ -4473,9 +4586,47 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .onChange(async (v) => {
         this.plugin.settings.imapHost = v.trim();
         renderHostHint(v);
+        renderSelfSigned(v);
         await this.plugin.saveSettings();
       }));
     renderHostHint(this.plugin.settings.imapHost);
+    new Setting(containerEl)
+      .setName('Port')
+      .setDesc('993 for TLS with most providers; 1143 for Proton Bridge.')
+      .addText((t) => t.setPlaceholder('993').setValue(String(this.plugin.settings.imapPort || 993))
+        .onChange(async (v) => {
+          const n = Number(v.trim());
+          if (Number.isInteger(n) && n > 0 && n < 65536) { this.plugin.settings.imapPort = n; await this.plugin.saveSettings(); }
+        }));
+    new Setting(containerEl)
+      .setName('Security')
+      .setDesc('TLS connects encrypted from the first byte (the default). STARTTLS opens a plain connection and upgrades it before the login; if the host refuses the upgrade, nothing is sent.')
+      .addDropdown((d) => d
+        .addOption('tls', 'TLS (default)')
+        .addOption('starttls', 'STARTTLS')
+        .setValue(this.plugin.settings.imapSecurity === 'starttls' ? 'starttls' : 'tls')
+        .onChange(async (v) => {
+          this.plugin.settings.imapSecurity = v === 'starttls' ? 'starttls' : 'tls';
+          await this.plugin.saveSettings();
+        }));
+    // The allowance is a toggle that only means something for a host on this
+    // machine, and the transport enforces the same rule regardless of what
+    // the toggle says. Off-loopback it is disabled with the reason stated.
+    const selfSignedSetting = new Setting(containerEl).setName('Accept a self-signed certificate');
+    let selfSignedToggle = null;
+    const renderSelfSigned = (host) => {
+      const loop = isLoopbackHost(host);
+      selfSignedSetting.setDesc(loop
+        ? 'The host is on this machine, so its own certificate (Proton Bridge makes one) can be accepted.'
+        : 'Only for a host on this machine (127.0.0.1, localhost). A remote host is always verified.');
+      if (selfSignedToggle) selfSignedToggle.setDisabled(!loop);
+    };
+    selfSignedSetting.addToggle((t) => {
+      selfSignedToggle = t;
+      t.setValue(!!this.plugin.settings.imapAllowSelfSigned)
+        .onChange(async (v) => { this.plugin.settings.imapAllowSelfSigned = v; await this.plugin.saveSettings(); });
+      renderSelfSigned(this.plugin.settings.imapHost);
+    });
     new Setting(containerEl)
       .setName('Email address')
       .addText((t) => t.setValue(this.plugin.settings.imapUser)
@@ -4619,6 +4770,7 @@ module.exports.__test = {
   imapProviderOf, classifyImapError, imapReplyError, imapReasonToConnector, imapConnect, IMAP_PROVIDERS,
   imapTransportOptions, imapTlsOptions, imapSession, imapItemsFromFetch, imapFetchStarredRaw, imapSetStarredRaw,
   imapPreflight, imapProbe, IMAP_PRESETS, imapPresetFields, imapActivePreset,
+  isLoopbackHost, isIpLiteral, imapStarttlsError,
   parseIcs, icsParseDate, expandOccurrences, icsEventsForWeek,
   googleCalendarEventUrl,
   serializeCalendarDefs, reviveCalendarDefs,
