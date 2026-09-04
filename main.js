@@ -4449,8 +4449,11 @@ class IcorPlannerPlugin extends Plugin {
     }
   }
 
+  // The name is built from two strings the source chose, and both pass
+  // safeBasename: an id is API-assigned and plain in practice, and the note
+  // is confined to the folder whatever it carries.
   async createItemFile(folder, source, t) {
-    let base = `${safeBasename(t.title)} (${source}-${t.id})`;
+    let base = `${safeBasename(t.title)} (${source}-${safeBasename(String(t.id))})`;
     let path = normalizePath(`${folder}/${base}.md`);
     if (this.app.vault.getAbstractFileByPath(path)) {
       path = normalizePath(`${folder}/${base}-2.md`);
@@ -4679,8 +4682,11 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   // Every log write goes through vault.process: the transform runs on the
-  // bytes on disk, atomically, never on a body read a moment earlier.
+  // bytes on disk, atomically, never on a body read a moment earlier. The
+  // write asserts its own folder: a path outside Routines is refused here,
+  // whatever the caller believed.
   async processRoutine(path, fn) {
+    if (!this.paths().isRoutine(path)) throw new Error('routine note outside the planner folder');
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) throw new Error('the routine note is gone');
     await this.app.vault.process(file, fn);
@@ -4693,6 +4699,7 @@ class IcorPlannerPlugin extends Plugin {
   resetRoutineDay(path, day) { return this.processRoutine(path, (data) => routineLogReset(data, day)); }
 
   async setRoutineActive(path, active) {
+    if (!this.paths().isRoutine(path)) throw new Error('routine note outside the planner folder');
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
     await this.app.fileManager.processFrontMatter(file, (fm) => { fm.active = !!active; });
@@ -4776,8 +4783,10 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   // The check-in: one row in the habit note body, through vault.process.
-  // Never a frontmatter write.
+  // Never a frontmatter write. Both habit writes assert the habits folder
+  // themselves; a path outside it is refused before any file is looked up.
   async toggleHabit(path, day, next) {
+    if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the configured folder');
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) throw new Error('the habit note is gone');
     await this.app.vault.process(file, (data) => habitLogAfterCheck(data, day, next));
@@ -4786,6 +4795,7 @@ class IcorPlannerPlugin extends Plugin {
   // The HABITS tab's one frontmatter write: cadence and cadence_days, from
   // the toggled weekdays, nothing else touched.
   async setHabitDays(path, days) {
+    if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the configured folder');
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) throw new Error('the habit note is gone');
     const c = cadenceFromDays(days);
