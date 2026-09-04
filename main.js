@@ -1894,6 +1894,11 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
         ? occDay.replace(/-/g, '')
         : occStart.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '');
       const tzUnresolved = eff.tzUnresolved || def.tzUnresolved || null;
+      // The feed identity rides the MASTER def: an override edits one
+      // occurrence of the same event, it does not move it to another feed.
+      const feedId = def.feedId || null;
+      const feedName = def.feedName || null;
+      const feedColor = def.feedColor ? clampSwatch(def.feedColor) : null;
       if (allDay) {
         // DTEND is exclusive for all-day events; emit one card per spanned day.
         const startDay = ov ? ov.start.day : occDay;
@@ -1907,6 +1912,7 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
             start: null, end: null, allDay: true, day, half: null,
             location: eff.location, url: eff.url, continues: i > 0,
             masterUid: def.uid, recurring, occStartUtc, tzUnresolved,
+            feedId, feedName, feedColor,
           });
         }
       } else {
@@ -1925,6 +1931,7 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
               half: first ? (effStart.getHours() < splitHour ? 'am' : 'pm') : null,
               location: eff.location, url: eff.url, continues: !first,
               masterUid: def.uid, recurring, occStartUtc, tzUnresolved,
+              feedId, feedName, feedColor,
             });
           }
           day = addDays(day, 1);
@@ -3767,17 +3774,23 @@ function dueChipText(item, today) {
 }
 
 // One read-only calendar chip's behavior, shared by the board lanes and the
-// tray's AGENDA tab: stale look while defs come from the vault cache, an
-// aria label, and click-through into the detail modal (with the icsUrl so
-// the Google edit deep-link can be built).
+// tray's AGENDA tab: stale look while defs come from the vault cache, the
+// feed's lens on the left edge, an aria label, and click-through into the
+// detail modal (with the feed, looked up from the settings, so the Google
+// edit deep-link can be built when the feed is Google's).
 function wireEventChip(plugin, chip, ev) {
   if (plugin.calendarStale) chip.addClass('is-stale');
   // An unresolved zone is visible on the chip itself (dashed edge, a mark)
   // and spoken in the label; the modal names the zone.
   if (ev.tzUnresolved) chip.addClass('is-tz-unresolved');
+  // The feed's lens is the chip's left edge and nothing else (never a text
+  // ink, never a tint); the label speaks the feed's name, so colour is
+  // never the only carrier.
+  if (ev.feedColor) chip.addClass(`iplan-cal-${clampSwatch(ev.feedColor)}`);
+  if (ev.feedId) chip.setAttribute('data-feed', ev.feedId);
   chip.setAttribute('aria-label',
-    `${ev.title}${ev.location ? ', ' + ev.location : ''}${ev.tzUnresolved ? ', time zone not recognised, shown as written' : ''}`);
-  chip.addEventListener('click', () => new EventDetailModal(plugin.app, ev, plugin.settings.icsUrl, plugin.manifest.id).open());
+    `${ev.title}${ev.location ? ', ' + ev.location : ''}${ev.feedName ? ', ' + ev.feedName : ''}${ev.tzUnresolved ? ', time zone not recognised, shown as written' : ''}`);
+  chip.addEventListener('click', () => new EventDetailModal(plugin.app, ev, calendarFeedFor(plugin.settings, ev), plugin.manifest.id).open());
 }
 
 // One task card. mode: 'board' | 'tray'.
@@ -4014,10 +4027,13 @@ function googleCalendarEventUrl(ev, icsUrl) {
 }
 
 class EventDetailModal extends Modal {
-  constructor(app, ev, icsUrl, inkPluginId) {
+  // `feed` is the settings entry the event came from ({ id, name, url }),
+  // or null for an event with no feed identity. The URL is read here for
+  // ONE purpose: deciding whether a Google edit link can be built.
+  constructor(app, ev, feed, inkPluginId) {
     super(app);
     this.ev = ev;
-    this.icsUrl = icsUrl || '';
+    this.feed = feed && typeof feed === 'object' ? feed : null;
     this.inkPluginId = inkPluginId || '';
   }
   onOpen() {
@@ -4027,7 +4043,8 @@ class EventDetailModal extends Modal {
     markInkPlugin(contentEl, this.inkPluginId);
     const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
     kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
-    kicker.createSpan({ text: ' GOOGLE CALENDAR' });
+    // The kicker names the calendar the event came from.
+    kicker.createSpan({ text: ` ${String((this.feed && this.feed.name) || 'Calendar').toUpperCase()}` });
     contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: ev.title });
     const meta = contentEl.createDiv({ cls: 'iplan-event-modal-meta' });
     const dayLabel = (() => {
@@ -4066,22 +4083,20 @@ class EventDetailModal extends Modal {
       const btn = row.createEl('button', { cls: 'iplan-event-modal-open is-primary', text: 'JOIN MEETING' });
       btn.addEventListener('click', () => window.open(confUrl, '_external'));
     }
-    const gcalUrl = googleCalendarEventUrl(ev, this.icsUrl);
+    // The edit deep link exists only for a feed whose address is Google's
+    // iCal shape; an iCloud, Proton or Outlook feed has no web edit URL, so
+    // there is no calendar button to invent for it. The event's own URL
+    // property, when it has one, is the fallback link.
+    const gcalUrl = this.feed ? googleCalendarEventUrl(ev, this.feed.url) : null;
     if (gcalUrl) {
       const btn = row.createEl('button', { cls: 'iplan-event-modal-open', text: 'EDIT IN GOOGLE CALENDAR' });
       btn.addEventListener('click', () => window.open(gcalUrl, '_external'));
-    } else {
-      // Non-Google feed (or unparsable feed URL): land on the day instead.
-      const [y, mo, d] = ev.day.split('-').map(Number);
-      const dayUrl = `https://calendar.google.com/calendar/u/0/r/day/${y}/${mo}/${d}`;
-      const btn = row.createEl('button', { cls: 'iplan-event-modal-open', text: 'OPEN CALENDAR' });
-      btn.addEventListener('click', () => window.open(dayUrl, '_external'));
     }
     // A URL property on a Google event points back at the event itself; the
     // edit button above already covers it, so only render a second button for
     // genuinely external links (and not for the meeting link again).
     if (ev.url && ev.url !== confUrl && !(gcalUrl && /google\.com\/calendar/i.test(ev.url))) {
-      const btn = row.createEl('button', { cls: 'iplan-event-modal-open is-secondary', text: 'OPEN EVENT LINK' });
+      const btn = row.createEl('button', { cls: `iplan-event-modal-open${gcalUrl ? ' is-secondary' : ''}`, text: 'OPEN EVENT LINK' });
       btn.addEventListener('click', () => window.open(ev.url, '_external'));
     }
   }

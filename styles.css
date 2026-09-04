@@ -5,7 +5,9 @@
  * Obsidian fallback so the plugin degrades gracefully outside INKLINE. */
 
 /* ------------------------------------------------------------ tokens ---- */
-.iplan-root, .iplan-tray-root {
+/* .iplan-settings: the settings tab carries the same aliases so its segmented
+ * controls and the calendar swatches resolve the tokens they name. */
+.iplan-root, .iplan-tray-root, .iplan-settings {
   --iplan-marker: var(--ink-marker, #ff5a2d);
   --iplan-paper: var(--ink-paper, var(--text-normal));
   --iplan-dim: var(--ink-paper-dim, var(--text-muted));
@@ -22,8 +24,15 @@
   --iplan-mono: var(--ink-font-mono, ui-monospace, SFMono-Regular, monospace);
   --iplan-ease: var(--ink-ease-draw, cubic-bezier(0.22, 1, 0.36, 1));
   --iplan-wash: color-mix(in srgb, var(--ink-paper, #888) 4%, transparent);
-  --iplan-event: var(--ink-marker, #ff5a2d);
-  --iplan-event-soft: color-mix(in srgb, var(--ink-marker, #ff5a2d) 10%, transparent);
+  /* calendar feed lenses: four, by the category subtraction on this surface
+   * (the marker carries state here, green carries done, ochre lenses goals).
+   * Edge at full alpha only; never a text ink, never a per-feed tint. */
+  --iplan-cal-1: var(--ink-hue-indigo, var(--color-purple));   /* dusty indigo */
+  --iplan-cal-2: var(--ink-hue-cyan, var(--color-cyan));       /* steel sage */
+  --iplan-cal-3: var(--ink-hue-burgundy, var(--color-pink));   /* muted plum */
+  --iplan-cal-4: var(--ink-paper-faint, var(--text-faint));    /* plain ink */
+  --iplan-event: var(--iplan-cal-1);        /* a feed with no colour set */
+  --iplan-event-soft: var(--iplan-wash);    /* one shared wash for every chip */
   --iplan-goal: #c2a35c;
   --iplan-goal-soft: color-mix(in srgb, #c2a35c 14%, transparent);
   --iplan-overdue: #b5654f;
@@ -372,7 +381,7 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
   cursor: default;
   min-width: 0;
 }
-.iplan-event-time { font-size: 9px; color: var(--iplan-event); flex: 0 0 auto; }
+.iplan-event-time { font-size: 9px; color: var(--iplan-dim); flex: 0 0 auto; }
 .iplan-event-title {
   font-size: 11px;
   color: var(--iplan-paper);
@@ -383,16 +392,25 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
 .iplan-event-allday .iplan-event-title { font-size: 10.5px; }
 .iplan-event.is-continues { opacity: 0.6; }
 
+/* the feed's lens, on the left edge only. The class is set per chip from the
+ * feed's swatch index (1..4); a chip without one keeps --iplan-event. The
+ * dashed tz edge below keeps its style and takes whichever lens is set. */
+.iplan-event.iplan-cal-1 { border-left-color: var(--iplan-cal-1); }
+.iplan-event.iplan-cal-2 { border-left-color: var(--iplan-cal-2); }
+.iplan-event.iplan-cal-3 { border-left-color: var(--iplan-cal-3); }
+.iplan-event.iplan-cal-4 { border-left-color: var(--iplan-cal-4); }
+
 /* an event whose TZID the plugin could not resolve: its time is the wall
  * clock as written, so the chip says so with a dashed edge and a mono mark,
- * and the aria label speaks it. Same ink as the event edge; no new colour. */
+ * and the aria label speaks it. The mark is text, and a lens is never a
+ * text ink, so it sits in the dim ink like the time; no new colour. */
 .iplan-event.is-tz-unresolved { border-left-style: dashed; }
 .iplan-event.is-tz-unresolved::after {
   content: 'TZ?';
   font-family: var(--iplan-mono);
   font-size: 8px;
   letter-spacing: 0.06em;
-  color: var(--iplan-event);
+  color: var(--iplan-dim);
   margin-left: auto;
   flex: 0 0 auto;
 }
