@@ -48,6 +48,11 @@ for defects. It gets fixed fast.
 - Every synced task becomes a markdown note in `02 Planner/<Source>/`
   with the plan state in frontmatter, so the AI team can read and move
   items too.
+- The room can be called what you like. `02 Planner` is the default; a
+  room renamed to `Planner` or `2 Planner` is found on the next launch
+  when it is the only folder called that, and the setting "Planner
+  folder" moves the notes to a new folder with links kept intact. When
+  two folders qualify the plugin asks instead of guessing.
 - Calendar events mirror into one cache note, `02 Planner/Calendar
   Events.md`, so the board renders instantly on relaunch (pale and
   pulsing until the fresh fetch lands) and your schedule is readable
@@ -112,6 +117,7 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `imapSecurity` | `tls` (encrypted from the first byte) or `starttls` (plain connect, upgraded before login, never a plain login) | `tls` |
 | `imapAllowSelfSigned` | accept the host's own certificate; honoured only when the host is loopback, enforced in the transport code, not just in the settings tab | `false` |
 | `icsUrl` | the calendar's secret iCal address | empty |
+| `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
 
 The board preferences (sync interval, weekend, split, lunch, workday,
 badge, the two-way toggles) sit beside them under their own names.
@@ -171,7 +177,8 @@ which no Todoist, ClickUp or IMAP id can produce.
 ## The calendar cache (`02 Planner/Calendar Events.md`)
 
 One note, rewritten on every healthy calendar fetch (never per-event
-notes): frontmatter (`type: calendar-cache`, `updated_at`, event count),
+notes): frontmatter (`type: calendar-cache`, `updated_at`, event count,
+`planner_folder` so a reader knows where the item notes live),
 a readable list of the next 14 days (day, time, title, location,
 meeting link), then a fenced `json` block the plugin uses to restore the
 board instantly on relaunch. It is safe to read for AI / schedule

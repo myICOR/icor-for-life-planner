@@ -35,15 +35,11 @@ const {
  * Constants
  * ========================================================================== */
 
-const PLANNER_FOLDER = '02 Planner';
-// One cache file for ALL calendar events (never per-event notes): frontmatter,
-// a human/AI-readable 14-day list, then a fenced json block for rehydration.
-const CALENDAR_CACHE_FILE = PLANNER_FOLDER + '/Calendar Events.md';
 const BOARD_VIEW_TYPE = 'icor-for-life-planner-board';
 const TRAY_VIEW_TYPE = 'icor-for-life-planner-tray';
 // The version lives in manifest.json only (this.manifest.version at runtime).
-// A second copy here drifted one release behind and nothing read it.
-const DATA_JSON_GITIGNORE_LINE = '.obsidian/plugins/icor-for-life-planner/data.json';
+// A second copy here drifted one release behind and nothing read it. The
+// plugin's own folder likewise comes off the manifest (gitignoreLineFor).
 
 // Connector registry. One object per source, and EVERYTHING the rest of the
 // plugin knows about a source is derived from it: the presentation (label,
@@ -173,6 +169,11 @@ function sourceConfigured(settings, source) {
 }
 
 const DEFAULT_SETTINGS = {
+  // Where the planner lives in the vault: the room folder. Every path the
+  // plugin reads or writes derives from this one value (plannerPaths); a
+  // renamed room is found on boot (detectPlannerFolder) instead of being
+  // recreated empty beside the renamed one.
+  plannerFolder: '02 Planner',
   todoistToken: '',
   clickupToken: '',
   clickupTeamId: '',
@@ -212,6 +213,79 @@ const DEFAULT_SETTINGS = {
 };
 
 const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+
+/* ========================================================================== *
+ * Where the planner lives
+ *
+ * The room name used to be a module constant. Renaming the room made
+ * collectItems return nothing, the file-tree click hook stop firing, and the
+ * next sync recreate an empty default folder beside the renamed one, all of
+ * it silently. Now the folder is a setting, every path derives from it, and
+ * boot adopts a renamed room when it is the only candidate.
+ * ========================================================================== */
+
+// Validates a typed folder. Pure. Trims, strips surrounding slashes,
+// collapses repeated ones; refuses empty, anything under .obsidian, and any
+// '.' or '..' segment. Returns { ok, folder, error }.
+function normalizePlannerFolder(raw) {
+  let f = String(raw == null ? '' : raw).trim().replace(/\\/g, '/');
+  f = f.replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
+  f = normalizePath(f);
+  if (!f) return { ok: false, folder: null, error: 'The planner folder cannot be empty.' };
+  if (/^\.obsidian(\/|$)/i.test(f)) return { ok: false, folder: null, error: 'The planner folder cannot live inside .obsidian.' };
+  if (f.split('/').some((seg) => seg === '.' || seg === '..')) return { ok: false, folder: null, error: 'The planner folder cannot contain "." or ".." segments.' };
+  return { ok: true, folder: f, error: null };
+}
+
+// Every path the plugin reads or writes, derived from the one setting. Pure.
+// An invalid or missing setting falls back to the default, so an older
+// data.json without the key behaves exactly as before.
+function plannerPaths(settings) {
+  const n = normalizePlannerFolder(settings && settings.plannerFolder);
+  const root = n.ok ? n.folder : DEFAULT_SETTINGS.plannerFolder;
+  return {
+    root,
+    // One cache file for ALL calendar events (never per-event notes).
+    cache: `${root}/Calendar Events.md`,
+    sourceFolder: (sourceId) => {
+      const src = SOURCES[sourceId];
+      return src && src.folder ? `${root}/${src.folder}` : null;
+    },
+    // A folder boundary, not a prefix: '02 Planner2/x.md' is outside '02 Planner'.
+    isInside: (path) => typeof path === 'string' && path.startsWith(`${root}/`),
+  };
+}
+
+// Boot-time detection. Pure. The configured folder existing wins. Otherwise
+// exactly one top-level folder whose name ends in "planner" (any prefix,
+// any case) is adopted; several ask; none keeps the setting (ensureFolders
+// creates it). Returns { action: 'keep' | 'adopt' | 'ask', folder, candidates }.
+function detectPlannerFolder(topLevelFolderNames, configured) {
+  const names = Array.isArray(topLevelFolderNames) ? topLevelFolderNames : [];
+  if (names.includes(configured)) return { action: 'keep', folder: configured, candidates: [] };
+  const candidates = names.filter((n) => /(^|\s)planner$/i.test(String(n)));
+  if (candidates.length === 1) return { action: 'adopt', folder: candidates[0], candidates };
+  if (candidates.length > 1) return { action: 'ask', folder: configured, candidates };
+  return { action: 'keep', folder: configured, candidates: [] };
+}
+
+// The settings tab's decision for a folder change. Pure. 'move' renames the
+// current folder (link-safe, through fileManager.renameFile); 'switch' just
+// points the setting; both existing is refused rather than guessed.
+function plannerFolderChangePlan({ current, next, currentExists, nextExists }) {
+  if (next === current) return { action: 'noop', reason: 'This is the current folder.' };
+  if (currentExists && nextExists) return { action: 'refuse', reason: `Both "${current}" and "${next}" exist. Merge them by hand first, then apply.` };
+  if (currentExists && !nextExists) return { action: 'move', reason: `Moves "${current}" and every note in it to "${next}", keeping links intact.` };
+  return { action: 'switch', reason: nextExists ? `Uses the existing "${next}".` : `Creates "${next}".` };
+}
+
+// The .gitignore line for this plugin's own folder, off the manifest
+// (Obsidian sets manifest.dir to the plugin folder; the id is the fallback).
+function gitignoreLineFor(manifest) {
+  const m = manifest || {};
+  const dir = String(m.dir || (m.id ? `.obsidian/plugins/${m.id}` : '')).replace(/\\/g, '/').replace(/\/+$/, '');
+  return dir ? `${dir}/` : null;
+}
 
 /* ========================================================================== *
  * Date helpers (all in the system-local timezone: the planner runs where the
@@ -1875,7 +1949,7 @@ async function calendarFetchDefs(settings) {
 
 /* ========================================================================== *
  * Calendar event cache (v0.5.0) - the parsed defs mirror into ONE vault file
- * (CALENDAR_CACHE_FILE) so relaunch renders instantly from the last healthy
+ * (the cache note under the planner folder) so relaunch renders instantly from the last healthy
  * fetch. File shape: YAML frontmatter, a human/AI-readable list of the next
  * ~14 days, then a fenced ```json block holding the FULL serialized defs
  * array for exact rehydration (Date instants as ISO strings; rrule / exdates
@@ -1977,7 +2051,7 @@ function reviveCalendarDefs(raw) {
 }
 
 // The full cache file content. `now` is injectable so tests are deterministic.
-function buildCalendarCacheContent(defs, now) {
+function buildCalendarCacheContent(defs, now, plannerFolder) {
   const serialized = serializeCalendarDefs(defs);
   const today = localDayStr(now);
   const lines = [
@@ -1986,6 +2060,8 @@ function buildCalendarCacheContent(defs, now) {
     'source: google-calendar-ics',
     `updated_at: ${now.toISOString()}`,
     `events: ${serialized.length}`,
+    // So an agent reading this note knows where the item notes live.
+    ...(plannerFolder ? [`planner_folder: ${JSON.stringify(plannerFolder)}`] : []),
     '---',
     '',
     '# Calendar Events',
@@ -2079,7 +2155,7 @@ function fmtBadgeCountdown(ev, now) {
 }
 
 /* ========================================================================== *
- * Item store - synced tasks live as markdown notes under 02 Planner/<Source>/.
+ * Item store - synced tasks live as markdown notes under <planner folder>/<Source>/.
  * Frontmatter is the plan database (the cockpit's plan_assignments analog):
  *   type: planner-item        source / external_id  - identity (idempotency key)
  *   status: open|done         - SOURCE truth, written by reconcile
@@ -2157,8 +2233,8 @@ function itemFromFile(app, file) {
   if (item) item.file = file;
   return item;
 }
-function collectItems(app) {
-  const root = app.vault.getAbstractFileByPath(PLANNER_FOLDER);
+function collectItems(app, rootPath) {
+  const root = app.vault.getAbstractFileByPath(rootPath);
   const items = [];
   const walk = (folder) => {
     for (const child of folder.children || []) {
@@ -2412,7 +2488,7 @@ class IcorPlannerPlugin extends Plugin {
     // data.json beside the settings; never shown in the settings UI.
     if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
     this._pushTimers = new Map();
-    this.calendarDefs = null;        // parsed ICS defs (mirrored to CALENDAR_CACHE_FILE on healthy fetches)
+    this.calendarDefs = null;        // parsed ICS defs (mirrored to the cache note on healthy fetches)
     this.calendarStale = false;      // true while defs come from the vault cache, not a live fetch
     this.calendarStatus = null;      // last calendar ConnectorResult status
     this.syncStatus = {};            // source -> { ok, reason, message, count, at }
@@ -2431,12 +2507,13 @@ class IcorPlannerPlugin extends Plugin {
 
     this.addSettingTab(new IcorPlannerSettingTab(this.app, this));
 
-    // The real 02 Planner folder is the entry point (styled like the other
+    // The planner folder itself is the entry point (styled like the other
     // rooms by icor-rooms.css). A capture-phase listener turns its click into
     // opening the board instead of folding the folder - no injected rows.
+    // The path is read at click time, so a changed setting needs no rewiring.
     this.registerDomEvent(document, 'click', (e) => {
       const title = e.target instanceof Element
-        ? e.target.closest(`.nav-folder-title[data-path="${PLANNER_FOLDER}"]`)
+        ? e.target.closest(`.nav-folder-title[data-path="${this.paths().root}"]`)
         : null;
       if (!title) return;
       e.preventDefault();
@@ -2445,6 +2522,8 @@ class IcorPlannerPlugin extends Plugin {
     }, { capture: true });
 
     this.app.workspace.onLayoutReady(() => {
+      // A renamed room is found before anything reads or writes a path.
+      this.adoptPlannerFolder();
       this.ensureGitignore();
       // Instant calendar: rehydrate the last healthy fetch from the vault
       // cache (rendered pale + pulsing) before the live fetch replaces it.
@@ -2458,20 +2537,40 @@ class IcorPlannerPlugin extends Plugin {
       this.scheduleSync();
     });
 
-    // Live re-render when anything under 02 Planner changes (sync writes, user
-    // edits, or the AI team moving an item by editing frontmatter).
-    const notify = (file) => {
-      if (file && file.path && file.path.startsWith(PLANNER_FOLDER + '/')) this.emitModelChanged();
-    };
+    // Live re-render when anything under the planner folder changes (sync
+    // writes, user edits, or the AI team moving an item by editing
+    // frontmatter). The boundary is read at event time (this.paths()).
+    const inside = (file) => !!(file && this.paths().isInside(file.path));
+    const notify = (file) => { if (inside(file)) this.emitModelChanged(); };
     this.registerEvent(this.app.metadataCache.on('changed', (file) => {
       notify(file);
-      if (file && file.path && file.path.startsWith(PLANNER_FOLDER + '/')) this.schedulePushCheck(file.path);
+      if (inside(file)) this.schedulePushCheck(file.path);
     }));
     this.registerEvent(this.app.vault.on('delete', notify));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
-      if ((file.path && file.path.startsWith(PLANNER_FOLDER + '/')) ||
-          (oldPath && oldPath.startsWith(PLANNER_FOLDER + '/'))) this.emitModelChanged();
+      if (inside(file) || this.paths().isInside(oldPath)) this.emitModelChanged();
     }));
+  }
+
+  // Every path, derived from the setting at call time.
+  paths() { return plannerPaths(this.settings); }
+
+  // Boot: if the configured folder is missing but exactly one top-level
+  // folder is called "... planner", use it. Several: say so once and leave
+  // the setting alone. The vault is never guessed at.
+  async adoptPlannerFolder() {
+    try {
+      const root = this.app.vault.getRoot();
+      const names = (root && root.children ? root.children : []).filter((c) => c instanceof TFolder).map((c) => c.name);
+      const d = detectPlannerFolder(names, this.paths().root);
+      if (d.action === 'adopt') {
+        this.settings.plannerFolder = d.folder;
+        await this.saveData(this.settings);
+        new Notice(`Planner: using the folder "${d.folder}".`);
+      } else if (d.action === 'ask') {
+        new Notice(`Planner: several folders look like the planner (${d.candidates.join(', ')}). Pick one under Settings, ICOR for Life - Planner, Planner folder.`, 12000);
+      }
+    } catch { /* detection is a convenience; ensureFolders covers the rest */ }
   }
 
   onunload() {
@@ -2521,7 +2620,8 @@ class IcorPlannerPlugin extends Plugin {
       const gi = '.gitignore';
       let text = '';
       try { text = await adapter.read(gi); } catch { text = ''; }
-      const wanted = ['.obsidian/plugins/icor-for-life-planner/'];
+      const line = gitignoreLineFor(this.manifest);
+      const wanted = line ? [line] : [];
       const missing = wanted.filter((line) => !text.split('\n').some((l) => l.trim() === line));
       if (missing.length) {
         const block = `\n# ICOR for Life - Planner is its own git repository (and its data.json holds API keys)\n${missing.join('\n')}\n`;
@@ -2532,13 +2632,13 @@ class IcorPlannerPlugin extends Plugin {
 
   /* ---- calendar event cache (v0.5.0) ------------------------------------- */
 
-  // Rehydrate the last healthy fetch from CALENDAR_CACHE_FILE. Only fills the
+  // Rehydrate the last healthy fetch from the cache note. Only fills the
   // gap before the first live fetch; a malformed cache is silently ignored
   // (the next healthy fetch rebuilds it).
   async loadCalendarCache() {
     if (this.calendarDefs) return;
     try {
-      const file = this.app.vault.getAbstractFileByPath(normalizePath(CALENDAR_CACHE_FILE));
+      const file = this.app.vault.getAbstractFileByPath(normalizePath(this.paths().cache));
       if (!(file instanceof TFile)) return;
       const text = await this.app.vault.cachedRead(file);
       const defs = parseCalendarCacheContent(text);
@@ -2563,8 +2663,8 @@ class IcorPlannerPlugin extends Plugin {
     try {
       if (!this.calendarDefs || this.calendarStale) return; // only persist live fetches
       await this.ensureFolders();
-      const content = buildCalendarCacheContent(this.calendarDefs, new Date());
-      const path = normalizePath(CALENDAR_CACHE_FILE);
+      const content = buildCalendarCacheContent(this.calendarDefs, new Date(), this.paths().root);
+      const path = normalizePath(this.paths().cache);
       const existing = this.app.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) await this.app.vault.process(existing, () => content);
       else await this.app.vault.create(path, content);
@@ -2734,10 +2834,11 @@ class IcorPlannerPlugin extends Plugin {
       const existing = this.app.vault.getAbstractFileByPath(path);
       if (!existing) { try { await this.app.vault.createFolder(path); } catch {} }
     };
-    await mk(PLANNER_FOLDER);
+    const p = this.paths();
+    await mk(p.root);
     // Manual included: the folder must exist on a vault with no keys at all.
     for (const key of TASK_SOURCES) {
-      await mk(`${PLANNER_FOLDER}/${SOURCES[key].folder}`);
+      await mk(p.sourceFolder(key));
     }
   }
 
@@ -2798,9 +2899,9 @@ class IcorPlannerPlugin extends Plugin {
   // stored shadow - local edits push, source edits pull, source wins conflicts.
   // Failed pushes keep the old baseline so the next sync retries them.
   async upsertSource(source, items) {
-    const folder = `${PLANNER_FOLDER}/${SOURCES[source].folder}`;
+    const folder = this.paths().sourceFolder(source);
     const s = this.settings;
-    const allItems = collectItems(this.app);
+    const allItems = collectItems(this.app, this.paths().root);
     const existing = new Map(); // external id -> item
     for (const it of allItems) {
       if (it.source === source) existing.set(it.id, it);
@@ -3160,7 +3261,7 @@ class IcorPlannerPlugin extends Plugin {
     const clean = String(title == null ? '' : title).trim();
     if (!clean) return null;
     await this.ensureFolders();
-    const folder = `${PLANNER_FOLDER}/${SOURCES[MANUAL_SOURCE].folder}`;
+    const folder = this.paths().sourceFolder(MANUAL_SOURCE);
     const fm = manualItemFrontmatter(clean, manualExternalId(), new Date().toISOString());
     if (opts && opts.day) {
       fm.planned_day = opts.day;
@@ -3662,7 +3763,7 @@ class PlannerBoardView extends ItemView {
     el.empty();
     const today = todayStr();
     const isDay = this.mode === 'day';
-    const items = collectItems(this.plugin.app);
+    const items = collectItems(this.plugin.app, this.plugin.paths().root);
     const splitHour = this.plugin.splitHour();
     const eventsWeekStart = isDay ? mondayOf(this.day) : this.weekStart;
     const events = this.plugin.calendarDefs
@@ -4196,7 +4297,7 @@ class PlannerTrayView extends ItemView {
     } catch { /* no document in a headless context */ }
     el.empty();
     const today = todayStr();
-    const items = collectItems(this.plugin.app);
+    const items = collectItems(this.plugin.app, this.plugin.paths().root);
 
     const head = el.createDiv({ cls: 'iplan-tray-head' });
     const kicker = head.createDiv({ cls: 'iplan-kicker' });
@@ -4490,6 +4591,54 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       });
     };
 
+    // The planner folder. Typing validates live (announced); Apply commits,
+    // moving the existing notes with a link-safe rename when the new folder
+    // does not exist yet, refusing when both exist rather than guessing.
+    new Setting(containerEl).setName('Vault').setHeading();
+    const folderSetting = new Setting(containerEl).setName('Planner folder');
+    folderSetting.descEl.setAttribute('aria-live', 'polite');
+    let pendingFolder = this.plugin.settings.plannerFolder;
+    let applyBtn = null;
+    const folderPlan = () => {
+      const n = normalizePlannerFolder(pendingFolder);
+      if (!n.ok) return { ok: false, plan: null, text: n.error };
+      const current = this.plugin.paths().root;
+      const cur = this.app.vault.getAbstractFileByPath(current);
+      const nxt = this.app.vault.getAbstractFileByPath(n.folder);
+      const plan = plannerFolderChangePlan({ current, next: n.folder, currentExists: cur instanceof TFolder, nextExists: nxt instanceof TFolder });
+      return { ok: plan.action !== 'refuse' && plan.action !== 'noop', plan, folder: n.folder, current: cur, text: plan.reason };
+    };
+    const renderFolderPlan = () => {
+      const fp = folderPlan();
+      folderSetting.setDesc(fp.text);
+      if (applyBtn) {
+        applyBtn.setDisabled(!fp.ok);
+        applyBtn.setButtonText(fp.plan && fp.plan.action === 'move' ? 'Move and apply' : 'Apply');
+      }
+    };
+    folderSetting.addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.plannerFolder).setValue(pendingFolder)
+      .onChange((v) => { pendingFolder = v; renderFolderPlan(); }));
+    folderSetting.addButton((b) => {
+      applyBtn = b;
+      b.setButtonText('Apply').onClick(async () => {
+        const fp = folderPlan();
+        if (!fp.ok) return;
+        b.setDisabled(true);
+        try {
+          if (fp.plan.action === 'move') await this.app.fileManager.renameFile(fp.current, fp.folder);
+          this.plugin.settings.plannerFolder = fp.folder;
+          await this.plugin.saveSettings();
+          await this.plugin.ensureFolders();
+          new Notice(`Planner: now using "${fp.folder}".`);
+          this.display();
+        } catch (e) {
+          folderSetting.setDesc(`Could not apply: ${e && e.message ? e.message : e}`);
+          b.setDisabled(false);
+        }
+      });
+      renderFolderPlan();
+    });
+
     new Setting(containerEl).setName('Todoist').setHeading();
     secret(new Setting(containerEl)
       .setName('API token')
@@ -4776,7 +4925,8 @@ module.exports.__test = {
   serializeCalendarDefs, reviveCalendarDefs,
   buildCalendarCacheContent, parseCalendarCacheContent,
   detectConferenceUrl, nextUpcomingEvent, fmtBadgeCountdown,
-  CALENDAR_CACHE_FILE, CONFERENCE_URL_PATTERNS,
+  CONFERENCE_URL_PATTERNS,
+  plannerPaths, normalizePlannerFolder, detectPlannerFolder, plannerFolderChangePlan, gitignoreLineFor, collectItems,
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
   WINDOWS_TZ_TO_IANA, normalizeTzid, isIanaZone, resolveTzid, tzidUtcPrefixOffset,
   icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult,
@@ -4793,5 +4943,5 @@ module.exports.__test = {
   ghostItemsFor, pruneShadows, normalizeOccurrences, OCCURRENCE_CAP, DONE_SHADOW_MAX_AGE_MS,
   agendaSections, laneSequence, TRAY_TABS,
   todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
-  SOURCES, DEFAULT_SETTINGS, PLANNER_FOLDER,
+  SOURCES, DEFAULT_SETTINGS,
 };
