@@ -45,79 +45,131 @@ const TRAY_VIEW_TYPE = 'icor-for-life-planner-tray';
 // A second copy here drifted one release behind and nothing read it.
 const DATA_JSON_GITIGNORE_LINE = '.obsidian/plugins/icor-for-life-planner/data.json';
 
-// Source registry. Folder is the subfolder of PLANNER_FOLDER the items land in.
+// Connector registry. One object per source, and EVERYTHING the rest of the
+// plugin knows about a source is derived from it: the presentation (label,
+// folder, svg), whether a credential is present (`configured`), how its open
+// set is fetched (`fetchOpen`), whether a completion can cross to it
+// (`setClosed`), whether note edits can flow back (`pushFields`), and which
+// platforms it runs on. Adding a source is adding one entry here plus a
+// settings section; no list elsewhere needs to learn about it.
+//
+// `kind`: 'local' (nothing to fetch, nothing to write), 'task' (fetched into
+// per-item notes, reconciled, writable), 'calendar' (fetched into the one
+// cache note, always read-only).
+//
 // The svg paths are the verified single-path monochrome marks from the cockpit
 // (SourceMark.tsx, fetched from simple-icons 2026-06-02).
-const SOURCES = {
+const trimmed = (v) => String(v == null ? '' : v).trim();
+const CONNECTORS = {
   // 2026-08-30: manual items. No connector, no credential, no write-back target.
   // It is a first-class source so the board, the tray, the drag logic and the
   // card menu treat a hand-written task exactly like a synced one; everything
   // that would reach outward is gated on SYNCED_SOURCES, never on a negation
   // of 'manual', so a future local source inherits the same protection.
   manual: {
-    id: 'manual', label: 'Manual', folder: 'Manual',
+    id: 'manual', label: 'Manual', folder: 'Manual', kind: 'local',
     // A pencil, not a brand mark: the meta row's job is to say where this came
     // from, and "you wrote it" is the answer.
     svg: 'M2 22l1.5-5.5L14.9 5.1l4 4L7.5 20.5 2 22zM16.3 3.7l1.4-1.4a1.9 1.9 0 0 1 2.7 0l1.3 1.3a1.9 1.9 0 0 1 0 2.7l-1.4 1.4-4-4z',
+    // Always configured: there is nothing to configure.
+    configured: () => true,
+    fetchOpen: null, setClosed: null, pushFields: null,
+    platforms: ['desktop', 'mobile'],
   },
   todoist: {
-    id: 'todoist', label: 'Todoist', folder: 'Todoist',
+    id: 'todoist', label: 'Todoist', folder: 'Todoist', kind: 'task',
+    configured: (s) => !!trimmed(s.todoistToken),
+    fetchOpen: (s, deps) => todoistFetchOpen(s, deps),
+    setClosed: (s, item, closed) => todoistSetClosed(trimmed(s.todoistToken), item.id, closed),
+    pushFields: (s, item, pushes) => todoistPushFields(trimmed(s.todoistToken), item.id, pushes),
+    doneNotice: (closed) => (closed ? 'Planner: closed in Todoist.' : 'Planner: reopened in Todoist.'),
+    platforms: ['desktop', 'mobile'],
     svg: 'M21 0H3C1.35 0 0 1.35 0 3v3.858s3.854 2.24 4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.608 8.136-4.675.279-.161.58-.107.748-.01.164.097.606.348.84.48.232.134.221.502.013.622l-9.712 5.59c-.346.2-.69.204-1.048.002C3.478 10.907.998 9.463 0 8.882v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.008.164.096.606.347.84.48.232.133.221.5.013.62-.208.121-9.288 5.346-9.712 5.59-.346.2-.69.205-1.048.002C3.478 14.951.998 13.506 0 12.926v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.009.164.097.606.348.84.48.232.133.221.502.013.622l-9.712 5.59c-.346.199-.69.204-1.048.001C3.478 18.994.998 17.55 0 16.97V21c0 1.65 1.35 3 3 3h18c1.65 0 3-1.35 3-3V3c0-1.65-1.35-3-3-3z',
   },
   clickup: {
-    id: 'clickup', label: 'ClickUp', folder: 'ClickUp',
+    id: 'clickup', label: 'ClickUp', folder: 'ClickUp', kind: 'task',
+    configured: (s) => !!trimmed(s.clickupToken),
+    fetchOpen: (s, deps) => clickupFetchOpen(s, deps),
+    setClosed: (s, item, closed) => clickupSetClosed(trimmed(s.clickupToken), item.id, item.listId, closed),
+    pushFields: (s, item, pushes) => clickupPushFields(trimmed(s.clickupToken), item.id, pushes),
+    doneNotice: (closed) => (closed ? 'Planner: closed in ClickUp.' : 'Planner: reopened in ClickUp.'),
+    platforms: ['desktop', 'mobile'],
     svg: 'M2 18.439l3.69-2.828c1.961 2.56 4.044 3.739 6.363 3.739 2.307 0 4.33-1.166 6.203-3.704L22 18.405C19.298 22.065 15.941 24 12.053 24 8.178 24 4.788 22.078 2 18.439zM12.04 6.15l-6.568 5.66-3.036-3.52L12.055 0l9.543 8.296-3.05 3.509z',
   },
   email: {
-    id: 'email', label: 'Email', folder: 'Email',
+    id: 'email', label: 'Email', folder: 'Email', kind: 'task',
+    configured: (s) => !!(trimmed(s.imapHost) && trimmed(s.imapUser) && trimmed(s.imapPassword)),
+    fetchOpen: (s, deps) => emailFetchStarred(s, deps),
+    // The star flag is the one write the mailbox ever sees; closing = unstar.
+    setClosed: async (s, item, closed, deps) => {
+      try {
+        await imapSetStarredRaw(trimmed(s.imapHost), trimmed(s.imapUser), trimmed(s.imapPassword), item.id, !closed, deps);
+      } catch (e) {
+        if (/tls unavailable/i.test((e && e.message) || '')) {
+          throw new Error('the email star can only be written from the desktop app');
+        }
+        throw e;
+      }
+    },
+    // Email takes the star flag only, never field writes.
+    pushFields: null,
+    doneNotice: (closed) => (closed ? 'Planner: unstarred the email.' : 'Planner: starred the email again.'),
+    // IMAP needs a raw TLS socket, which the mobile app does not have.
+    platforms: ['desktop'],
     // Lucide-style mail outline drawn as a filled-stroke substitute is wrong for a
     // fill-rendered mark, so email uses a simple filled envelope path instead.
     svg: 'M1.5 4.5h21a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-21A1.5 1.5 0 0 1 0 18V6a1.5 1.5 0 0 1 1.5-1.5zm10.5 8.25L2.25 6.375v11.25h19.5V6.375L12 12.75zM3.375 6l8.625 5.625L20.625 6H3.375z',
   },
   calendar: {
-    id: 'calendar', label: 'Google Calendar', folder: null, // no per-event notes; one cache file (CALENDAR_CACHE_FILE)
+    id: 'calendar', label: 'Google Calendar', folder: null, kind: 'calendar', // no per-event notes; one cache file
+    configured: (s) => !!trimmed(s.icsUrl),
+    fetchOpen: null, setClosed: null, pushFields: null,
+    platforms: ['desktop', 'mobile'],
     svg: 'M18.316 5.684H24v12.632h-5.684V5.684zM5.684 24h12.632v-5.684H5.684V24zM18.316 5.684V0H1.895A1.894 1.894 0 0 0 0 1.895v16.421h5.684V5.684h12.632zm-7.207 6.25v-.065c.272-.144.5-.349.687-.617s.279-.595.279-.982c0-.379-.099-.72-.3-1.025a2.05 2.05 0 0 0-.832-.714 2.703 2.703 0 0 0-1.197-.257c-.6 0-1.094.156-1.481.467-.386.311-.65.671-.793 1.078l1.085.452c.086-.249.224-.461.413-.633.189-.172.445-.257.767-.257.33 0 .602.088.816.264a.86.86 0 0 1 .322.703c0 .33-.12.589-.36.778-.24.19-.535.284-.886.284h-.567v1.085h.633c.407 0 .748.109 1.02.327.272.218.407.499.407.843 0 .336-.129.614-.387.832s-.565.327-.924.327c-.351 0-.651-.103-.897-.311-.248-.208-.422-.502-.521-.881l-1.096.452c.178.616.505 1.082.977 1.401.472.319.984.478 1.538.477a2.84 2.84 0 0 0 1.293-.291c.382-.193.684-.458.902-.794.218-.336.327-.72.327-1.149 0-.429-.115-.797-.344-1.105a2.067 2.067 0 0 0-.881-.689zm2.093-1.931l.602.913L15 10.045v5.744h1.187V8.446h-.827l-2.158 1.557zM22.105 0h-3.289v5.184H24V1.895A1.894 1.894 0 0 0 22.105 0zm-3.289 23.5l4.684-4.684h-4.684V23.5zM0 22.105C0 23.152.848 24 1.895 24h3.289v-5.184H0v3.289z',
   },
 };
 
-// The three sources that have a connector: they own a credential, they are
+// The presentation view of the registry (id, label, folder, svg): what the
+// board, the tray and the card menu read. Derived, never hand-kept.
+const SOURCES = Object.fromEntries(Object.values(CONNECTORS).map((c) => [
+  c.id, { id: c.id, label: c.label, folder: c.folder, svg: c.svg },
+]));
+
+// The task sources that have a connector: they own a credential, they are
 // fetched, they reconcile, and they can be written back to. MANUAL is
-// deliberately absent from this list, and every outward-facing decision in the
-// plugin asks this list rather than testing for 'manual' by hand.
-const SYNCED_SOURCES = ['todoist', 'clickup', 'email'];
+// absent by construction (kind 'local'), and every outward-facing decision
+// in the plugin asks this list rather than testing for 'manual' by hand.
+const SYNCED_SOURCES = Object.values(CONNECTORS).filter((c) => c.kind === 'task' && c.fetchOpen).map((c) => c.id);
 const MANUAL_SOURCE = 'manual';
+// Everything that is fetched at all, the calendar included: what the sync
+// scheduler asks before it starts a run.
+const FETCHED_SOURCES = Object.values(CONNECTORS).filter((c) => c.kind !== 'local').map((c) => c.id);
 // Tray render order. Manual leads: it is the one section that works on a vault
 // with no keys at all, and the add control lives in it.
 const TASK_SOURCES = [MANUAL_SOURCE, ...SYNCED_SOURCES];
 
 function isSyncedSource(source) { return SYNCED_SOURCES.includes(source); }
-// Can an edit in the note be pushed outward? Only Todoist and ClickUp accept
-// field writes; email takes the star flag only; manual has nowhere to go.
-function canPushToSource(source) { return source === 'todoist' || source === 'clickup'; }
-// Can checking the card close something at the source?
-function canCompleteOnSource(source) { return isSyncedSource(source); }
+// Can an edit in the note be pushed outward? Exactly the sources whose
+// connector accepts field writes; email takes the star flag only; manual has
+// nowhere to go.
+function canPushToSource(source) { return !!(CONNECTORS[source] && CONNECTORS[source].pushFields); }
+// Can checking the card close something at the source? Exactly the sources
+// whose connector can close.
+function canCompleteOnSource(source) { return !!(CONNECTORS[source] && CONNECTORS[source].setClosed); }
 
 // Is this source's credential actually present? The ONE authority on the
 // question, so the tray, the board notice and the sync scheduler can never
 // disagree about whether a source exists. Manual is always configured: there
 // is nothing to configure.
 //
-// This mirrors, field for field, the no-token guard at the top of each
-// connector (todoistFetchOpen, clickupFetchOpen, emailFetchStarred,
-// calendarFetchDefs). The connector guard decides whether a FETCH runs; this
-// decides what the UI is allowed to claim before any fetch has run. They must
-// agree, and the test suite asserts they do.
+// Each connector's `configured` mirrors, field for field, the no-token guard
+// at the top of its fetch (todoistFetchOpen, clickupFetchOpen,
+// emailFetchStarred, calendarFetchDefs). The fetch guard decides whether a
+// FETCH runs; this decides what the UI is allowed to claim before any fetch
+// has run. They must agree, and the test suite asserts they do.
 function sourceConfigured(settings, source) {
-  const s = settings || {};
-  const t = (v) => String(v == null ? '' : v).trim();
-  switch (source) {
-    case MANUAL_SOURCE: return true;
-    case 'todoist': return !!t(s.todoistToken);
-    case 'clickup': return !!t(s.clickupToken);
-    case 'email': return !!(t(s.imapHost) && t(s.imapUser) && t(s.imapPassword));
-    case 'calendar': return !!t(s.icsUrl);
-    default: return false;
-  }
+  const c = CONNECTORS[source];
+  return c ? !!c.configured(settings || {}) : false;
 }
 
 const DEFAULT_SETTINGS = {
@@ -2247,7 +2299,7 @@ class IcorPlannerPlugin extends Plugin {
   // Any source with a connector, calendar included. Manual is excluded on
   // purpose: it needs no fetch, so it must never make the scheduler start one.
   anySourceConfigured() {
-    return [...SYNCED_SOURCES, 'calendar'].some((k) => sourceConfigured(this.settings, k));
+    return FETCHED_SOURCES.some((k) => sourceConfigured(this.settings, k));
   }
 
   async saveSettings() {
@@ -2513,11 +2565,9 @@ class IcorPlannerPlugin extends Plugin {
     try {
       await this.ensureFolders();
       const s = this.settings;
-      const runs = [
-        ['todoist', todoistFetchOpen(s)],
-        ['clickup', clickupFetchOpen(s)],
-        ['email', emailFetchStarred(s)],
-      ];
+      // Every task connector starts at once, in registry order; results are
+      // awaited and applied in that same order.
+      const runs = SYNCED_SOURCES.map((k) => [k, CONNECTORS[k].fetchOpen(s)]);
       for (const [source, promise] of runs) {
         const result = await promise;
         this.syncStatus[source] = {
@@ -2549,7 +2599,7 @@ class IcorPlannerPlugin extends Plugin {
       this.lastSyncAt = new Date().toISOString();
       await this.saveData(this.settings); // persist the refreshed shadows
       if (manual) {
-        const okCount = ['todoist', 'clickup', 'email'].filter((k) => this.syncStatus[k] && this.syncStatus[k].ok).length;
+        const okCount = SYNCED_SOURCES.filter((k) => this.syncStatus[k] && this.syncStatus[k].ok).length;
         new Notice(`Planner sync done (${okCount} task source${okCount === 1 ? '' : 's'} healthy).`);
       }
     } finally {
@@ -2585,12 +2635,11 @@ class IcorPlannerPlugin extends Plugin {
       const body = await this.readBody(prior.file);
       const sourceVals = { due: t.due || null, priority: t.priority, description: (t.description || '').trim() };
       const localVals = { due: prior.due, priority: prior.priority, description: body };
-      const pushEnabled = !!s.pushEdits && source !== 'email';
+      const pushEnabled = !!s.pushEdits && canPushToSource(source);
       const { pushes, finals, nextShadow } = threeWayMerge(sourceVals, localVals, shadow, pushEnabled);
       if (Object.keys(pushes).length) {
         try {
-          if (source === 'todoist') await todoistPushFields((s.todoistToken || '').trim(), t.id, pushes);
-          else if (source === 'clickup') await clickupPushFields((s.clickupToken || '').trim(), t.id, pushes);
+          await CONNECTORS[source].pushFields(s, t, pushes);
           new Notice(`Planner: pushed ${Object.keys(pushes).join(', ')} to ${SOURCES[source].label}.`);
         } catch (e) {
           new Notice(`Planner: ${SOURCES[source].label} push failed (${e.message}). Will retry.`);
@@ -2671,26 +2720,10 @@ class IcorPlannerPlugin extends Plugin {
 
   // The one place a completion crosses to the source. Throws on failure.
   async applyDoneOnSource(item, closed) {
-    const s = this.settings;
-    if (!canCompleteOnSource(item.source)) return; // manual: nowhere to write
-    if (item.source === 'todoist') {
-      await todoistSetClosed((s.todoistToken || '').trim(), item.id, closed);
-      new Notice(closed ? 'Planner: closed in Todoist.' : 'Planner: reopened in Todoist.');
-    } else if (item.source === 'clickup') {
-      await clickupSetClosed((s.clickupToken || '').trim(), item.id, item.listId, closed);
-      new Notice(closed ? 'Planner: closed in ClickUp.' : 'Planner: reopened in ClickUp.');
-    } else if (item.source === 'email') {
-      try {
-        await imapSetStarredRaw((s.imapHost || '').trim(), (s.imapUser || '').trim(),
-          (s.imapPassword || '').trim(), item.id, !closed);
-      } catch (e) {
-        if (/tls unavailable/i.test((e && e.message) || '')) {
-          throw new Error('the email star can only be written from the desktop app');
-        }
-        throw e;
-      }
-      new Notice(closed ? 'Planner: unstarred the email.' : 'Planner: starred the email again.');
-    }
+    const c = CONNECTORS[item.source];
+    if (!c || !c.setClosed) return; // manual: nowhere to write
+    await c.setClosed(this.settings, item, closed);
+    new Notice(c.doneNotice(closed));
   }
 
   // Debounced per-file: a local edit (user typing, a card action, or an agent
@@ -2731,8 +2764,7 @@ class IcorPlannerPlugin extends Plugin {
       }
       if (Object.keys(pushes).length) {
         try {
-          if (item.source === 'todoist') await todoistPushFields((s.todoistToken || '').trim(), item.id, pushes);
-          else await clickupPushFields((s.clickupToken || '').trim(), item.id, pushes);
+          await CONNECTORS[item.source].pushFields(s, item, pushes);
           for (const f of Object.keys(pushes)) sh[f] = pushes[f];
           dirty = true;
           new Notice(`Planner: pushed ${Object.keys(pushes).join(', ')} to ${SOURCES[item.source].label}.`);
@@ -3503,7 +3535,7 @@ class PlannerBoardView extends ItemView {
 
     /* ---- source status line (only when something needs saying) ---- */
     const notices = [];
-    for (const key of ['todoist', 'clickup', 'email']) {
+    for (const key of SYNCED_SOURCES) {
       const st = this.plugin.syncStatus[key];
       if (st && !st.ok && st.reason !== 'no-token') {
         notices.push(`${SOURCES[key].label}: ${st.message}${st.hint ? ` ${st.hint}` : ''}`);
@@ -4470,7 +4502,7 @@ module.exports.__test = {
   trayEmptyState, trayConnectionState, TRAY_COPY, fmtOpenItems,
   trayRevealDecision, trayRevealSpendsTurn,
   sourceConfigured, isSyncedSource, canPushToSource, canCompleteOnSource,
-  SYNCED_SOURCES, TASK_SOURCES, MANUAL_SOURCE,
+  SYNCED_SOURCES, TASK_SOURCES, MANUAL_SOURCE, FETCHED_SOURCES, CONNECTORS,
   manualExternalId, manualItemFrontmatter, reconcileStaleIds,
   itemFromFrontmatter, clampPriorityRank, safeBasename,
   syncCompletionPlan, occurrenceAdvanced, reopenDecision, appendOccurrence,
