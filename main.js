@@ -2194,14 +2194,19 @@ async function calendarFetchDefs(settings, prevByFeed) {
 }
 
 /* ========================================================================== *
- * Calendar event cache (v0.5.0) - the parsed defs mirror into ONE vault file
- * (the cache note under the planner folder) so relaunch renders instantly from the last healthy
- * fetch. File shape: YAML frontmatter, a human/AI-readable list of the next
- * ~14 days, then a fenced ```json block holding the FULL serialized defs
- * array for exact rehydration (Date instants as ISO strings; rrule / exdates
- * / overrides preserved so icsEventsForWeek reproduces identical output).
- * HARD RULE: the cache never contains the ICS feed URL or its private key -
- * event data only. A malformed cache is ignored; the next fetch rebuilds it.
+ * Calendar event cache (v0.5.0, v2 layout since v0.8.0) - the parsed defs
+ * mirror into ONE vault file (the cache note under the planner folder) so
+ * relaunch renders instantly from the last healthy fetch. File shape: YAML
+ * frontmatter, a human/AI-readable list of the next ~14 days, then a fenced
+ * ```json block holding { version: 2, updated_at, feeds: [{ id, name, color,
+ * updated_at, defs }] }: one entry per feed, each carrying that feed's FULL
+ * serialized defs for exact rehydration (Date instants as ISO strings; rrule
+ * / exdates / overrides preserved so icsEventsForWeek reproduces identical
+ * output). The v1 shape (a bare defs array) still reads; its defs belong to
+ * the first feed in the settings.
+ * HARD RULE: the cache never contains a feed URL or its private key - a feed
+ * is named by id, name and colour only, and event data is all the rest. A
+ * malformed cache is ignored; the next fetch rebuilds it.
  * ========================================================================== */
 
 // Meeting-URL detection: scan location, then description, then the URL
@@ -2296,16 +2301,61 @@ function reviveCalendarDefs(raw) {
   return out;
 }
 
-// The full cache file content. `now` is injectable so tests are deterministic.
-function buildCalendarCacheContent(defs, now, plannerFolder) {
-  const serialized = serializeCalendarDefs(defs);
+// Defs grouped by the feed they carry, first-seen order. Untagged defs (a
+// def with no feed identity) form one group with a null id.
+function groupDefsByFeed(defs) {
+  const groups = new Map();
+  for (const d of defs || []) {
+    if (!d) continue;
+    const id = d.feedId || null;
+    let g = groups.get(id);
+    if (!g) {
+      g = { id, name: d.feedName || null, color: clampSwatch(d.feedColor), defs: [] };
+      groups.set(id, g);
+    }
+    g.defs.push(d);
+  }
+  return Array.from(groups.values());
+}
+
+// Cached defs meet the CURRENT settings. The cache is a mirror, never an
+// authority: a feed's name and colour come from the settings; defs of a
+// feed no longer enabled (or gone) are dropped; untagged defs (a 0.7.x
+// cache) belong to the first enabled feed when there is one, else nowhere.
+function adoptCacheDefs(defs, feeds) {
+  const list = feeds || [];
+  const byId = new Map(list.map((f) => [f.id, f]));
+  const first = list[0] || null;
+  const out = [];
+  for (const d of defs || []) {
+    if (!d) continue;
+    const feed = d.feedId ? byId.get(d.feedId) : first;
+    if (!feed) continue;
+    out.push(tagCalendarDefs([d], feed)[0]);
+  }
+  return out;
+}
+
+// The full cache file content. `defs` is the merged list the board renders
+// (each def tagged with its feed); `now` is injectable so tests are
+// deterministic; `feedMeta` maps a feed id to its last LIVE fetch time so a
+// feed kept from an earlier sync keeps its own, older, updated_at.
+function buildCalendarCacheContent(defs, now, plannerFolder, feedMeta) {
+  const groups = groupDefsByFeed(defs);
+  const feedsOut = groups.map((g) => ({
+    id: g.id, name: g.name, color: g.color,
+    updated_at: (feedMeta && g.id && feedMeta[g.id]) || now.toISOString(),
+    defs: serializeCalendarDefs(g.defs),
+  }));
+  const total = feedsOut.reduce((n, f) => n + f.defs.length, 0);
   const today = localDayStr(now);
   const lines = [
     '---',
     'type: calendar-cache',
-    'source: google-calendar-ics',
+    'source: ics',
     `updated_at: ${now.toISOString()}`,
-    `events: ${serialized.length}`,
+    `events: ${total}`,
+    `feeds: ${feedsOut.length}`,
     // So an agent reading this note knows where the item notes live.
     ...(plannerFolder ? [`planner_folder: ${JSON.stringify(plannerFolder)}`] : []),
     '---',
@@ -2314,9 +2364,12 @@ function buildCalendarCacheContent(defs, now, plannerFolder) {
     '',
     'Last synced calendar state, written by the ICOR for Life - Planner plugin on every',
     'healthy fetch (may be minutes stale). Safe to read for schedule context;',
-    'it never contains the calendar feed URL or any secret. Do not edit: the',
+    'it never contains a calendar feed URL or any secret. Do not edit: the',
     'next sync overwrites this file.',
     '',
+    ...(feedsOut.length > 1 || (feedsOut[0] && feedsOut[0].name)
+      ? ['## Calendars', '', ...feedsOut.map((f) => `- ${f.name || 'Calendar'} (${f.defs.length} event${f.defs.length === 1 ? '' : 's'}, synced ${f.updated_at})`), '']
+      : []),
     `## Upcoming (${today} to ${addDays(today, 13)})`,
     '',
   ];
@@ -2337,22 +2390,60 @@ function buildCalendarCacheContent(defs, now, plannerFolder) {
       : `${fmtTimeHM(ev.start)}-${fmtTimeHM(ev.end)}`;
     const conf = detectConferenceUrl(ev);
     // [tz?]: the feed named a zone the plugin could not resolve; the time is
-    // the wall clock as written, in the machine's zone.
-    const bits = [`- ${when} ${ev.title}${ev.tzUnresolved ? ' [tz?]' : ''}`];
+    // the wall clock as written, in the machine's zone. [<feed>]: which
+    // calendar the event came from, when it carries one.
+    const bits = [`- ${when} ${ev.title}${ev.tzUnresolved ? ' [tz?]' : ''}${ev.feedName ? ` [${ev.feedName}]` : ''}`];
     if (ev.location) bits.push(`  - location: ${ev.location}`);
     if (conf) bits.push(`  - conference: ${conf}`);
     lines.push(...bits);
   }
   if (!events.length) lines.push('No events in the next 14 days.');
-  lines.push('', '## Serialized defs (for the plugin - do not edit)', '', '```json', JSON.stringify(serialized), '```', '');
+  const payload = { version: 2, updated_at: now.toISOString(), feeds: feedsOut };
+  lines.push('', '## Serialized defs (for the plugin - do not edit)', '', '```json', JSON.stringify(payload), '```', '');
   return lines.join('\n');
 }
 
-// Cache file content -> revived defs, or null on any malformed shape.
-function parseCalendarCacheContent(text) {
+// Cache file content -> { version, defs, feeds }, or null on any malformed
+// shape. v2: one entry per feed, its defs revived and tagged with the
+// entry's id, name and colour. v1: a bare array, revived untagged (the
+// caller assigns it to a feed via adoptCacheDefs). `feeds` lists each
+// entry's id and its own updated_at.
+function parseCalendarCache(text) {
   const m = /```json\s*\n([\s\S]*?)\n```/.exec(String(text || ''));
   if (!m) return null;
-  try { return reviveCalendarDefs(JSON.parse(m[1])); } catch { return null; }
+  let raw;
+  try { raw = JSON.parse(m[1]); } catch { return null; }
+  if (Array.isArray(raw)) {
+    const defs = reviveCalendarDefs(raw);
+    return defs ? { version: 1, defs, feeds: [] } : null;
+  }
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.feeds)) return null;
+  const defs = [];
+  const feeds = [];
+  for (const f of raw.feeds) {
+    if (!f || typeof f !== 'object') continue;
+    const feed = {
+      id: f.id != null ? String(f.id) : null,
+      name: f.name != null ? String(f.name) : null,
+      color: clampSwatch(f.color),
+      updatedAt: typeof f.updated_at === 'string' ? f.updated_at : null,
+    };
+    feeds.push(feed);
+    const revived = reviveCalendarDefs(f.defs) || [];
+    for (const d of revived) {
+      d.feedId = feed.id;
+      d.feedName = feed.name;
+      d.feedColor = feed.color;
+    }
+    defs.push(...revived);
+  }
+  return { version: 2, defs, feeds };
+}
+
+// Cache file content -> revived defs (both layouts), or null when malformed.
+function parseCalendarCacheContent(text) {
+  const parsed = parseCalendarCache(text);
+  return parsed ? parsed.defs : null;
 }
 
 /* ========================================================================== *
@@ -2896,9 +2987,16 @@ class IcorPlannerPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(normalizePath(this.paths().cache));
       if (!(file instanceof TFile)) return;
       const text = await this.app.vault.cachedRead(file);
-      const defs = parseCalendarCacheContent(text);
-      if (defs && defs.length && !this.calendarDefs) {
-        this.calendarDefs = defs;
+      const parsed = parseCalendarCache(text);
+      if (!parsed) return;
+      // The cache meets today's settings: names and colours from the feeds,
+      // a feed that is gone or off drops out, a v1 array joins the first feed.
+      const feeds = enabledCalendarFeeds(this.settings);
+      const defs = adoptCacheDefs(parsed.defs, feeds);
+      if (defs.length && !this.calendarDefs) {
+        for (const g of groupDefsByFeed(defs)) if (g.id) this.calendarDefsByFeed[g.id] = g.defs;
+        for (const f of parsed.feeds) if (f.id && f.updatedAt && this.calendarDefsByFeed[f.id]) this.calendarFeedSyncedAt[f.id] = f.updatedAt;
+        this.calendarDefs = calendarDefsFromByFeed(this.calendarDefsByFeed, feeds.map((f) => f.id)).defs;
         this.calendarStale = true; // pale + pulsing until a healthy fetch lands
         this.emitModelChanged();
       }
@@ -2932,7 +3030,7 @@ class IcorPlannerPlugin extends Plugin {
     try {
       if (!this.calendarDefs || this.calendarStale) return; // only persist live fetches
       await this.ensureFolders();
-      const content = buildCalendarCacheContent(this.calendarDefs, new Date(), this.paths().root);
+      const content = buildCalendarCacheContent(this.calendarDefs, new Date(), this.paths().root, this.calendarFeedSyncedAt);
       const path = normalizePath(this.paths().cache);
       const existing = this.app.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) await this.app.vault.process(existing, () => content);
@@ -5208,7 +5306,7 @@ module.exports.__test = {
   migrateCalendarSettings, calendarFeedFor, tagCalendarDefs, calendarFetchFeed, calendarFetchAll,
   dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus,
   serializeCalendarDefs, reviveCalendarDefs,
-  buildCalendarCacheContent, parseCalendarCacheContent,
+  buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
   detectConferenceUrl, nextUpcomingEvent, fmtBadgeCountdown,
   CONFERENCE_URL_PATTERNS,
   plannerPaths, normalizePlannerFolder, detectPlannerFolder, plannerFolderChangePlan, gitignoreLineFor, collectItems,

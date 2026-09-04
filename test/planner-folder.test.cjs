@@ -130,5 +130,6 @@ test('the literal default appears exactly once in code, and no constant path sur
   assert.match(c, /this\.adoptPlannerFolder\(\);\n\s*this\.ensureGitignore\(\);/, 'adoption runs first on layout ready');
   assert.match(c, /await this\.app\.fileManager\.renameFile\(fp\.current, fp\.folder\)/, 'the move is a link-safe rename');
   assert.match(c, /folderSetting\.descEl\.setAttribute\('aria-live', 'polite'\)/, 'the validation text is announced');
-  assert.match(c, /buildCalendarCacheContent\(this\.calendarDefs, new Date\(\), this\.paths\(\)\.root\)/, 'the cache names the folder');
+  // The folder is the third argument; later releases may pass more after it.
+  assert.match(c, /buildCalendarCacheContent\(this\.calendarDefs, new Date\(\), this\.paths\(\)\.root[,)]/, 'the cache names the folder');
 });
