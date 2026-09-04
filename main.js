@@ -117,8 +117,14 @@ const CONNECTORS = {
     svg: 'M1.5 4.5h21a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-21A1.5 1.5 0 0 1 0 18V6a1.5 1.5 0 0 1 1.5-1.5zm10.5 8.25L2.25 6.375v11.25h19.5V6.375L12 12.75zM3.375 6l8.625 5.625L20.625 6H3.375z',
   },
   calendar: {
-    id: 'calendar', label: 'Google Calendar', folder: null, kind: 'calendar', // no per-event notes; one cache file
-    configured: (s) => !!trimmed(s.icsUrl),
+    id: 'calendar', label: 'Calendar', folder: null, kind: 'calendar', // no per-event notes; one cache file
+    // A calendar connector carries FEEDS, not one credential: feeds(settings)
+    // lists them in settings order and fetchFeed(feed) fetches one of them.
+    // A later Graph or CalDAV connector is one more entry with the same two
+    // hooks; calendarFetchAll walks every connector of kind 'calendar'.
+    feeds: (s) => calendarFeeds(s),
+    configured: (s) => calendarFeedConfigured(s),
+    fetchFeed: (feed) => calendarFetchFeed(feed),
     fetchOpen: null, setClosed: null, pushFields: null,
     platforms: ['desktop', 'mobile'],
     svg: 'M18.316 5.684H24v12.632h-5.684V5.684zM5.684 24h12.632v-5.684H5.684V24zM18.316 5.684V0H1.895A1.894 1.894 0 0 0 0 1.895v16.421h5.684V5.684h12.632zm-7.207 6.25v-.065c.272-.144.5-.349.687-.617s.279-.595.279-.982c0-.379-.099-.72-.3-1.025a2.05 2.05 0 0 0-.832-.714 2.703 2.703 0 0 0-1.197-.257c-.6 0-1.094.156-1.481.467-.386.311-.65.671-.793 1.078l1.085.452c.086-.249.224-.461.413-.633.189-.172.445-.257.767-.257.33 0 .602.088.816.264a.86.86 0 0 1 .322.703c0 .33-.12.589-.36.778-.24.19-.535.284-.886.284h-.567v1.085h.633c.407 0 .748.109 1.02.327.272.218.407.499.407.843 0 .336-.129.614-.387.832s-.565.327-.924.327c-.351 0-.651-.103-.897-.311-.248-.208-.422-.502-.521-.881l-1.096.452c.178.616.505 1.082.977 1.401.472.319.984.478 1.538.477a2.84 2.84 0 0 0 1.293-.291c.382-.193.684-.458.902-.794.218-.336.327-.72.327-1.149 0-.429-.115-.797-.344-1.105a2.067 2.067 0 0 0-.881-.689zm2.093-1.931l.602.913L15 10.045v5.744h1.187V8.446h-.827l-2.158 1.557zM22.105 0h-3.289v5.184H24V1.895A1.894 1.894 0 0 0 22.105 0zm-3.289 23.5l4.684-4.684h-4.684V23.5zM0 22.105C0 23.152.848 24 1.895 24h3.289v-5.184H0v3.289z',
@@ -140,6 +146,9 @@ const MANUAL_SOURCE = 'manual';
 // Everything that is fetched at all, the calendar included: what the sync
 // scheduler asks before it starts a run.
 const FETCHED_SOURCES = Object.values(CONNECTORS).filter((c) => c.kind !== 'local').map((c) => c.id);
+// The calendar connectors: each carries feeds, and a sync fetches every
+// enabled feed of every one of them (calendarFetchAll).
+const CALENDAR_SOURCES = Object.values(CONNECTORS).filter((c) => c.kind === 'calendar').map((c) => c.id);
 // Tray render order. Manual leads: it is the one section that works on a vault
 // with no keys at all, and the add control lives in it.
 const TASK_SOURCES = [MANUAL_SOURCE, ...SYNCED_SOURCES];
@@ -188,7 +197,13 @@ const DEFAULT_SETTINGS = {
   imapPort: 993,
   imapSecurity: 'tls',
   imapAllowSelfSigned: false,
-  icsUrl: '',
+  // The calendars (v0.8.0): one entry per feed,
+  //   { id, name, url, color: 1..4, enabled, kind: 'ics' }.
+  // The single icsUrl of earlier releases becomes the first entry on load
+  // (migrateCalendarSettings) and is read nowhere else after that. The
+  // colour is an index into the four lenses styles.css declares; the user
+  // picks a swatch, never a hex, so no colour value lives in data.json.
+  calendars: [],
   syncMinutes: 10,
   showWeekend: false,
   splitTime: '13:00',
@@ -1926,8 +1941,121 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
   return out;
 }
 
-async function calendarFetchDefs(settings) {
-  let raw = (settings.icsUrl || '').trim();
+/* ---- calendar feeds (v0.8.0) ---------------------------------------------
+ * A calendar is a LIST of feeds, each with an identity the board can colour,
+ * label, isolate and dedupe by. The colour is an index into the four lenses
+ * styles.css declares (--iplan-cal-1 .. --iplan-cal-4); the user picks a
+ * swatch, never a hex. The settings hold each feed's URL; nothing else does:
+ * the defs a fetch returns carry the feed's id, name and colour only, so the
+ * cache note and every render path are secret-free by construction.
+ */
+const CALENDAR_SWATCHES = 4;
+// Spoken names for the four lenses (the picker's aria labels).
+const CALENDAR_SWATCH_NAMES = ['Indigo', 'Sage', 'Plum', 'Ink'];
+
+// A swatch index is 1..4, whatever data.json says; anything else is lens 1.
+function clampSwatch(n) {
+  const i = Math.round(Number(n));
+  return Number.isFinite(i) && i >= 1 && i <= CALENDAR_SWATCHES ? i : 1;
+}
+
+// The lens a new feed takes: the least-used one, lowest index on a tie, so
+// two feeds never share a lens until all four are spoken for.
+function leastUsedSwatch(feeds) {
+  const used = new Array(CALENDAR_SWATCHES + 1).fill(0);
+  for (const f of feeds || []) used[clampSwatch(f && f.color)] += 1;
+  let best = 1;
+  for (let i = 2; i <= CALENDAR_SWATCHES; i++) if (used[i] < used[best]) best = i;
+  return best;
+}
+
+// An id no existing feed carries.
+function newCalendarId(existing) {
+  const taken = new Set((existing || []).map((f) => f && f.id));
+  let id;
+  do {
+    id = `cal-${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36).padStart(2, '0')}`;
+  } while (taken.has(id));
+  return id;
+}
+
+// A name for a migrated feed, read off the shape of its URL.
+function calendarNameForUrl(url) {
+  const u = String(url || '').trim();
+  if (/^(https|webcal):\/\/calendar\.google\.com\//i.test(u)) return 'Google Calendar';
+  if (/^(https|webcal):\/\/[^/]*icloud\.com\//i.test(u)) return 'iCloud Calendar';
+  if (/^(https|webcal):\/\/[^/]*proton\.me\//i.test(u)) return 'Proton Calendar';
+  if (/^(https|webcal):\/\/[^/]*(outlook\.(live|office)|office365)\.com\//i.test(u)) return 'Outlook Calendar';
+  return 'Calendar';
+}
+
+// One feed, sanitised: every field present and typed, whatever data.json said.
+function normalizeCalendarFeed(raw, index) {
+  const f = raw && typeof raw === 'object' ? raw : {};
+  const i = Number(index) || 0;
+  return {
+    id: typeof f.id === 'string' && f.id.trim() ? f.id.trim() : `cal-${i + 1}`,
+    name: typeof f.name === 'string' && f.name.trim() ? f.name.trim() : `Calendar ${i + 1}`,
+    url: typeof f.url === 'string' ? f.url.trim() : '',
+    color: clampSwatch(f.color),
+    enabled: f.enabled !== false,
+    kind: typeof f.kind === 'string' && f.kind ? f.kind : 'ics',
+  };
+}
+
+// The feeds in settings order, sanitised. Settings without a `calendars`
+// array (a data.json from before 0.8.0, or a bare object in a test) are read
+// through the same migration the plugin applies on load, so every caller
+// sees one shape and the old icsUrl still counts as a configured calendar.
+function calendarFeeds(settings) {
+  const s = settings || {};
+  const list = Array.isArray(s.calendars) ? s.calendars : migrateCalendarSettings(s).calendars;
+  return list.map(normalizeCalendarFeed);
+}
+function enabledCalendarFeeds(settings) {
+  return calendarFeeds(settings).filter((f) => f.enabled && f.url);
+}
+// The calendar counts as configured when at least one feed is on AND has an
+// address. Mirrors the no-token guard in calendarFetchAll, field for field.
+function calendarFeedConfigured(settings) { return enabledCalendarFeeds(settings).length > 0; }
+
+// 0.7.x -> 0.8.0: the one icsUrl becomes the one feed, on lens 1. Returns
+// the SAME object when `calendars` already exists (nothing to do, nothing
+// touched), otherwise a copy carrying the new array. icsUrl stays in place
+// for one release and is read nowhere else.
+function migrateCalendarSettings(settings) {
+  const s = settings || {};
+  if (Array.isArray(s.calendars)) return s;
+  const url = trimmed(s.icsUrl);
+  const calendars = url
+    ? [{ id: 'cal-1', name: calendarNameForUrl(url), url, color: 1, enabled: true, kind: 'ics' }]
+    : [];
+  return Object.assign({}, s, { calendars });
+}
+
+// The feed an expanded event came from, from the CURRENT settings (the
+// event carries the id only; name and URL are looked up, never copied into
+// the event, so the URL never rides an event object).
+function calendarFeedFor(settings, ev) {
+  const id = ev && ev.feedId;
+  return id ? calendarFeeds(settings).find((f) => f.id === id) || null : null;
+}
+
+// Stamp the feed's identity on every def a fetch returned. Id, name and
+// colour only: the URL stops here.
+function tagCalendarDefs(defs, feed) {
+  for (const d of defs || []) {
+    d.feedId = feed.id;
+    d.feedName = feed.name;
+    d.feedColor = clampSwatch(feed.color);
+  }
+  return defs;
+}
+
+// Fetch ONE feed. Same body every release had for the single URL: webcal
+// rewritten, https enforced, the ICS parsed; the defs come back tagged.
+async function calendarFetchFeed(feed) {
+  let raw = trimmed(feed && feed.url);
   if (!raw) return degraded('calendar', 'no-token', 'Calendar is not connected (no iCal URL).');
   if (/^webcal:\/\//i.test(raw)) raw = raw.replace(/^webcal:\/\//i, 'https://');
   if (!/^https:\/\//i.test(raw)) {
@@ -1938,13 +2066,131 @@ async function calendarFetchDefs(settings) {
     if (res.status < 200 || res.status >= 300) {
       return degraded('calendar', 'unreachable', `Calendar feed returned HTTP ${res.status}.`);
     }
-    const defs = parseIcs(res.text || '');
+    const defs = tagCalendarDefs(parseIcs(res.text || ''), feed);
     // Healthy fetch, but some zones could not be resolved: the result stays
     // ok (the events render, as written) and carries ONE warning line.
     return okResult('calendar', defs, calendarTzWarning(defs));
   } catch {
     return degraded('calendar', 'unreachable', 'Calendar feed unreachable.');
   }
+}
+
+// Every enabled feed of every calendar connector, fetched at once. One
+// feed's failure never touches another's result: allSettled, and a fetch
+// that throws anyway becomes a degraded result for that feed alone.
+// Returns { feeds, results } with results keyed by feed id in feed order.
+async function calendarFetchAll(settings) {
+  const jobs = [];
+  for (const id of CALENDAR_SOURCES) {
+    const c = CONNECTORS[id];
+    for (const feed of c.feeds(settings)) if (feed.enabled && feed.url) jobs.push({ feed, connector: c });
+  }
+  const settled = await Promise.allSettled(jobs.map(({ feed, connector }) => connector.fetchFeed(feed)));
+  const results = {};
+  jobs.forEach(({ feed }, i) => {
+    const r = settled[i];
+    results[feed.id] = r.status === 'fulfilled' && r.value
+      ? r.value
+      : degraded('calendar', 'unreachable', 'Calendar feed unreachable.');
+  });
+  return { feeds: jobs.map((j) => j.feed), results };
+}
+
+// The same event in two feeds (an Outlook calendar subscribed in Google, a
+// shared family calendar) shows once: keyed on uid plus the recurrence day,
+// the first feed in settings order wins. Returns the kept defs and a count.
+function dedupeCalendarDefs(defs) {
+  const seen = new Set();
+  const out = [];
+  let duplicates = 0;
+  for (const d of defs || []) {
+    if (!d) continue;
+    const key = `${d.uid}::${d.recurrenceDay || ''}`;
+    if (seen.has(key)) { duplicates += 1; continue; }
+    seen.add(key);
+    out.push(d);
+  }
+  return { defs: out, duplicates };
+}
+
+// The board's def list from the per-feed map: the feeds in the given order
+// (settings order), flattened, deduplicated.
+function calendarDefsFromByFeed(byFeed, feedIds) {
+  const all = [];
+  for (const id of feedIds || Object.keys(byFeed || {})) if (byFeed && byFeed[id]) all.push(...byFeed[id]);
+  return dedupeCalendarDefs(all);
+}
+
+// Merge one sync's per-feed results over the previous per-feed defs. A
+// healthy feed replaces its own entry; a failed feed keeps its previous one
+// (never prune on a blip); a feed absent from the results (disabled or
+// removed since) drops out. Results are keyed by feed id in feed order.
+function mergeCalendarFeeds(prevByFeed, results) {
+  const ids = Object.keys(results || {});
+  const byFeed = {};
+  const failed = [];
+  const live = [];
+  for (const id of ids) {
+    const r = results[id];
+    if (r && r.ok) { byFeed[id] = r.items || []; live.push(id); continue; }
+    failed.push(id);
+    if (prevByFeed && Array.isArray(prevByFeed[id])) byFeed[id] = prevByFeed[id];
+  }
+  const { defs, duplicates } = calendarDefsFromByFeed(byFeed, ids);
+  return { byFeed, defs, duplicates, failed, live };
+}
+
+// One status for the consumers that want one (the board notice, the badge)
+// plus the per-feed rows the settings tab shows. A single failing feed is a
+// WARNING on an ok result (the others are live), named by the feed; every
+// feed failing is a failure carrying the first feed's reason.
+function calendarAggregateStatus(feeds, results, merged, now) {
+  const at = (now || new Date()).toISOString();
+  const perFeed = {};
+  const nameOf = (id) => ((feeds || []).find((f) => f.id === id) || {}).name || id;
+  for (const f of feeds || []) {
+    const r = results && results[f.id];
+    const kept = merged && merged.byFeed && merged.byFeed[f.id];
+    perFeed[f.id] = {
+      ok: !!(r && r.ok), reason: r ? r.reason || null : null, message: r ? r.message || null : null,
+      warning: (r && r.warning) || null,
+      count: r && r.ok ? (r.items || []).length : (kept ? kept.length : 0),
+      at,
+    };
+  }
+  if (!feeds || !feeds.length) {
+    return { ok: false, reason: 'no-token', message: 'Calendar is not connected (no iCal URL).', warning: null, perFeed };
+  }
+  const failedLines = (merged.failed || []).map((id) => `${nameOf(id)}: ${perFeed[id].message || 'failed.'}`);
+  if (!merged.live || !merged.live.length) {
+    const first = results[merged.failed[0]] || {};
+    return { ok: false, reason: first.reason || 'unreachable', message: failedLines.join(' '), warning: null, perFeed };
+  }
+  const warnings = failedLines.slice();
+  for (const id of merged.live) {
+    if (perFeed[id].warning) warnings.push(feeds.length > 1 ? `${nameOf(id)}: ${perFeed[id].warning}` : perFeed[id].warning);
+  }
+  if (merged.duplicates) {
+    const n = merged.duplicates;
+    warnings.push(`${n} event${n === 1 ? ' appears' : 's appear'} in more than one feed; shown once.`);
+  }
+  return { ok: true, reason: null, message: null, warning: warnings.length ? warnings.join(' ') : null, perFeed };
+}
+
+// The calendar's ConnectorResult for the sync loop: every feed fetched,
+// merged over the previous per-feed defs, one status. Items are the merged,
+// deduplicated defs; byFeed and perFeed ride along for the plugin state.
+async function calendarFetchDefs(settings, prevByFeed) {
+  const { feeds, results } = await calendarFetchAll(settings);
+  const merged = mergeCalendarFeeds(prevByFeed || {}, results);
+  const status = calendarAggregateStatus(feeds, results, merged);
+  const out = status.ok
+    ? okResult('calendar', merged.defs, status.warning)
+    : Object.assign(degraded('calendar', status.reason, status.message), { items: merged.defs });
+  out.perFeed = status.perFeed;
+  out.byFeed = merged.byFeed;
+  out.feeds = feeds;
+  return out;
 }
 
 /* ========================================================================== *
@@ -2483,12 +2729,21 @@ function pruneShadows(shadowMap, source, existingIds, openIds, nowMs, maxDoneAge
 
 class IcorPlannerPlugin extends Plugin {
   async onload() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // Settings from disk, then the 0.8.0 calendar migration on the raw bytes
+    // (icsUrl -> calendars[0]) BEFORE the defaults are laid under them: the
+    // default `calendars: []` must never mask a data.json that still speaks
+    // the old single-URL shape.
+    const loaded = (await this.loadData()) || {};
+    const migrated = migrateCalendarSettings(loaded);
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
+    if (migrated !== loaded) await this.saveData(this.settings);
     // _shadow: per-item last-synced baseline for the two-way fields. Lives in
     // data.json beside the settings; never shown in the settings UI.
     if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
     this._pushTimers = new Map();
-    this.calendarDefs = null;        // parsed ICS defs (mirrored to the cache note on healthy fetches)
+    this.calendarDefs = null;        // merged, deduplicated defs of every feed (mirrored to the cache note on healthy fetches)
+    this.calendarDefsByFeed = {};    // feed id -> that feed's defs; a failed feed keeps its last entry
+    this.calendarFeedSyncedAt = {};  // feed id -> ISO time of its last LIVE fetch (per-feed updated_at in the cache)
     this.calendarStale = false;      // true while defs come from the vault cache, not a live fetch
     this.calendarStatus = null;      // last calendar ConnectorResult status
     this.syncStatus = {};            // source -> { ok, reason, message, count, at }
@@ -2648,6 +2903,20 @@ class IcorPlannerPlugin extends Plugin {
         this.emitModelChanged();
       }
     } catch { /* unreadable cache: the fetch path covers it */ }
+  }
+
+  // The board's defs from the per-feed map and the CURRENT settings: what
+  // the settings tab calls when a feed is switched off or removed, so the
+  // board follows at once instead of at the next sync. A feed no longer
+  // enabled drops out; the rest keep their order and their dedupe.
+  recomputeCalendarDefs() {
+    const ids = enabledCalendarFeeds(this.settings).map((f) => f.id);
+    for (const id of Object.keys(this.calendarDefsByFeed)) {
+      if (!ids.includes(id)) delete this.calendarDefsByFeed[id];
+    }
+    if (!ids.length) { this.calendarDefs = null; }
+    else if (this.calendarDefs) this.calendarDefs = calendarDefsFromByFeed(this.calendarDefsByFeed, ids).defs;
+    this.emitModelChanged();
   }
 
   // Debounced so a manual sync right after the scheduled one writes once.
@@ -2867,18 +3136,30 @@ class IcorPlannerPlugin extends Plugin {
         const st = this.syncStatus.email;
         new Notice(`Email: ${st.message}${st.hint ? `\n${st.hint}` : ''}`, 12000);
       }
-      // Calendar: no per-event notes; a healthy fetch replaces the defs,
-      // clears the stale look and rewrites the ONE cache file. A failed fetch
-      // keeps whatever renders now (cached or previous) - never prune on a blip.
-      const cal = await calendarFetchDefs(s);
+      // Calendar: no per-event notes. Every enabled feed is fetched on its
+      // own; a healthy feed replaces its own entry, a failed feed keeps its
+      // previous one (never prune on a blip), and the board renders the
+      // merged, deduplicated union. At least one live feed clears the stale
+      // look and rewrites the ONE cache file. No feeds at all: nothing to
+      // show, and nothing stale to keep.
+      const cal = await calendarFetchDefs(s, this.calendarDefsByFeed);
       this.calendarStatus = {
         ok: cal.ok, reason: cal.reason || null, message: cal.message || null,
-        warning: cal.warning || null, at: new Date().toISOString(),
+        warning: cal.warning || null, perFeed: cal.perFeed || {}, at: new Date().toISOString(),
       };
-      if (cal.ok) {
+      if (cal.reason === 'no-token') {
+        this.calendarDefs = null;
+        this.calendarDefsByFeed = {};
+      } else {
+        this.calendarDefsByFeed = cal.byFeed || {};
         this.calendarDefs = cal.items;
-        this.calendarStale = false;
-        this.scheduleCalendarCacheWrite();
+        for (const id of Object.keys(cal.perFeed || {})) {
+          if (cal.perFeed[id].ok) this.calendarFeedSyncedAt[id] = cal.perFeed[id].at;
+        }
+        if (cal.ok) {
+          this.calendarStale = false;
+          this.scheduleCalendarCacheWrite();
+        }
       }
       this.lastSyncAt = new Date().toISOString();
       await this.saveData(this.settings); // persist the refreshed shadows
@@ -4922,6 +5203,10 @@ module.exports.__test = {
   isLoopbackHost, isIpLiteral, imapStarttlsError,
   parseIcs, icsParseDate, expandOccurrences, icsEventsForWeek,
   googleCalendarEventUrl,
+  CALENDAR_SWATCHES, CALENDAR_SWATCH_NAMES, CALENDAR_SOURCES, clampSwatch, leastUsedSwatch, newCalendarId,
+  calendarNameForUrl, normalizeCalendarFeed, calendarFeeds, enabledCalendarFeeds, calendarFeedConfigured,
+  migrateCalendarSettings, calendarFeedFor, tagCalendarDefs, calendarFetchFeed, calendarFetchAll,
+  dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus,
   serializeCalendarDefs, reviveCalendarDefs,
   buildCalendarCacheContent, parseCalendarCacheContent,
   detectConferenceUrl, nextUpcomingEvent, fmtBadgeCountdown,
