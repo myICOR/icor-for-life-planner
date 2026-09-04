@@ -235,6 +235,11 @@ const DEFAULT_SETTINGS = {
     evening: { start: '21:00', end: '21:45' },
   },
   routineWeekdaysDefault: ['mon', 'tue', 'wed', 'thu', 'fri'],
+  // Subtasks (2026-09-04). ClickUp returns subtasks only when asked, and an
+  // existing board must not flood on upgrade, so the ask is off by default.
+  // subtaskChecklist draws the "n of m subtasks" row on a parent card.
+  clickupIncludeSubtasks: false,
+  subtaskChecklist: true,
 };
 
 const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
@@ -938,6 +943,8 @@ async function todoistFetchOpen(settings) {
           // a doc-side rename cannot silently turn every task non-recurring.
           recurring: !!(t.due && (t.due.is_recurring || t.due.recurring)),
           dueString: t.due && t.due.string ? String(t.due.string) : null,
+          // A subtask is an ordinary task with a parent id (2026-09-04).
+          parentId: t.parent_id ? String(t.parent_id) : null,
         });
       }
       cursor = body.next_cursor || null;
@@ -966,6 +973,19 @@ async function clickupApi(token, path) {
   return res.json || {};
 }
 
+// The task query, one place: the open set assigned to me, ordered by due,
+// paged; subtasks only when the setting asks (ClickUp omits them otherwise).
+function clickupQuery(settings, myId, page) {
+  const qs = new URLSearchParams({
+    include_closed: 'false',
+    subtasks: settings && settings.clickupIncludeSubtasks === true ? 'true' : 'false',
+    order_by: 'due_date',
+    page: String(page),
+  });
+  qs.append('assignees[]', String(myId));
+  return qs.toString();
+}
+
 async function clickupFetchOpen(settings) {
   const token = (settings.clickupToken || '').trim();
   if (!token) return degraded('clickup', 'no-token', 'ClickUp is not connected (no token).');
@@ -989,11 +1009,7 @@ async function clickupFetchOpen(settings) {
     const items = [];
     for (const teamId of teamIds) {
       for (let page = 0; page < 20; page++) {
-        const qs = new URLSearchParams({
-          include_closed: 'false', subtasks: 'false', order_by: 'due_date', page: String(page),
-        });
-        qs.append('assignees[]', String(myId));
-        const data = await clickupApi(token, `/team/${encodeURIComponent(teamId)}/task?${qs.toString()}`);
+        const data = await clickupApi(token, `/team/${encodeURIComponent(teamId)}/task?${clickupQuery(settings, myId, page)}`);
         const tasks = (data && data.tasks) || [];
         for (const t of tasks) {
           const st = (t.status && t.status.type || '').toLowerCase();
@@ -1015,6 +1031,7 @@ async function clickupFetchOpen(settings) {
             // still applies when the due moves forward past its baseline.
             recurring: null,
             dueString: null,
+            parentId: t.parent ? String(t.parent) : null,
           });
         }
         if (!tasks.length || (data && data.last_page === true)) break;
@@ -2579,6 +2596,8 @@ function itemFromFrontmatter(fm, path, basename) {
     reopenPending: fm.reopen_pending === true,
     lastCompletedDue: fm.last_completed_due ? String(fm.last_completed_due).slice(0, 10) : null,
     occurrences: normalizeOccurrences(fm.occurrences),
+    // The parent's external id within the same source (2026-09-04), or null.
+    parentId: fm.parent_id != null && fm.parent_id !== '' ? String(fm.parent_id) : null,
   };
 }
 
@@ -2744,6 +2763,8 @@ function occurrenceAdvanced(prior, sourceItem, shadow) {
 //   pushClose / pushReopen   the ONE call to the source, or neither
 //   nextShadowDone   the done flag the shadow should carry after this sync
 //   clearReopenPending       the source confirmed the reopen (the item is open)
+//   resetChildrenDoneLocal   an advance: the new occurrence's subtasks start
+//                            unchecked here (upsertSource applies it)
 function syncCompletionPlan({ prior, sourceItem, shadow, completeOnSource, recurringAdvance }) {
   const shadowDone = shadow ? !!shadow.done : false;
   const base = {
@@ -2751,6 +2772,7 @@ function syncCompletionPlan({ prior, sourceItem, shadow, completeOnSource, recur
     occurrence: null, lastCompletedDue: null,
     pushClose: false, pushReopen: false, nextShadowDone: shadowDone,
     clearReopenPending: prior.reopenPending === true,
+    resetChildrenDoneLocal: false,
   };
   if (occurrenceAdvanced(prior, sourceItem, shadow)) {
     const mode = recurringAdvance === 'drop' ? 'drop' : 'move';
@@ -2771,14 +2793,24 @@ function syncCompletionPlan({ prior, sourceItem, shadow, completeOnSource, recur
       },
       lastCompletedDue: shadow.due,
       nextShadowDone: false,
+      resetChildrenDoneLocal: true,
     };
   }
   // The caller only asks about items in the open set, so a pending reopen is
-  // confirmed by the fetch itself: the source is open, nothing to push.
-  const sourceDone = prior.reopenPending === true ? false : shadowDone;
-  const wantDone = !!prior.doneLocal;
+  // confirmed by the fetch itself: the source is open, nothing to push. The
+  // same holds for a note whose status is done: the source reopened it (a
+  // task closed and reopened there, or a subtask the parent's recurrence
+  // brought back), so the local check goes with the status and nothing is
+  // pushed in either direction; pushing the stale check would close it a
+  // second time.
+  const reopenedAtSource = prior.status === 'done';
+  const sourceDone = (prior.reopenPending === true || reopenedAtSource) ? false : shadowDone;
+  const wantDone = reopenedAtSource ? false : !!prior.doneLocal;
   const push = !!completeOnSource && wantDone !== sourceDone;
-  return { ...base, nextShadowDone: sourceDone, pushClose: push && wantDone, pushReopen: push && !wantDone };
+  return {
+    ...base, resetDoneLocal: reopenedAtSource, nextShadowDone: sourceDone,
+    pushClose: push && wantDone, pushReopen: push && !wantDone,
+  };
 }
 
 // What unchecking a struck card means, given where the "done" came from.
@@ -2851,6 +2883,76 @@ function pruneShadows(shadowMap, source, existingIds, openIds, nowMs, maxDoneAge
 }
 
 /* ========================================================================== *
+ * Subtasks (2026-09-04)
+ *
+ * A subtask is an ordinary item that names its parent (Todoist parent_id,
+ * ClickUp parent), so the vault stays a flat list of notes and the hierarchy
+ * is an index built once per render. Resolution is same-source only: a
+ * ClickUp id equal to a Todoist parent id must never resolve. A child whose
+ * parent is not in the vault (not assigned to me, filtered, another
+ * workspace) is an ordinary card with no kicker, and a parent card lists its
+ * children as a second view of the same notes, never a second note.
+ * ========================================================================== */
+
+function itemKey(source, id) { return `${source}:${id}`; }
+
+// Open before done, then the lane order, then the title.
+function subtaskOrder(a, b) {
+  const d = (isDone(a) ? 1 : 0) - (isDone(b) ? 1 : 0);
+  if (d) return d;
+  if (a.plannedOrder !== b.plannedOrder) return a.plannedOrder - b.plannedOrder;
+  return String(a.title).localeCompare(String(b.title));
+}
+
+// -> { byKey: Map<'source:id', item>, childrenOf: Map<'source:parentId', item[]> }
+// Ghost entries (finished occurrences) are skipped: they share their live
+// card's id and would otherwise shadow it.
+function buildItemIndex(items) {
+  const byKey = new Map();
+  const childrenOf = new Map();
+  for (const it of items || []) {
+    if (!it || it.ghost) continue;
+    byKey.set(itemKey(it.source, it.id), it);
+  }
+  for (const it of items || []) {
+    if (!it || it.ghost || !it.parentId) continue;
+    const key = itemKey(it.source, it.parentId);
+    if (!childrenOf.has(key)) childrenOf.set(key, []);
+    childrenOf.get(key).push(it);
+  }
+  for (const list of childrenOf.values()) list.sort(subtaskOrder);
+  return { byKey, childrenOf };
+}
+
+function parentOf(item, index) {
+  if (!item || !item.parentId || !index || !index.byKey) return null;
+  return index.byKey.get(itemKey(item.source, item.parentId)) || null;
+}
+function parentTitleFor(item, index) {
+  const p = parentOf(item, index);
+  return p ? p.title : null;
+}
+function childrenOfItem(item, index) {
+  if (!item || !index || !index.childrenOf) return [];
+  return index.childrenOf.get(itemKey(item.source, item.id)) || [];
+}
+// -> { done, total } or null when the item has no children in the vault.
+function subtaskCounter(item, index) {
+  const kids = childrenOfItem(item, index);
+  if (!kids.length) return null;
+  return { done: kids.filter(isDone).length, total: kids.length };
+}
+function subtaskCounterText(c) { return `${c.done} of ${c.total} subtask${c.total === 1 ? '' : 's'}`; }
+// The chip on a child's row in its parent's list: where the child sits when
+// that is not where the parent sits. Same day (or both unplanned): nothing.
+function subtaskRowMeta(child, parent) {
+  const c = (child && child.plannedDay) || null;
+  const p = (parent && parent.plannedDay) || null;
+  if (c === p) return null;
+  return c ? fmtDayNum(c) : 'TRAY';
+}
+
+/* ========================================================================== *
  * Checklists and sentinel log tables (2026-09-04)
  *
  * One checklist block and one log-table parser serve everything that gets
@@ -2894,9 +2996,12 @@ function checklistProgressText(done, total) { return `${done} of ${total}`; }
 // The flip is optimistic: the row changes the moment it is pressed, before
 // the write resolves, so every consumer gets the immediate feel without
 // repeating the mechanics. A rejected write reverts the row and says so
-// once. `onToggle(id, next)` may return a promise; `onProgress(done, total)`
-// is told after every flip so a card can strike itself without waiting for
-// the re-render that follows the write.
+// once; a write that resolves to `false` (the plugin refused it and has
+// already said why) reverts without a second notice. `onToggle(id, next)`
+// may return a promise; `onProgress(done, total)` is told after every flip
+// so a card can strike itself without waiting for the re-render that
+// follows the write. `progress: false` leaves the "n of m" footer out when
+// the consumer's own head carries the count.
 function renderChecklist(container, model, opts) {
   const o = opts || {};
   const block = document.createElement('div');
@@ -2946,22 +3051,27 @@ function renderChecklist(container, model, opts) {
       paint(row, next);
       state.done += next ? 1 : -1;
       tell();
+      const revert = () => {
+        paint(row, was);
+        state.done += next ? -1 : 1;
+        tell();
+      };
       let result;
       try { result = typeof o.onToggle === 'function' ? o.onToggle(r.id, next) : undefined; }
       catch (err) { result = Promise.reject(err); }
       if (result && typeof result.then === 'function') {
-        result.then(null, (err) => {
-          paint(row, was);
-          state.done += next ? -1 : 1;
-          tell();
+        result.then((v) => { if (v === false) revert(); }, (err) => {
+          revert();
           new Notice(`Planner: could not save the check (${(err && err.message) || 'unknown error'}).`);
         });
+      } else if (result === false) {
+        revert();
       }
     });
     block.appendChild(row);
   }
   progress.textContent = checklistProgressText(state.done, state.total);
-  block.appendChild(progress);
+  if (o.progress !== false) block.appendChild(progress);
   container.appendChild(block);
   return block;
 }
@@ -3911,6 +4021,8 @@ class IcorPlannerPlugin extends Plugin {
     for (const it of allItems) {
       if (it.source === source) existing.set(it.id, it);
     }
+    const index = buildItemIndex(allItems);
+    const advancedParents = [];
     const openIds = new Set();
     for (const t of items) {
       openIds.add(t.id);
@@ -3958,6 +4070,19 @@ class IcorPlannerPlugin extends Plugin {
       if (nextShadow.done && shadow && shadow.doneAt) nextShadow.doneAt = shadow.doneAt;
       s._shadow[key] = nextShadow;
       await this.updateItemFile(prior, t, finals, body, plan);
+      if (plan.resetChildrenDoneLocal) advancedParents.push(key);
+    }
+    // A recurring parent moved on: the new occurrence starts with its
+    // subtasks unchecked here. Only children the source still lists are
+    // touched (they are open there, so the shadow says so too); a child the
+    // source closed stays done through reconcile.
+    for (const key of advancedParents) {
+      for (const child of index.childrenOf.get(key) || []) {
+        if (!openIds.has(child.id) || !child.doneLocal || !child.file) continue;
+        await this.app.fileManager.processFrontMatter(child.file, (fm) => { fm.done_local = false; });
+        const ck = `${source}:${child.id}`;
+        if (s._shadow[ck]) s._shadow[ck].done = false;
+      }
     }
     // Reconcile: open file whose id vanished from the healthy open set -> done.
     // The decision runs over EVERY item in the vault, not a pre-filtered set,
@@ -4108,6 +4233,7 @@ class IcorPlannerPlugin extends Plugin {
       `tags: ${JSON.stringify(t.tags || [])}`,
       `source_status: ${t.status ? JSON.stringify(t.status) : null}`,
       `list_id: ${t.listId ? JSON.stringify(String(t.listId)) : null}`,
+      `parent_id: ${t.parentId ? JSON.stringify(String(t.parentId)) : null}`,
       `recurring: ${t.recurring == null ? null : !!t.recurring}`,
       `due_string: ${t.dueString ? JSON.stringify(String(t.dueString)) : null}`,
       'planned_day: null',
@@ -4138,6 +4264,7 @@ class IcorPlannerPlugin extends Plugin {
     const wantPriority = clampPriorityRank(finals.priority);
     const wantRecurring = t.recurring == null ? null : !!t.recurring;
     const wantDueString = t.dueString ? String(t.dueString) : null;
+    const wantParent = t.parentId ? String(t.parentId) : null;
     const ops = plan || {};
     const hasOps = !!(ops.resetDoneLocal || ops.clearPlan || ops.movePlan || ops.occurrence || ops.clearReopenPending);
     const changed =
@@ -4145,6 +4272,7 @@ class IcorPlannerPlugin extends Plugin {
       prior.priority !== wantPriority || prior.url !== (t.url || null) ||
       prior.status === 'done' || // reopened at the source
       prior.recurring !== wantRecurring || prior.dueString !== wantDueString ||
+      prior.parentId !== wantParent ||
       hasOps ||
       JSON.stringify(prior.tags) !== JSON.stringify(t.tags || []) ||
       prior.sourceStatus !== (t.status || null) ||
@@ -4161,8 +4289,11 @@ class IcorPlannerPlugin extends Plugin {
         if (t.listId) fm.list_id = String(t.listId);
         fm.recurring = wantRecurring;
         fm.due_string = wantDueString;
-        // Back in the open set: the source shows it open, whatever asked for it.
-        if (fm.status === 'done') { fm.status = 'open'; delete fm.done_at; }
+        fm.parent_id = wantParent;
+        // Back in the open set: the source shows it open, whatever asked for
+        // it, and the local check goes with the status (a reopen at the
+        // source is a reopen here).
+        if (fm.status === 'done') { fm.status = 'open'; delete fm.done_at; fm.done_local = false; }
         if (ops.clearReopenPending) delete fm.reopen_pending;
         if (ops.resetDoneLocal) { fm.done_local = false; fm.status = 'open'; delete fm.done_at; }
         if (ops.clearPlan) { fm.planned_day = null; fm.planned_half = null; fm.planned_order = 0; }
@@ -4222,14 +4353,16 @@ class IcorPlannerPlugin extends Plugin {
   // The check toggles the EFFECTIVE done state (isDone), not the flag alone:
   // a card the source closed reads as done, and unchecking it must reopen
   // it, which before this only flipped done_local to true on a struck card.
+  // Returns false when nothing changed (a refused reopen, a missing note),
+  // so a checklist row that flipped optimistically can flip back.
   async toggleDoneLocal(path) {
     const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) return;
+    if (!(file instanceof TFile)) return false;
     const item = itemFromFile(this.app, file);
-    if (!item) return;
+    if (!item) return false;
     if (!isDone(item)) {
       await this.app.fileManager.processFrontMatter(file, (fm) => { fm.done_local = true; });
-      return;
+      return true;
     }
     const decision = reopenDecision({
       statusDone: item.status === 'done',
@@ -4238,7 +4371,7 @@ class IcorPlannerPlugin extends Plugin {
     });
     if (decision === 'refuse-local') {
       new Notice(`This task is closed in ${(SOURCES[item.source] || {}).label || item.source}. Turn on Complete on source to reopen it from here.`);
-      return;
+      return false;
     }
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       fm.done_local = false;
@@ -4247,6 +4380,7 @@ class IcorPlannerPlugin extends Plugin {
       // and clears the flag; reconcile stands down while it is set.
       if (decision === 'push') fm.reopen_pending = true;
     });
+    return true;
   }
 
   async toggleWeeklyGoal(path) {
@@ -4500,6 +4634,32 @@ function dueChipText(item, today) {
   return fmtDayNum(item.due);
 }
 
+// The chips in a card's meta row, in order, as data: due, priority, goal,
+// repeat. A ghost's due is a date that has passed by design; "3D OVER" would
+// be a lie about a finished occurrence, so it shows the date, neutrally. The
+// repeat chip is a glyph with a spoken label (the recurrence phrase when the
+// source gave one); it appears for a known recurrence only, never for the
+// unknown case.
+function cardChips(item, today, ghost) {
+  const out = [];
+  const due = ghost ? (item.due ? fmtDayNum(item.due) : null) : dueChipText(item, today);
+  if (due) {
+    out.push({
+      kind: 'due', text: due,
+      cls: ghost ? 'iplan-chip' : `iplan-chip iplan-due-${dueBucketOf(item.due, today)}`,
+    });
+  }
+  if (item.priority <= 2) out.push({ kind: 'priority', cls: `iplan-chip iplan-prio-${item.priority}`, text: `P${item.priority}` });
+  if (item.weeklyGoal) out.push({ kind: 'goal', cls: 'iplan-chip iplan-goal-chip', text: 'GOAL' });
+  if (item.recurring === true) {
+    out.push({
+      kind: 'repeat', cls: 'iplan-chip iplan-repeat-chip', text: '', icon: 'repeat',
+      label: `Repeats${item.dueString ? `, ${item.dueString}` : ''}`,
+    });
+  }
+  return out;
+}
+
 // One read-only calendar chip's behavior, shared by the board lanes and the
 // tray's AGENDA tab: stale look while defs come from the vault cache, the
 // feed's lens on the left edge, an aria label, and click-through into the
@@ -4520,9 +4680,13 @@ function wireEventChip(plugin, chip, ev) {
   chip.addEventListener('click', () => new EventDetailModal(plugin.app, ev, calendarFeedFor(plugin.settings, ev), plugin.manifest.id).open());
 }
 
-// One task card. mode: 'board' | 'tray'.
+// One task card. mode: 'board' | 'tray'. `view.index` (buildItemIndex) is
+// where the parent kicker and the subtask counter come from; `view.expanded`
+// is the Set of parent paths whose list is open.
 function renderCard(plugin, item, mode, view) {
   const today = todayStr();
+  const index = view && view.index ? view.index : null;
+  const parent = parentOf(item, index);
   const card = document.createElement('div');
   card.className = 'iplan-card';
   card.setAttribute('data-path', item.path);
@@ -4566,35 +4730,41 @@ function renderCard(plugin, item, mode, view) {
 
   const bodyEl = document.createElement('div');
   bodyEl.className = 'iplan-card-body';
+  // The parent kicker: a child card says which task it belongs to, in the
+  // meta voice above its own title. Spoken as "Part of <parent>".
+  if (parent) {
+    const kicker = document.createElement('div');
+    kicker.className = 'iplan-card-parent';
+    const said = document.createElement('span');
+    said.className = 'iplan-sr-only';
+    said.textContent = 'Part of ';
+    kicker.appendChild(said);
+    kicker.appendChild(document.createTextNode(parent.title));
+    bodyEl.appendChild(kicker);
+  }
   const titleEl = document.createElement('div');
   titleEl.className = 'iplan-card-title';
   titleEl.textContent = item.title;
   const meta = document.createElement('div');
   meta.className = 'iplan-card-meta';
   meta.appendChild(sourceMarkEl(item.source));
-  // A ghost's due is a date that has passed by design; "3D OVER" would be a
-  // lie about a finished occurrence, so it shows the date, neutrally.
-  const due = ghost ? (item.due ? fmtDayNum(item.due) : null) : dueChipText(item, today);
-  if (due) {
+  for (const c of cardChips(item, today, ghost)) {
     const chip = document.createElement('span');
-    chip.className = ghost ? 'iplan-chip' : `iplan-chip iplan-due-${dueBucketOf(item.due, today)}`;
-    chip.textContent = due;
+    chip.className = c.cls;
+    if (c.icon) {
+      chip.setAttribute('role', 'img');
+      chip.setAttribute('aria-label', c.label);
+      setIcon(chip, c.icon);
+    } else {
+      chip.textContent = c.text;
+    }
     meta.appendChild(chip);
-  }
-  if (item.priority <= 2) {
-    const pr = document.createElement('span');
-    pr.className = `iplan-chip iplan-prio-${item.priority}`;
-    pr.textContent = `P${item.priority}`;
-    meta.appendChild(pr);
-  }
-  if (item.weeklyGoal) {
-    const goal = document.createElement('span');
-    goal.className = 'iplan-chip iplan-goal-chip';
-    goal.textContent = 'GOAL';
-    meta.appendChild(goal);
   }
   bodyEl.appendChild(titleEl);
   bodyEl.appendChild(meta);
+  // The subtask counter and its list, on a live parent card only.
+  const counter = !ghost && plugin.settings.subtaskChecklist !== false ? subtaskCounter(item, index) : null;
+  if (counter) renderSubtaskRow(plugin, item, index, counter, bodyEl, view);
 
   card.appendChild(check);
   card.appendChild(bodyEl);
@@ -4613,6 +4783,68 @@ function renderCard(plugin, item, mode, view) {
 
   wireLongPress(card, (pos) => showCardMenu(plugin, item, view, pos));
   return card;
+}
+
+// The "n of m subtasks" row on a parent card (2026-09-04): a chevron button
+// (aria-expanded, aria-controls) opens the shared checklist of the children.
+// Open state lives in `view.expanded` per parent path, so it survives the
+// re-render that follows every write and is forgotten with the view. A
+// child's check goes through toggleDoneLocal, the same path its own card
+// uses; the list is a second view of the same notes. Dragging the card
+// carries the parent only: the children keep their own plan.
+function renderSubtaskRow(plugin, item, index, counter, bodyEl, view) {
+  const kids = childrenOfItem(item, index);
+  const listId = `iplan-subs-${Math.abs(hashStr(item.path)).toString(36)}`;
+  const expanded = view && view.expanded instanceof Set ? view.expanded : null;
+  let open = !!(expanded && expanded.has(item.path));
+  const row = document.createElement('div');
+  row.className = 'iplan-card-sub';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'iplan-card-sub-toggle';
+  btn.setAttribute('aria-controls', listId);
+  const chevron = document.createElement('span');
+  chevron.className = 'iplan-card-sub-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  setIcon(chevron, 'chevron-right');
+  const text = document.createElement('span');
+  text.textContent = subtaskCounterText(counter);
+  btn.appendChild(chevron);
+  btn.appendChild(text);
+  row.appendChild(btn);
+  bodyEl.appendChild(row);
+  const list = document.createElement('div');
+  list.id = listId;
+  list.className = 'iplan-card-subs';
+  bodyEl.appendChild(list);
+  const paint = () => {
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} subtasks of ${item.title}`);
+    row.classList.toggle('is-open', open);
+    list.hidden = !open;
+  };
+  const fill = () => {
+    const model = checklistModel({
+      rows: kids.map((k) => ({ id: k.path, label: k.title, checked: isDone(k), meta: subtaskRowMeta(k, item) })),
+    });
+    renderChecklist(list, model, {
+      compact: true,
+      progress: false,
+      ariaLabel: `Subtasks of ${item.title}`,
+      onToggle: (id) => plugin.toggleDoneLocal(String(id)),
+      onProgress: (done, total) => { text.textContent = subtaskCounterText({ done, total }); },
+    });
+  };
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    open = !open;
+    if (expanded) { if (open) expanded.add(item.path); else expanded.delete(item.path); }
+    if (open && !list.childElementCount) fill();
+    paint();
+  });
+  if (open) fill();
+  paint();
 }
 
 // Touch long-press opens the same menu as right-click: mobile webviews fire
@@ -4744,6 +4976,14 @@ function showCardMenu(plugin, item, view, pos) {
       const file = plugin.app.vault.getAbstractFileByPath(item.path);
       if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
     }));
+  const parent = parentOf(item, view && view.index);
+  if (parent) {
+    menu.addItem((mi) => mi.setTitle('Open parent note')
+      .setIcon('corner-left-up').onClick(() => {
+        const file = plugin.app.vault.getAbstractFileByPath(parent.path);
+        if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
+      }));
+  }
   menu.showAtPosition(pos);
 }
 
@@ -5058,6 +5298,8 @@ class PlannerBoardView extends ItemView {
     this.weekStart = mondayOf(todayStr());
     this.mode = 'week'; // 'week' | 'day'
     this.day = todayStr();
+    this.index = null;          // buildItemIndex, per render
+    this.expanded = new Set();  // parent paths whose subtask list is open
   }
 
   getViewType() { return BOARD_VIEW_TYPE; }
@@ -5102,6 +5344,7 @@ class PlannerBoardView extends ItemView {
     const today = todayStr();
     const isDay = this.mode === 'day';
     const items = collectItems(this.plugin.app, this.plugin.paths().root);
+    this.index = buildItemIndex(items);
     const splitHour = this.plugin.splitHour();
     const eventsWeekStart = isDay ? mondayOf(this.day) : this.weekStart;
     const events = this.plugin.calendarDefs
@@ -5568,6 +5811,8 @@ class PlannerTrayView extends ItemView {
     this._composerWantsFocus = false;
     this.contextIsBoard = false;
     this.activeTab = trayDefaultTab(false);
+    this.index = null;          // buildItemIndex, per render
+    this.expanded = new Set();  // parent paths whose subtask list is open
   }
 
   getViewType() { return TRAY_VIEW_TYPE; }
@@ -5658,6 +5903,7 @@ class PlannerTrayView extends ItemView {
     el.empty();
     const today = todayStr();
     const items = collectItems(this.plugin.app, this.plugin.paths().root);
+    this.index = buildItemIndex(items);
 
     const head = el.createDiv({ cls: 'iplan-tray-head' });
     const kicker = head.createDiv({ cls: 'iplan-kicker' });
@@ -6023,6 +6269,11 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .setDesc('Leave empty to read every workspace the token can see.')
       .addText((t) => t.setValue(this.plugin.settings.clickupTeamId)
         .onChange(async (v) => { this.plugin.settings.clickupTeamId = v.trim(); await this.plugin.saveSettings(); }));
+    new Setting(containerEl)
+      .setName('Include subtasks')
+      .setDesc('Also fetch ClickUp subtasks assigned to you. Each becomes a card that names its parent, and the parent card counts them. Off by default so an existing board does not fill up on upgrade.')
+      .addToggle((t) => t.setValue(this.plugin.settings.clickupIncludeSubtasks === true)
+        .onChange(async (v) => { this.plugin.settings.clickupIncludeSubtasks = v; await this.plugin.saveSettings(); }));
 
     new Setting(containerEl).setName('Starred email (IMAP)').setHeading();
     const setup = containerEl.createEl('details', { cls: 'iplan-setup' });
@@ -6327,6 +6578,11 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           if (v) this.plugin.setupNextBadge(); else this.plugin.removeNextBadge();
         }));
     new Setting(containerEl)
+      .setName('Subtasks on the parent card')
+      .setDesc('A card with subtasks in the vault reads "n of m subtasks" and opens the list on the chevron; checking a row there is the same check as on the subtask\'s own card. Off leaves the counter out; subtask cards keep their parent line either way.')
+      .addToggle((t) => t.setValue(this.plugin.settings.subtaskChecklist !== false)
+        .onChange(async (v) => { this.plugin.settings.subtaskChecklist = v; await this.plugin.saveSettings(); }));
+    new Setting(containerEl)
       .setName('Show weekend')
       .addToggle((t) => t.setValue(this.plugin.settings.showWeekend)
         .onChange(async (v) => { this.plugin.settings.showWeekend = v; await this.plugin.saveSettings(); }));
@@ -6502,5 +6758,7 @@ module.exports.__test = {
   routineSteps, parseRoutineNote, routineRowState, routineHalf, routineOccurrence, routineOccurrences,
   routineCardState, routineKicker, routineTimeLabel, routineLogAfterStep, routineLogSkipped, routineLogReset,
   validateRoutineInput, routineTemplate,
+  clickupQuery, buildItemIndex, parentOf, parentTitleFor, childrenOfItem, subtaskCounter, subtaskCounterText,
+  subtaskRowMeta, cardChips, isDone, fmtDayNum,
   SOURCES, DEFAULT_SETTINGS,
 };
