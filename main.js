@@ -1199,7 +1199,23 @@ function imapSplitResponses(buf) {
 }
 
 function imapQuote(s) {
-  return '"' + String(s).replace(/([\\"])/g, '\\$1') + '"';
+  // CR and LF cannot appear in a quoted string (RFC 3501 section 9);
+  // dropping them keeps the login on one line whatever data.json says.
+  return '"' + String(s).replace(/[\r\n]/g, '').replace(/([\\"])/g, '\\$1') + '"';
+}
+
+// An IMAP UID is a non-zero 32-bit number (RFC 3501 2.3.1.1). The star write
+// puts it on a command line, so anything else is refused here, before a
+// socket opens: a note's external_id is vault content, written by any
+// editor, agent or sync, and the wire format is line based. The read side
+// only ever produces digits (imapFetchStarredRaw). The message echoes at
+// most 40 characters of the value, never a credential.
+function imapUidOrThrow(uid) {
+  const v = String(uid == null ? '' : uid);
+  if (!/^[1-9]\d{0,9}$/.test(v) || Number(v) > 4294967295) {
+    throw new Error(`invalid IMAP uid ${JSON.stringify(v).slice(0, 40)}`);
+  }
+  return v;
 }
 
 /* ---- IMAP failure classification (2026-09-04) ------------------------------
@@ -1683,9 +1699,13 @@ async function imapProbe(settings, deps) {
 // write the mailbox ever sees, armed by completeOnSource. SELECT (not
 // EXAMINE) + exactly one UID STORE.
 function imapSetStarredRaw(opts, user, pass, uid, starred, deps) {
+  // The uid is checked before anything else happens: a refused one never
+  // opens a socket, and the rejection reaches the caller's notice.
+  let safeUid;
+  try { safeUid = imapUidOrThrow(uid); } catch (e) { return Promise.reject(e); }
   const steps = [
     { stage: 'select', cmd: () => 'SELECT INBOX' },
-    { stage: 'store', cmd: () => `UID STORE ${uid} ${starred ? '+' : '-'}FLAGS (\\Flagged)` },
+    { stage: 'store', cmd: () => `UID STORE ${safeUid} ${starred ? '+' : '-'}FLAGS (\\Flagged)` },
   ];
   return imapSession(opts, user, pass, steps, deps).then(() => undefined);
 }
@@ -7188,7 +7208,7 @@ module.exports = IcorPlannerPlugin;
 module.exports.__test = {
   mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel,
   decodeRfc2047, icsUnescape,
-  todoistPriorityRank, imapSplitResponses, imapQuote,
+  todoistPriorityRank, imapSplitResponses, imapQuote, imapUidOrThrow,
   imapProviderOf, classifyImapError, imapReplyError, imapReasonToConnector, imapConnect, IMAP_PROVIDERS,
   imapTransportOptions, imapTlsOptions, imapSession, imapItemsFromFetch, imapFetchStarredRaw, imapSetStarredRaw,
   imapPreflight, imapProbe, IMAP_PRESETS, imapPresetFields, imapActivePreset,

@@ -1,7 +1,7 @@
 # Security Policy
 
 ICOR for Life - Planner is an Obsidian plugin that syncs Todoist, ClickUp, starred email and
-Google Calendar into your vault. It holds credentials for those services and it can
+calendar feeds into your vault. It holds credentials for those services and it can
 write back to them. That makes it the most sensitive plugin in the ICOR for Life
 suite after ICOR for Life - Chat, and we would rather hear about a problem early than read
 about it later.
@@ -58,7 +58,7 @@ We are not going to publish a version-support table we would not honour.
 ## Scope: what this plugin actually touches
 
 This is what the plugin does, so you can aim your effort at the parts that matter.
-The figures below were measured against the shipped `main.js` of v0.6.1.
+The figures below describe the shipped `main.js` on `main` (the 0.8.0 line).
 
 **Credentials it stores.** The plugin keeps user-supplied secrets in Obsidian's
 per-plugin `data.json` inside the vault, at
@@ -67,19 +67,29 @@ per-plugin `data.json` inside the vault, at
 - a Todoist API token
 - a ClickUp API token
 - IMAP host, username and password for the starred-email sync
-- a Google Calendar **secret iCal URL** (this is a bearer credential: anyone
-  holding the URL can read the calendar)
+- one or more calendar feed URLs (`calendars[].url`); each is a bearer
+  credential: anyone holding it can read that calendar. `icsUrl` from a
+  release before 0.8.0 is kept for one release and read nowhere else.
 
 `data.json` is git-ignored in this repository and is never transmitted anywhere by
 the plugin other than to the services the credential belongs to.
 
-**Where it connects.** Outbound hosts referenced in the shipped bundle:
-`api.todoist.com`, `api.clickup.com`, `calendar.google.com`, and the IMAP server
-you configure. There is no telemetry, no analytics, and no myICOR-operated
-endpoint in this plugin.
+**Where it connects.** `api.todoist.com`, `api.clickup.com`, every
+calendar feed host you configure (https only; `webcal://` is rewritten to
+https), and the IMAP host you configure (TLS, or STARTTLS upgraded before
+any login; a self-signed certificate is accepted only for a host on this
+machine, enforced in the transport code). There is no telemetry, no
+analytics, and no myICOR-operated endpoint in this plugin.
 
-**What it writes.** The plugin can write back to Todoist and ClickUp. Write-back is
-off by default and sits behind two explicit user-facing toggles.
+**What it writes.** The plugin can write back to Todoist, ClickUp and the
+mailbox (the star flag only). Write-back is off by default and sits behind
+two explicit user-facing toggles. The one mailbox argument that comes from
+the vault, a note's `external_id`, is refused before a socket opens unless it
+is a plain IMAP UID. In the vault it writes the planner folder (a setting;
+changing it moves the folder through Obsidian's own rename), and, for
+habits, one log row into the body of a note in the habits folder (a setting,
+validated the same way), never that note's frontmatter except `cadence` and
+`cadence_days` from the HABITS tab.
 
 **In scope, and we want to hear about it:**
 
@@ -95,8 +105,11 @@ off by default and sits behind two explicit user-facing toggles.
 - Path traversal in note creation: a remote-controlled string that writes outside
   the configured folder.
 - TLS verification being skipped or downgraded on any outbound request.
-- Any read or write of vault files outside the folders the plugin is configured
-  to use.
+- Any read or write of vault files outside the two folders the plugin is
+  configured to use (the planner folder and the habits folder).
+- A vault note's content reaching a remote service as anything other than
+  the field it stands for: an id that becomes a command, a title that becomes
+  a query.
 
 **Note on the published artifact.** This repository distributes the built plugin
 (`main.js`, `manifest.json`, `styles.css`). `main.js` is a readable, non-minified
