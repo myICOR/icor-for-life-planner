@@ -2834,6 +2834,313 @@ function pruneShadows(shadowMap, source, existingIds, openIds, nowMs, maxDoneAge
 }
 
 /* ========================================================================== *
+ * Checklists and sentinel log tables (2026-09-04)
+ *
+ * One checklist block and one log-table parser serve everything that gets
+ * checked off INSIDE a card: a routine's steps today, later a habit's daily
+ * check-in and a task's subtasks. The log lives in the note BODY as a
+ * markdown table under an HTML-comment sentinel, the convention the vault
+ * already uses for habit check-ins, so a row the plugin writes and a row an
+ * agent appends in chat are the same row.
+ *
+ * The writer is byte-preserving outside the one line it touches (a
+ * hand-written table keeps its wording and its spacing), detects the table's
+ * direction and keeps it, and defaults to newest on top. The parser dedupes
+ * by keeping the LAST row per date. Every write runs inside vault.process,
+ * which is atomic; nothing here reads a body and writes it back in two calls.
+ * ========================================================================== */
+
+// The rows a consumer hands in, normalised, plus the progress they add up to.
+//   rows: [{ id, label, checked, disabled?, missed?, meta? }]
+function checklistModel(spec) {
+  const src = spec && Array.isArray(spec.rows) ? spec.rows : [];
+  const rows = src.map((r, i) => ({
+    id: String(r && r.id != null ? r.id : i),
+    label: String(r && r.label != null ? r.label : ''),
+    checked: !!(r && r.checked),
+    disabled: !!(r && r.disabled),
+    missed: !!(r && r.missed),
+    meta: r && r.meta != null && r.meta !== '' ? String(r.meta) : null,
+  }));
+  const done = rows.filter((r) => r.checked).length;
+  return { rows, done, total: rows.length, progressText: checklistProgressText(done, rows.length) };
+}
+
+function checklistProgressText(done, total) { return `${done} of ${total}`; }
+
+// The DOM block. Rows are native buttons (tab order, Enter and Space for
+// free) carrying role=checkbox and aria-checked; a disabled row keeps its
+// place in the tab order and says so through aria-disabled. The check
+// control carries .iplan-check, so a step reads as the same object as a
+// task card's check.
+//
+// The flip is optimistic: the row changes the moment it is pressed, before
+// the write resolves, so every consumer gets the immediate feel without
+// repeating the mechanics. A rejected write reverts the row and says so
+// once. `onToggle(id, next)` may return a promise; `onProgress(done, total)`
+// is told after every flip so a card can strike itself without waiting for
+// the re-render that follows the write.
+function renderChecklist(container, model, opts) {
+  const o = opts || {};
+  const block = document.createElement('div');
+  block.className = `iplan-checklist${o.compact ? ' is-compact' : ''}`;
+  block.setAttribute('role', 'group');
+  if (o.ariaLabel) block.setAttribute('aria-label', o.ariaLabel);
+  const state = { done: model.done, total: model.total };
+  const progress = document.createElement('span');
+  progress.className = 'iplan-checklist-progress';
+  const tell = () => {
+    progress.textContent = checklistProgressText(state.done, state.total);
+    if (typeof o.onProgress === 'function') o.onProgress(state.done, state.total);
+  };
+  const paint = (row, checked) => {
+    row.setAttribute('aria-checked', checked ? 'true' : 'false');
+    row.classList.toggle('is-checked', checked);
+  };
+  for (const r of model.rows) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `iplan-checklist-row${r.missed ? ' is-missed' : ''}`;
+    row.setAttribute('role', 'checkbox');
+    row.setAttribute('data-id', r.id);
+    paint(row, r.checked);
+    if (r.disabled) row.setAttribute('aria-disabled', 'true');
+    const check = document.createElement('span');
+    check.className = 'iplan-check';
+    check.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.className = 'iplan-checklist-label';
+    label.textContent = r.label;
+    row.appendChild(check);
+    row.appendChild(label);
+    if (r.meta) {
+      const chip = document.createElement('span');
+      chip.className = 'iplan-chip';
+      chip.textContent = r.meta;
+      row.appendChild(chip);
+    }
+    row.addEventListener('click', (e) => {
+      // The card behind the row opens its note on click; a check is not that.
+      e.preventDefault();
+      e.stopPropagation();
+      if (row.getAttribute('aria-disabled') === 'true') return;
+      const was = row.getAttribute('aria-checked') === 'true';
+      const next = !was;
+      paint(row, next);
+      state.done += next ? 1 : -1;
+      tell();
+      let result;
+      try { result = typeof o.onToggle === 'function' ? o.onToggle(r.id, next) : undefined; }
+      catch (err) { result = Promise.reject(err); }
+      if (result && typeof result.then === 'function') {
+        result.then(null, (err) => {
+          paint(row, was);
+          state.done += next ? -1 : 1;
+          tell();
+          new Notice(`Planner: could not save the check (${(err && err.message) || 'unknown error'}).`);
+        });
+      }
+    });
+    block.appendChild(row);
+  }
+  progress.textContent = checklistProgressText(state.done, state.total);
+  block.appendChild(progress);
+  container.appendChild(block);
+  return block;
+}
+
+/* ---- the sentinel log table ------------------------------------------------
+ *
+ *   <!-- routine-log: schema=steps -->
+ *   | Date | Done | Steps |
+ *   |---|---|---|
+ *   | 2026-09-04 | 3/3 | 1,2,3 |
+ *
+ * Column 1 is the date, column 2 the marker, the rest is carried through as
+ * strings. The marker vocabulary is the vault's: Y, a check mark or G is
+ * done; N, R or a dash is not done; an underscore or a blank is pending; S
+ * is skipped. The parser carries any marker; interpreting it is the
+ * consumer's job (markerState is the shared reading).
+ */
+
+const LOG_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Lines split on '\n' only: a CRLF line keeps its '\r', and joining the
+// array back with '\n' returns the bytes that came in. That is the whole
+// byte-preservation mechanism, so it is one function and not a regex.
+function splitLogLines(text) { return String(text == null ? '' : text).split('\n'); }
+
+function logSentinelRe(name) { return new RegExp(`<!--\\s*${name}:\\s*([^>]*?)\\s*-->`); }
+
+function parseTableCells(line) {
+  const s = String(line == null ? '' : line).trim();
+  if (!s.startsWith('|')) return null;
+  return s.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+}
+
+function isSeparatorRow(cells) {
+  return Array.isArray(cells) && cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+function formatLogRow(cells) { return `| ${cells.join(' | ')} |`; }
+
+// -> { found, schema, start, end, header, headerLine, separatorLine,
+//      rows: [{ line, date, marker, rest }], direction: 'desc'|'asc'|'unknown' }
+// `start` is the sentinel's line index, `end` the first line after the
+// table (exclusive). A sentinel with no table under it yet is `found` with a
+// null header. Direction compares the first and the last dated row; one row
+// or none is 'unknown', which the writer treats as newest on top.
+function parseLogTable(body, sentinelName) {
+  const lines = splitLogLines(body);
+  const re = logSentinelRe(sentinelName);
+  const none = {
+    found: false, schema: null, start: -1, end: -1, header: null,
+    headerLine: -1, separatorLine: -1, rows: [], direction: 'unknown',
+  };
+  let start = -1;
+  let schema = null;
+  for (let i = 0; i < lines.length; i++) {
+    const m = re.exec(lines[i]);
+    if (!m) continue;
+    start = i;
+    const sm = /schema=([A-Za-z0-9_-]+)/.exec(m[1] || '');
+    schema = sm ? sm[1] : null;
+    break;
+  }
+  if (start < 0) return none;
+  let i = start + 1;
+  while (i < lines.length && lines[i].trim() === '') i++;
+  const header = i < lines.length ? parseTableCells(lines[i]) : null;
+  if (!header) return { ...none, found: true, schema, start, end: start + 1 };
+  const headerLine = i;
+  let separatorLine = -1;
+  i++;
+  if (i < lines.length && isSeparatorRow(parseTableCells(lines[i]))) { separatorLine = i; i++; }
+  const rows = [];
+  for (; i < lines.length; i++) {
+    const cells = parseTableCells(lines[i]);
+    if (!cells) break;
+    rows.push({
+      line: i,
+      date: cells[0] && LOG_DATE_RE.test(cells[0]) ? cells[0] : null,
+      marker: cells[1] == null ? '' : cells[1],
+      rest: cells.slice(2),
+    });
+  }
+  const dated = rows.filter((r) => r.date);
+  let direction = 'unknown';
+  if (dated.length >= 2) {
+    const a = dated[0].date;
+    const b = dated[dated.length - 1].date;
+    direction = a > b ? 'desc' : (a < b ? 'asc' : 'unknown');
+  }
+  return { found: true, schema, start, end: i, header, headerLine, separatorLine, rows, direction };
+}
+
+// The row for a date: the LAST one when a date appears twice, so a
+// duplicate written by hand is read the way a later correction would be.
+function logRowFor(parsed, date) {
+  if (!parsed || !parsed.rows) return null;
+  let hit = null;
+  for (const r of parsed.rows) if (r.date === date) hit = r;
+  return hit;
+}
+
+// The marker's meaning. Vocabulary from the vault's habit convention: the
+// dash is U+2013 (an en dash) as written there, a plain hyphen counts too.
+function markerState(marker) {
+  const m = String(marker == null ? '' : marker).trim();
+  if (m === '' || m === '_') return 'pending';
+  if (/^(Y|✓|✔|G)$/i.test(m)) return 'done';
+  if (/^(N|R|–|-)$/i.test(m)) return 'missed';
+  if (/^S$/i.test(m)) return 'skipped';
+  return 'unknown';
+}
+
+// Writes ONE row: replaced in place when the date exists, inserted per the
+// table's direction when it does not (top for newest-on-top or unknown, the
+// end for oldest-on-top), or the whole section created from `createWith`
+// ({ heading, schema, header }) when the note has no such table. Returns the
+// new body. When the row already holds exactly these cells the body comes
+// back unchanged, byte for byte. `rest` omitted keeps the existing row's
+// trailing cells (a note text the person wrote survives a re-check).
+function upsertLogRow(body, sentinelName, spec) {
+  const date = String(spec.date);
+  const marker = String(spec.marker == null ? '' : spec.marker);
+  const lines = splitLogLines(body);
+  const eolOf = (idx) => (idx >= 0 && idx < lines.length && lines[idx].endsWith('\r') ? '\r' : '');
+  const parsed = parseLogTable(body, sentinelName);
+
+  if (!parsed.found) {
+    const cw = spec.createWith;
+    if (!cw || !Array.isArray(cw.header)) {
+      throw new Error(`the note has no ${sentinelName} table and nothing was given to create it with`);
+    }
+    const eol = String(body || '').includes('\r\n') ? '\r' : '';
+    const width = Math.max(cw.header.length, 2);
+    const cells = [date, marker].concat((spec.rest || []).map(String));
+    while (cells.length < width) cells.push('');
+    const section = [
+      '',
+      cw.heading || '## Log',
+      `<!-- ${sentinelName}: schema=${cw.schema || 'streak'} -->`,
+      formatLogRow(cw.header),
+      formatLogRow(cw.header.map(() => '---')),
+      formatLogRow(cells),
+    ];
+    let base = String(body || '');
+    if (base.length && !base.endsWith('\n')) base += `${eol}\n`;
+    return base + section.join(`${eol}\n`) + `${eol}\n`;
+  }
+
+  if (parsed.headerLine < 0) {
+    // The sentinel is there, the table is not: build it right under it.
+    const cw = spec.createWith;
+    const header = cw && Array.isArray(cw.header) ? cw.header : ['Date', 'Y/N', 'Note'];
+    const eol = eolOf(parsed.start);
+    const width = Math.max(header.length, 2);
+    const cells = [date, marker].concat((spec.rest || []).map(String));
+    while (cells.length < width) cells.push('');
+    lines.splice(parsed.start + 1, 0,
+      formatLogRow(header) + eol,
+      formatLogRow(header.map(() => '---')) + eol,
+      formatLogRow(cells) + eol);
+    return lines.join('\n');
+  }
+
+  const width = Math.max(parsed.header.length, 2);
+  const existing = logRowFor(parsed, date);
+  const rest = spec.rest != null ? spec.rest.map(String) : (existing ? existing.rest.slice() : []);
+  const cells = [date, marker].concat(rest);
+  while (cells.length < width) cells.push('');
+
+  if (existing) {
+    const had = [existing.date, existing.marker].concat(existing.rest);
+    while (had.length < cells.length) had.push('');
+    if (had.length === cells.length && had.every((c, k) => c === cells[k])) return String(body || '');
+    lines[existing.line] = formatLogRow(cells) + eolOf(existing.line);
+    return lines.join('\n');
+  }
+
+  const eol = eolOf(parsed.headerLine);
+  const afterHead = parsed.separatorLine >= 0 ? parsed.separatorLine + 1 : parsed.headerLine + 1;
+  const at = parsed.direction === 'asc' ? parsed.end : afterHead;
+  lines.splice(at, 0, formatLogRow(cells) + eol);
+  return lines.join('\n');
+}
+
+// Removes every row for the date (a duplicate goes with it, by design: one
+// row per date is the invariant). Untouched lines keep their bytes.
+function removeLogRow(body, sentinelName, date) {
+  const parsed = parseLogTable(body, sentinelName);
+  const hits = parsed.rows.filter((r) => r.date === date).map((r) => r.line);
+  if (!hits.length) return String(body || '');
+  const lines = splitLogLines(body);
+  for (const idx of hits.slice().sort((a, b) => b - a)) lines.splice(idx, 1);
+  return lines.join('\n');
+}
+
+/* ========================================================================== *
  * The plugin
  * ========================================================================== */
 
@@ -5479,5 +5786,6 @@ module.exports.__test = {
   ghostItemsFor, pruneShadows, normalizeOccurrences, OCCURRENCE_CAP, DONE_SHADOW_MAX_AGE_MS,
   agendaSections, laneSequence, TRAY_TABS,
   todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
+  checklistModel, checklistProgressText, parseLogTable, logRowFor, upsertLogRow, removeLogRow, markerState,
   SOURCES, DEFAULT_SETTINGS,
 };
