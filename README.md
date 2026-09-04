@@ -50,6 +50,11 @@ for defects. It gets fixed fast.
 - Drag a card onto a day's AM or PM lane to plan it; drag it back to the
   tray to unschedule. On mobile, long-press a card and pick "Plan on...".
   Calendar events render read-only in their lanes.
+- Routines: a block of steps at a time of day (morning, afternoon or
+  evening), on the weekdays you pick. Each one is a note in
+  `02 Planner/Routines/`; its block sits in the lane at its time, its steps
+  check off one by one with the count on the card, and every day's result
+  is a row in the note, readable by you and by the AI team.
 - Every synced task becomes a markdown note in `02 Planner/<Source>/`
   with the plan state in frontmatter, so the AI team can read and move
   items too.
@@ -122,7 +127,10 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `imapSecurity` | `tls` (encrypted from the first byte) or `starttls` (plain connect, upgraded before login, never a plain login) | `tls` |
 | `imapAllowSelfSigned` | accept the host's own certificate; honoured only when the host is loopback, enforced in the transport code, not just in the settings tab | `false` |
 | `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the secret iCal address, `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics`. An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and is read nowhere else | empty |
-| `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
+| `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`, `<folder>/Routines`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
+| `routinesEnabled` | show routine blocks on the board and in the agenda; off hides them, the notes stay | `true` |
+| `routineDefaults` | the times a new routine starts with, per type: `{ morning: { start, end }, afternoon: { start, end }, evening: { start, end } }`, each `HH:MM`; each routine keeps its own times in its note | `06:30` to `07:30`, `13:00` to `13:30`, `21:00` to `21:45` |
+| `routineWeekdaysDefault` | the weekdays a new routine starts with, lowercase three-letter codes | `[mon, tue, wed, thu, fri]` |
 
 The board preferences (sync interval, weekend, split, lunch, workday,
 badge, the two-way toggles) sit beside them under their own names.
@@ -178,6 +186,75 @@ both are deliberate:
 
 Its `external_id` is generated locally and always starts with `manual-`,
 which no Todoist, ClickUp or IMAP id can produce.
+
+## Routines (`02 Planner/Routines/`)
+
+A routine is a recurring block of steps that takes a place in the day:
+from a time to a time, one of three types (morning, afternoon, evening),
+on the weekdays you choose. It is not a task (it is never in the tray,
+never dragged, never synced anywhere) and not a habit (a habit is one yes
+or no per day). On the board it is a block in the morning or afternoon
+lane at its time, sorted with the calendar events and the tasks around it;
+its steps check off one by one, the card reads "3 of 5", a complete day
+strikes through like a done task, and a skipped day shows greyed. The
+same block appears in the tray's AGENDA tab. Right-click or long-press the
+block for Skip today, Unskip today, Reset today and Open routine note.
+
+The folder holds one markdown note per routine. "New routine" in the
+settings (or the command of the same name) writes it; you can also write
+one by hand. The shape:
+
+```markdown
+---
+type: planner-routine
+name: "Morning launch"
+routine_type: morning
+start: "06:30"
+end: "07:30"
+weekdays: [mon, tue, wed, thu, fri]
+active: true
+created_at: 2026-09-04T09:00:00Z
+---
+
+# Morning launch
+
+## Steps
+- [ ] Water, 500 ml
+- [ ] One journal page
+- [ ] Plan the day on the board
+
+## Log
+<!-- routine-log: schema=steps -->
+| Date | Done | Steps |
+| --- | --- | --- |
+| 2026-09-04 | 3/3 | 1,2,3 |
+| 2026-09-03 | 1/3 | 2 |
+| 2026-09-02 | S |  |
+```
+
+| field | meaning |
+| --- | --- |
+| `name` | the title on the card |
+| `routine_type` | `morning`, `afternoon` or `evening`; said on the card's kicker |
+| `start`, `end` | `HH:MM`; the start decides the lane (before the morning / afternoon split is the morning lane, from the split on the afternoon lane) and the order inside it |
+| `weekdays` | the days it occurs, lowercase three-letter codes `mon` to `sun` |
+| `active` | `false` takes it off the board without deleting the note |
+| `created_at` | when it was created |
+
+The `## Steps` list is the definition. Its boxes are labels only: the
+plugin never writes them, and a `- [x]` there does not make a step done.
+Steps are counted by position, so editing the list changes what the
+numbers in the log point at from that day on.
+
+The `## Log` table is the record, one row per day that had any
+interaction: the date, the count done, and the numbers of the steps that
+were checked. `S` in the Done column means the day was skipped. A day
+with no row is a day nothing was recorded for. The plugin writes newest on
+top, keeps whatever order a table already has, and never touches a row it
+was not asked to; a person or an agent may append a row by hand in the
+same shape (a `Y` with no step numbers counts as every step done), and
+the board shows it on the next render. Nothing here is ever sent to
+Todoist, ClickUp, the mailbox or a calendar.
 
 ## The calendar cache (`02 Planner/Calendar Events.md`)
 
