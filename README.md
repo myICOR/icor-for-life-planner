@@ -49,7 +49,11 @@ this repo and it gets fixed fast.
   source" on, due date, priority and description edits in the note flow
   back to Todoist and ClickUp. Only fields you changed since the last
   sync are pushed; when both sides changed, the source wins. The calendar
-  is always read-only.
+  is always read-only. A recurring task keeps one card: when its due date
+  moves on to the next occurrence (completed here or in Todoist) the check
+  clears and the card moves to the new date, or back to the tray if you
+  prefer, while the finished occurrence stays struck through on the day
+  it was planned.
 
 ## What makes it different
 
@@ -100,9 +104,20 @@ Every item note carries `type: planner-item` plus:
 | `done_local` | the check; with "Complete on source" on it also closes / reopens at the source | board, or any editor |
 | `weekly_goal` | pins the item to the top of the tray | board, or any editor |
 | `created_at` | manual items only, in place of `synced_at` | the tray |
+| `recurring` | `true`, `false`, or `null` when the source cannot say (ClickUp, or a note from before the field existed) | sync |
+| `due_string` | the source's own recurrence phrase ("every monday"), Todoist only | sync |
+| `reopen_pending` | `true` between unchecking a source-closed card and the source confirming the reopen; reconcile stands down while set | board, cleared by sync |
+| `last_completed_due` | the due date of the most recently finished occurrence of a recurring task | sync |
+| `occurrences` | finished occurrences of a recurring task, oldest first, at most 30: `due`, `planned_day`, `planned_half`, `done_at`. Each one with a plan renders read-only on the board | sync |
 
 Editing `planned_day` / `planned_half` in any editor moves the card; the
 board re-renders live off the metadata cache.
+
+When a recurring task's due date moves on, the setting "When a recurring
+task moves to its next date" decides where the card lands: on the new
+due day, keeping its morning / afternoon half (the default), or back in
+the tray. A plan already made for a day on or after the new due stands
+either way.
 
 `source` is `todoist`, `clickup`, `email` or `manual`. A manual item is a
 task you typed instead of one that arrived from an account, and it is a

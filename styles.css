@@ -287,6 +287,10 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
   color: var(--iplan-faint);
 }
 .iplan-card.is-done { opacity: 0.72; }
+/* a finished occurrence of a recurring task: history on the day it was done,
+ * fainter than a done card, and nothing on it invites an action */
+.iplan-card.is-ghost { opacity: 0.5; cursor: default; }
+.iplan-card.is-ghost button.iplan-check { cursor: default; }
 
 .iplan-root button.iplan-check, .iplan-tray-root button.iplan-check {
   all: unset;

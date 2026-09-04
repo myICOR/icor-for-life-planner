@@ -145,6 +145,10 @@ const DEFAULT_SETTINGS = {
   pushEdits: true,
   // v0.5.0: the next-event badge under the left ribbon (desktop only).
   showNextBadge: true,
+  // Where a recurring task's card lands when its due date moves on to the
+  // next occurrence: 'move' puts it on the new due day (keeping its half),
+  // 'drop' sends it back to the tray. See syncCompletionPlan.
+  recurringAdvance: 'move',
 };
 
 const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
@@ -762,6 +766,11 @@ async function todoistFetchOpen(settings) {
           url: t.url || `https://app.todoist.com/app/task/${encodeURIComponent(String(t.id))}`,
           tags: Array.isArray(t.labels) ? t.labels : [],
           status: null,
+          // The recurrence flag on the Due object is named `is_recurring` in
+          // some api/v1 documents and `recurring` in others; both are read so
+          // a doc-side rename cannot silently turn every task non-recurring.
+          recurring: !!(t.due && (t.due.is_recurring || t.due.recurring)),
+          dueString: t.due && t.due.string ? String(t.due.string) : null,
         });
       }
       cursor = body.next_cursor || null;
@@ -834,6 +843,11 @@ async function clickupFetchOpen(settings) {
             tags: Array.isArray(t.tags) ? t.tags.map((x) => x.name).filter(Boolean) : [],
             status: (t.status && t.status.status) || null,
             listId: t.list && t.list.id ? String(t.list.id) : null,
+            // ClickUp's API exposes no recurrence flag (recurrence is an
+            // automation, not a task field). Unknown, so the occurrence rule
+            // still applies when the due moves forward past its baseline.
+            recurring: null,
+            dueString: null,
           });
         }
         if (!tasks.length || (data && data.last_page === true)) break;
@@ -1055,6 +1069,8 @@ function imapFetchStarredRaw(host, user, pass, maxItems) {
             url,
             tags: [],
             status: null,
+            recurring: false,
+            dueString: null,
           });
         }
         items.reverse(); // newest first
@@ -1736,7 +1752,36 @@ function itemFromFrontmatter(fm, path, basename) {
     plannedOrder: Number.isFinite(Number(fm.planned_order)) ? Number(fm.planned_order) : 0,
     doneLocal: fm.done_local === true,
     weeklyGoal: fm.weekly_goal === true,
+    // Recurrence (2026-09-04). `recurring` is three-valued on purpose: true,
+    // false, or null for "unknown" (a note from before the field existed, or
+    // a ClickUp task, whose API has no flag). The occurrence rule treats
+    // unknown as recurring; see occurrenceAdvanced.
+    recurring: fm.recurring === true ? true : (fm.recurring === false ? false : null),
+    dueString: fm.due_string != null && fm.due_string !== '' ? String(fm.due_string) : null,
+    // The uncheck-after-sync signal: the card was reopened here and the
+    // source has not confirmed yet. Reconcile must not re-close it meanwhile.
+    reopenPending: fm.reopen_pending === true,
+    lastCompletedDue: fm.last_completed_due ? String(fm.last_completed_due).slice(0, 10) : null,
+    occurrences: normalizeOccurrences(fm.occurrences),
   };
+}
+
+// `occurrences` in frontmatter: the finished occurrences of a recurring task,
+// oldest first, capped. Each row is { due, planned_day, planned_half, done_at }
+// in the note and camelCase here; a malformed row is dropped, never thrown on.
+function normalizeOccurrences(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const o of raw) {
+    if (!o || typeof o !== 'object') continue;
+    out.push({
+      due: o.due ? String(o.due).slice(0, 10) : null,
+      plannedDay: o.planned_day ? String(o.planned_day).slice(0, 10) : null,
+      plannedHalf: o.planned_half === 'am' || o.planned_half === 'pm' ? o.planned_half : null,
+      doneAt: o.done_at ? String(o.done_at) : null,
+    });
+  }
+  return out;
 }
 
 function itemFromFile(app, file) {
@@ -1838,9 +1883,155 @@ function reconcileStaleIds(source, allItems, openIds) {
     if (it.source !== source) continue;
     if (openIds.has(it.id)) continue;
     if (it.status === 'done') continue;
+    // Reopened here, not yet confirmed by the source: re-marking it done now
+    // would undo the uncheck before the reopen has round-tripped.
+    if (it.reopenPending === true) continue;
     out.push(it);
   }
   return out;
+}
+
+/* ========================================================================== *
+ * Completion and recurrence (2026-09-04)
+ *
+ * Three defects shared two causes. First, reconcile deleted the shadow of a
+ * task that left the open set, and the push path needs a shadow to act, so an
+ * uncheck after a sync had nowhere to send a reopen. Second, the plugin had
+ * no notion of an OCCURRENCE: a recurring Todoist task keeps its id and only
+ * moves its due forward, so a local check stayed forever and a plan stayed on
+ * the day of an occurrence that was already finished.
+ *
+ * The decision is pure so the one place that writes completions to a source
+ * can be tested for the double-close hazard: if the reset of the local check
+ * ran AFTER the completion comparison, the comparison would see a checked
+ * card against an unchecked shadow and close the task a second time, which
+ * advances the recurrence twice. An advance therefore never pushes anything,
+ * in either direction (a reopen on a recurring task reverts its due date).
+ * ========================================================================== */
+
+// Did the source's due move forward past the baseline? Unknown recurrence
+// (an older note, or ClickUp) counts as recurring: the rule keys on the due
+// having MOVED while a baseline existed, which a one-off task's edit also
+// satisfies only when the user changed the date at the source, and for a
+// one-off the fetch says recurring: false and the rule stands down.
+function occurrenceAdvanced(prior, sourceItem, shadow) {
+  return prior.recurring !== false
+    && !!(shadow && shadow.due && sourceItem && sourceItem.due && sourceItem.due > shadow.due);
+}
+
+// The completion decision for one item that IS in the source's open set.
+//   advanced         the due moved on: the old occurrence is finished
+//   resetDoneLocal   clear the check, status open, done_at gone
+//   movePlan         { day, half } to put the card on ('move' mode)
+//   clearPlan        send the card back to the tray ('drop' mode)
+//   occurrence       what to record about the finished occurrence, or null
+//   pushClose / pushReopen   the ONE call to the source, or neither
+//   nextShadowDone   the done flag the shadow should carry after this sync
+//   clearReopenPending       the source confirmed the reopen (the item is open)
+function syncCompletionPlan({ prior, sourceItem, shadow, completeOnSource, recurringAdvance }) {
+  const shadowDone = shadow ? !!shadow.done : false;
+  const base = {
+    advanced: false, resetDoneLocal: false, movePlan: null, clearPlan: false,
+    occurrence: null, lastCompletedDue: null,
+    pushClose: false, pushReopen: false, nextShadowDone: shadowDone,
+    clearReopenPending: prior.reopenPending === true,
+  };
+  if (occurrenceAdvanced(prior, sourceItem, shadow)) {
+    const mode = recurringAdvance === 'drop' ? 'drop' : 'move';
+    // A plan on or after the new due was made for the NEXT occurrence and
+    // stands in both modes; only a plan for a day before the new due belongs
+    // to the occurrence that just finished.
+    const plannedBefore = !!(prior.plannedDay && prior.plannedDay < sourceItem.due);
+    return {
+      ...base,
+      advanced: true,
+      resetDoneLocal: true,
+      movePlan: mode === 'move' && plannedBefore ? { day: sourceItem.due, half: prior.plannedHalf || 'am' } : null,
+      clearPlan: mode === 'drop' && plannedBefore,
+      occurrence: {
+        due: shadow.due,
+        plannedDay: plannedBefore ? prior.plannedDay : null,
+        plannedHalf: plannedBefore ? (prior.plannedHalf || null) : null,
+      },
+      lastCompletedDue: shadow.due,
+      nextShadowDone: false,
+    };
+  }
+  // The caller only asks about items in the open set, so a pending reopen is
+  // confirmed by the fetch itself: the source is open, nothing to push.
+  const sourceDone = prior.reopenPending === true ? false : shadowDone;
+  const wantDone = !!prior.doneLocal;
+  const push = !!completeOnSource && wantDone !== sourceDone;
+  return { ...base, nextShadowDone: sourceDone, pushClose: push && wantDone, pushReopen: push && !wantDone };
+}
+
+// What unchecking a struck card means, given where the "done" came from.
+//   local-only     done_local flips; nothing else is involved
+//   push           the source closed it: reopen here now, tell the source
+//   refuse-local   the source closed it and nothing may reach the source:
+//                  say so, change nothing
+function reopenDecision({ statusDone, completeOnSource, synced }) {
+  if (!statusDone || !synced) return 'local-only';
+  return completeOnSource ? 'push' : 'refuse-local';
+}
+
+// Newest last, oldest dropped past the cap.
+const OCCURRENCE_CAP = 30;
+function appendOccurrence(list, occurrence, cap) {
+  const max = Number.isFinite(cap) && cap > 0 ? cap : OCCURRENCE_CAP;
+  const out = (Array.isArray(list) ? list : []).concat([occurrence]);
+  return out.length > max ? out.slice(out.length - max) : out;
+}
+
+// Finished occurrences as READ-ONLY board entries: one per recorded occurrence
+// that had a plan, on the day and half it was planned, struck. An occurrence
+// without a plan is history only and renders nothing. The tray never shows
+// these; the board renders them through renderCard with `ghost` set, which
+// disables the check, the drag and the menu. `path` is made distinct so lane
+// sequencing never confuses a ghost with its live card; `notePath` opens it.
+function ghostItemsFor(items) {
+  const out = [];
+  for (const it of items || []) {
+    (it.occurrences || []).forEach((occ, i) => {
+      if (!occ.plannedDay || !occ.plannedHalf) return;
+      out.push({
+        ...it,
+        ghost: true,
+        path: `${it.path}#occurrence-${i}`,
+        notePath: it.path,
+        due: occ.due || it.due,
+        plannedDay: occ.plannedDay,
+        plannedHalf: occ.plannedHalf,
+        plannedOrder: 0,
+        doneLocal: true,
+        status: 'done',
+        reopenPending: false,
+        weeklyGoal: false,
+        occurrences: [],
+      });
+    });
+  }
+  return out;
+}
+
+// Shadows are the memory of "what the source last agreed to" AND of "did we
+// already close or reopen this there". They now survive reconcile (a task
+// that left the open set keeps its shadow with done: true), so they are
+// pruned by two rules instead: no note carries the id any more, or the done
+// shadow is older than `maxDoneAgeMs`. Returns the keys to drop.
+const DONE_SHADOW_MAX_AGE_MS = 90 * 86400000;
+function pruneShadows(shadowMap, source, existingIds, openIds, nowMs, maxDoneAgeMs) {
+  const maxAge = Number.isFinite(maxDoneAgeMs) ? maxDoneAgeMs : DONE_SHADOW_MAX_AGE_MS;
+  const drop = [];
+  const prefix = `${source}:`;
+  for (const key of Object.keys(shadowMap || {})) {
+    if (!key.startsWith(prefix)) continue;
+    const id = key.slice(prefix.length);
+    const sh = shadowMap[key] || {};
+    if (!existingIds.has(id) && !openIds.has(id)) { drop.push(key); continue; }
+    if (sh.done === true && Number.isFinite(sh.doneAt) && nowMs - sh.doneAt > maxAge) drop.push(key);
+  }
+  return drop;
 }
 
 /* ========================================================================== *
@@ -2270,33 +2461,65 @@ class IcorPlannerPlugin extends Plugin {
           }
         }
       }
-      // completion state: retry a pending close/reopen at sync time too
-      nextShadow.done = shadow ? !!shadow.done : false;
-      if (s.completeOnSource && prior.doneLocal !== nextShadow.done) {
+      // Completion state, decided in one pure place (syncCompletionPlan): an
+      // occurrence advance resets the check and never pushes; otherwise a
+      // pending close / reopen is retried at sync time too.
+      const plan = syncCompletionPlan({
+        prior, sourceItem: t, shadow,
+        completeOnSource: !!s.completeOnSource,
+        recurringAdvance: s.recurringAdvance,
+      });
+      nextShadow.done = plan.nextShadowDone;
+      if (plan.pushClose || plan.pushReopen) {
         try {
-          await this.applyDoneOnSource(prior, prior.doneLocal);
-          nextShadow.done = prior.doneLocal;
+          await this.applyDoneOnSource(prior, plan.pushClose);
+          nextShadow.done = plan.pushClose;
         } catch (e) {
-          new Notice(`Planner: ${SOURCES[source].label} ${prior.doneLocal ? 'close' : 'reopen'} failed (${e.message}). Will retry.`);
+          new Notice(`Planner: ${SOURCES[source].label} ${plan.pushClose ? 'close' : 'reopen'} failed (${e.message}). Will retry.`);
         }
       }
+      if (nextShadow.done && shadow && shadow.doneAt) nextShadow.doneAt = shadow.doneAt;
       s._shadow[key] = nextShadow;
-      await this.updateItemFile(prior, t, finals, body);
+      await this.updateItemFile(prior, t, finals, body, plan);
     }
     // Reconcile: open file whose id vanished from the healthy open set -> done.
     // The decision runs over EVERY item in the vault, not a pre-filtered set,
     // so the "a source only reconciles its own items" rule is enforced by
     // reconcileStaleIds itself and is testable there. Manual items are never
     // returned, whatever their external_id looks like.
-    for (const [id] of existing) {
-      if (!openIds.has(id)) delete s._shadow[`${source}:${id}`];
-    }
+    //
+    // The shadow is KEPT, marked done: it is what lets an uncheck after this
+    // sync still reach the source. Pruning happens by pruneShadows below.
+    const nowMs = Date.now();
     for (const it of reconcileStaleIds(source, allItems, openIds)) {
+      const key = `${source}:${it.id}`;
+      s._shadow[key] = Object.assign({}, s._shadow[key] || {
+        due: it.due, priority: it.priority, description: '',
+      }, { done: true, doneAt: nowMs });
       await this.app.fileManager.processFrontMatter(it.file, (fm) => {
         fm.status = 'done';
         fm.done_at = new Date().toISOString();
         fm.synced_at = new Date().toISOString();
       });
+    }
+    // A reopen that has not reached the source yet (the push path failed, or
+    // the sync ran first): send it now. The flag is cleared only when the
+    // task is back in the open set (updateItemFile), never on the promise.
+    if (s.completeOnSource) {
+      for (const it of allItems) {
+        if (it.source !== source || openIds.has(it.id) || it.reopenPending !== true) continue;
+        const key = `${source}:${it.id}`;
+        if (s._shadow[key] && s._shadow[key].done === false) continue; // already sent
+        try {
+          await this.applyDoneOnSource(it, false);
+          s._shadow[key] = Object.assign({}, s._shadow[key] || { due: it.due, priority: it.priority, description: '' }, { done: false });
+        } catch (e) {
+          new Notice(`Planner: ${SOURCES[source].label} reopen failed (${e.message}). Will retry.`);
+        }
+      }
+    }
+    for (const key of pruneShadows(s._shadow, source, new Set(existing.keys()), openIds, nowMs)) {
+      delete s._shadow[key];
     }
   }
 
@@ -2353,9 +2576,12 @@ class IcorPlannerPlugin extends Plugin {
     if (!isSyncedSource(item.source)) return;
     const key = `${item.source}:${item.id}`;
     const sh = s._shadow[key];
-    if (!sh) return; // no baseline yet - the next sync seeds it
+    // No baseline yet: the next sync seeds it. A pending reopen is the one
+    // signal that must act without a shadow (older installs, or a note the
+    // AI team reopened by hand).
+    if (!sh && item.reopenPending !== true) return;
     let dirty = false;
-    if (s.pushEdits && canPushToSource(item.source)) {
+    if (sh && s.pushEdits && canPushToSource(item.source)) {
       const body = await this.readBody(file);
       const localVals = { due: item.due, priority: item.priority, description: body };
       const pushes = {};
@@ -2376,11 +2602,23 @@ class IcorPlannerPlugin extends Plugin {
         }
       }
     }
-    if (s.completeOnSource && canCompleteOnSource(item.source) && item.doneLocal !== !!sh.done) {
+    // A reopen the card asked for (uncheck on a source-closed task) acts even
+    // when the shadow already says done; the shadow's done flag drives the
+    // plain check / uncheck as before.
+    const wantReopen = item.reopenPending === true && !item.doneLocal;
+    const doneDiffers = sh ? item.doneLocal !== !!sh.done : false;
+    if (s.completeOnSource && canCompleteOnSource(item.source) && (wantReopen || doneDiffers)) {
       try {
         await this.applyDoneOnSource(item, item.doneLocal);
-        sh.done = item.doneLocal;
+        if (sh) {
+          sh.done = item.doneLocal;
+        } else {
+          s._shadow[key] = { due: item.due, priority: item.priority, description: await this.readBody(file), done: item.doneLocal };
+        }
         dirty = true;
+        if (wantReopen) {
+          await this.app.fileManager.processFrontMatter(file, (fm) => { delete fm.reopen_pending; });
+        }
       } catch (e) {
         new Notice(`Planner: ${item.doneLocal ? 'close' : 'reopen'} on ${SOURCES[item.source].label} failed (${e.message}). Will retry on sync.`);
       }
@@ -2410,6 +2648,8 @@ class IcorPlannerPlugin extends Plugin {
       `tags: ${JSON.stringify(t.tags || [])}`,
       `source_status: ${t.status ? JSON.stringify(t.status) : null}`,
       `list_id: ${t.listId ? JSON.stringify(String(t.listId)) : null}`,
+      `recurring: ${t.recurring == null ? null : !!t.recurring}`,
+      `due_string: ${t.dueString ? JSON.stringify(String(t.dueString)) : null}`,
       'planned_day: null',
       'planned_half: null',
       'planned_order: 0',
@@ -2430,17 +2670,27 @@ class IcorPlannerPlugin extends Plugin {
 
   // Applies the merge result: `finals` carries the settled two-way fields
   // (due / priority / description); source-owned metadata always pulls.
-  async updateItemFile(prior, t, finals, currentBody) {
+  // `plan` (optional) is the syncCompletionPlan result: the occurrence
+  // advance and the reopen confirmation are applied to the note here, in the
+  // same frontmatter write as the source pull.
+  async updateItemFile(prior, t, finals, currentBody, plan) {
     const wantDue = finals.due || null;
     const wantPriority = clampPriorityRank(finals.priority);
+    const wantRecurring = t.recurring == null ? null : !!t.recurring;
+    const wantDueString = t.dueString ? String(t.dueString) : null;
+    const ops = plan || {};
+    const hasOps = !!(ops.resetDoneLocal || ops.clearPlan || ops.movePlan || ops.occurrence || ops.clearReopenPending);
     const changed =
       prior.title !== t.title || prior.due !== wantDue ||
       prior.priority !== wantPriority || prior.url !== (t.url || null) ||
       prior.status === 'done' || // reopened at the source
+      prior.recurring !== wantRecurring || prior.dueString !== wantDueString ||
+      hasOps ||
       JSON.stringify(prior.tags) !== JSON.stringify(t.tags || []) ||
       prior.sourceStatus !== (t.status || null) ||
       prior.listId !== (t.listId ? String(t.listId) : null);
     if (changed) {
+      const nowIso = new Date().toISOString();
       await this.app.fileManager.processFrontMatter(prior.file, (fm) => {
         fm.title = t.title;
         fm.due = wantDue;
@@ -2449,8 +2699,30 @@ class IcorPlannerPlugin extends Plugin {
         fm.tags = t.tags || [];
         fm.source_status = t.status || null;
         if (t.listId) fm.list_id = String(t.listId);
+        fm.recurring = wantRecurring;
+        fm.due_string = wantDueString;
+        // Back in the open set: the source shows it open, whatever asked for it.
         if (fm.status === 'done') { fm.status = 'open'; delete fm.done_at; }
-        fm.synced_at = new Date().toISOString();
+        if (ops.clearReopenPending) delete fm.reopen_pending;
+        if (ops.resetDoneLocal) { fm.done_local = false; fm.status = 'open'; delete fm.done_at; }
+        if (ops.clearPlan) { fm.planned_day = null; fm.planned_half = null; fm.planned_order = 0; }
+        if (ops.movePlan) {
+          // Appended at the end of the lane: the tap-to-plan convention
+          // (order = wall-clock ms, past every hand order).
+          fm.planned_day = ops.movePlan.day;
+          fm.planned_half = ops.movePlan.half;
+          fm.planned_order = Date.now();
+        }
+        if (ops.occurrence) {
+          fm.occurrences = appendOccurrence(fm.occurrences, {
+            due: ops.occurrence.due,
+            planned_day: ops.occurrence.plannedDay,
+            planned_half: ops.occurrence.plannedHalf,
+            done_at: nowIso,
+          });
+          fm.last_completed_due = ops.lastCompletedDue;
+        }
+        fm.synced_at = nowIso;
       });
     }
     // Body follows the settled description, never blindly the source.
@@ -2487,11 +2759,33 @@ class IcorPlannerPlugin extends Plugin {
     });
   }
 
+  // The check toggles the EFFECTIVE done state (isDone), not the flag alone:
+  // a card the source closed reads as done, and unchecking it must reopen
+  // it, which before this only flipped done_local to true on a struck card.
   async toggleDoneLocal(path) {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
+    const item = itemFromFile(this.app, file);
+    if (!item) return;
+    if (!isDone(item)) {
+      await this.app.fileManager.processFrontMatter(file, (fm) => { fm.done_local = true; });
+      return;
+    }
+    const decision = reopenDecision({
+      statusDone: item.status === 'done',
+      completeOnSource: !!this.settings.completeOnSource,
+      synced: isSyncedSource(item.source),
+    });
+    if (decision === 'refuse-local') {
+      new Notice(`This task is closed in ${(SOURCES[item.source] || {}).label || item.source}. Turn on Complete on source to reopen it from here.`);
+      return;
+    }
     await this.app.fileManager.processFrontMatter(file, (fm) => {
-      fm.done_local = fm.done_local !== true;
+      fm.done_local = false;
+      if (fm.status === 'done') { fm.status = 'open'; delete fm.done_at; }
+      // Optimistic: the card un-strikes now; the push path sends the reopen
+      // and clears the flag; reconcile stands down while it is set.
+      if (decision === 'push') fm.reopen_pending = true;
     });
   }
 
@@ -2660,29 +2954,41 @@ function renderCard(plugin, item, mode, view) {
   card.setAttribute('data-path', item.path);
   card.setAttribute('data-order', String(item.plannedOrder));
   card.setAttribute('data-source', item.source);
-  card.draggable = true;
+  // A ghost is a finished occurrence of a recurring task (ghostItemsFor):
+  // struck, not draggable, no check action, no menu. It opens the note.
+  const ghost = item.ghost === true;
+  const notePath = item.notePath || item.path;
+  card.draggable = !ghost;
   if (isDone(item)) card.classList.add('is-done');
+  if (ghost) card.classList.add('is-ghost');
   if (item.weeklyGoal) card.classList.add('is-goal');
 
-  card.addEventListener('dragstart', (e) => {
-    e.dataTransfer.setData('text/plain', item.path);
-    e.dataTransfer.effectAllowed = 'move';
-    card.classList.add('is-dragging');
-    document.body.classList.add('iplan-dragging');
-  });
-  card.addEventListener('dragend', () => {
-    card.classList.remove('is-dragging');
-    document.body.classList.remove('iplan-dragging');
-    document.querySelectorAll('.iplan-drop-line').forEach((el) => el.remove());
-  });
+  if (!ghost) {
+    card.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', item.path);
+      e.dataTransfer.effectAllowed = 'move';
+      card.classList.add('is-dragging');
+      document.body.classList.add('iplan-dragging');
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('is-dragging');
+      document.body.classList.remove('iplan-dragging');
+      document.querySelectorAll('.iplan-drop-line').forEach((el) => el.remove());
+    });
+  }
 
   const check = document.createElement('button');
   check.className = 'iplan-check';
-  check.setAttribute('aria-label', isDone(item) ? 'Reopen' : 'Mark done');
-  check.addEventListener('click', (e) => {
-    e.preventDefault(); e.stopPropagation();
-    plugin.toggleDoneLocal(item.path);
-  });
+  if (ghost) {
+    check.disabled = true;
+    check.setAttribute('aria-label', 'Completed occurrence');
+  } else {
+    check.setAttribute('aria-label', isDone(item) ? 'Reopen' : 'Mark done');
+    check.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      plugin.toggleDoneLocal(item.path);
+    });
+  }
 
   const bodyEl = document.createElement('div');
   bodyEl.className = 'iplan-card-body';
@@ -2692,10 +2998,12 @@ function renderCard(plugin, item, mode, view) {
   const meta = document.createElement('div');
   meta.className = 'iplan-card-meta';
   meta.appendChild(sourceMarkEl(item.source));
-  const due = dueChipText(item, today);
+  // A ghost's due is a date that has passed by design; "3D OVER" would be a
+  // lie about a finished occurrence, so it shows the date, neutrally.
+  const due = ghost ? (item.due ? fmtDayNum(item.due) : null) : dueChipText(item, today);
   if (due) {
     const chip = document.createElement('span');
-    chip.className = `iplan-chip iplan-due-${dueBucketOf(item.due, today)}`;
+    chip.className = ghost ? 'iplan-chip' : `iplan-chip iplan-due-${dueBucketOf(item.due, today)}`;
     chip.textContent = due;
     meta.appendChild(chip);
   }
@@ -2720,9 +3028,10 @@ function renderCard(plugin, item, mode, view) {
   // Click opens the local note; the source link lives in the context menu.
   card.addEventListener('click', (e) => {
     if (e.defaultPrevented) return;
-    const file = plugin.app.vault.getAbstractFileByPath(item.path);
+    const file = plugin.app.vault.getAbstractFileByPath(notePath);
     if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
   });
+  if (ghost) return card;
   card.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showCardMenu(plugin, item, view, { x: e.clientX, y: e.clientY });
@@ -2805,7 +3114,10 @@ function showPlanMenu(plugin, item, view, pos) {
 // are never draggable; they only take part as positions.
 function wireDropLane(laneEl, onDrop) {
   const clearLine = () => laneEl.querySelectorAll('.iplan-drop-line').forEach((el) => el.remove());
-  const cardsOf = () => Array.from(laneEl.querySelectorAll('.iplan-event, .iplan-card:not(.is-dragging)'));
+  // Ghost cards (finished occurrences) sit after the live sequence and take
+  // no part in it, so they are excluded here exactly as they are excluded
+  // from the sequence the drop handler ranks over.
+  const cardsOf = () => Array.from(laneEl.querySelectorAll('.iplan-event, .iplan-card:not(.is-dragging):not(.is-ghost)'));
   const indexForY = (y) => {
     const cards = cardsOf();
     for (let i = 0; i < cards.length; i++) {
@@ -3093,6 +3405,15 @@ class PlannerBoardView extends ItemView {
       itemsByCell.get(key).push(it);
     }
     for (const list of itemsByCell.values()) list.sort((a, b) => a.plannedOrder - b.plannedOrder);
+    // Finished occurrences of recurring tasks, rendered after the live
+    // sequence of their lane, read-only.
+    const ghostsByCell = new Map();
+    for (const g of ghostItemsFor(items)) {
+      const key = `${g.plannedDay}|${g.plannedHalf}`;
+      if (!ghostsByCell.has(key)) ghostsByCell.set(key, []);
+      ghostsByCell.get(key).push(g);
+    }
+    for (const list of ghostsByCell.values()) list.sort((a, b) => String(a.due || '').localeCompare(String(b.due || '')));
 
     const eventsByCell = new Map();
     const allDayByDay = new Map();
@@ -3158,7 +3479,9 @@ class PlannerBoardView extends ItemView {
             lane.appendChild(renderCard(this.plugin, entry.it, 'board', this));
           }
         }
-        if (!laneEvents.length && !cell.length) lane.createDiv({ cls: 'iplan-lane-empty', text: half === 'am' ? 'morning' : 'afternoon' });
+        const ghosts = ghostsByCell.get(`${day}|${half}`) || [];
+        for (const g of ghosts) lane.appendChild(renderCard(this.plugin, g, 'board', this));
+        if (!laneEvents.length && !cell.length && !ghosts.length) lane.createDiv({ cls: 'iplan-lane-empty', text: half === 'am' ? 'morning' : 'afternoon' });
 
         wireDropLane(lane, (path, index) => {
           // Same mixed sequence the lane was rendered from, minus the dragged
@@ -3924,9 +4247,20 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Two-way sync').setHeading();
     new Setting(containerEl)
       .setName('Complete on source')
-      .setDesc('Checking a card here also closes the task in Todoist / ClickUp and unstars the email. Unchecking reopens or re-stars it. Off = completing stays local to this vault.')
+      .setDesc('Checking a card here also closes the task in Todoist / ClickUp and unstars the email. Unchecking reopens or re-stars it, also after a sync has confirmed the close. Off = completing stays local to this vault: a task the source closed cannot be reopened from here, and a checked recurring task stays struck until it is completed in the source app.')
       .addToggle((t) => t.setValue(this.plugin.settings.completeOnSource)
         .onChange(async (v) => { this.plugin.settings.completeOnSource = v; await this.plugin.saveSettings(); }));
+    new Setting(containerEl)
+      .setName('When a recurring task moves to its next date')
+      .setDesc('A recurring task keeps one card. When its due date moves on (completed here or in the source app) the check clears and the card reopens; this decides where it lands. The finished occurrence stays on the day it was planned, struck through.')
+      .addDropdown((d) => d
+        .addOption('move', 'Move the card to the new date (default)')
+        .addOption('drop', 'Send the card back to the tray')
+        .setValue(this.plugin.settings.recurringAdvance === 'drop' ? 'drop' : 'move')
+        .onChange(async (v) => {
+          this.plugin.settings.recurringAdvance = v === 'drop' ? 'drop' : 'move';
+          await this.plugin.saveSettings();
+        }));
     new Setting(containerEl)
       .setName('Push edits to source')
       .setDesc('Due date, priority and description edits in the note flow back to Todoist and ClickUp. Only fields you changed since the last sync are pushed; if both sides changed, the source wins.')
@@ -3967,6 +4301,8 @@ module.exports.__test = {
   SYNCED_SOURCES, TASK_SOURCES, MANUAL_SOURCE,
   manualExternalId, manualItemFrontmatter, reconcileStaleIds,
   itemFromFrontmatter, clampPriorityRank, safeBasename,
+  syncCompletionPlan, occurrenceAdvanced, reopenDecision, appendOccurrence,
+  ghostItemsFor, pruneShadows, normalizeOccurrences, OCCURRENCE_CAP, DONE_SHADOW_MAX_AGE_MS,
   agendaSections, laneSequence, TRAY_TABS,
   todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
   SOURCES, DEFAULT_SETTINGS, PLANNER_FOLDER,
