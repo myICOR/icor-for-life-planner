@@ -292,6 +292,11 @@ body.iplan-dragging .iplan-lane-empty { visibility: hidden; }
 .iplan-card.is-ghost { opacity: 0.5; cursor: default; }
 .iplan-card.is-ghost button.iplan-check { cursor: default; }
 
+/* the second line of a failed-source note: what to do about it */
+.iplan-tray-note-hint { margin-top: 4px; color: var(--iplan-dim); }
+.iplan-tray-note-hint a { color: var(--iplan-marker); text-decoration: none; }
+.iplan-tray-note-hint a:hover { text-decoration: underline; }
+
 .iplan-root button.iplan-check, .iplan-tray-root button.iplan-check {
   all: unset;
   cursor: pointer;

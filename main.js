@@ -679,9 +679,10 @@ function clampPriorityRank(n) {
 // `hint` (optional) is the second line a failure may carry: what to DO about
 // it, when the classifier knows. `warning` (optional) rides a HEALTHY result
 // whose data is complete but deserves one line on the board.
-function degraded(source, reason, message, hint) {
+function degraded(source, reason, message, hint, docUrl) {
   const out = { ok: false, source, reason, message, items: [] };
   if (hint) out.hint = hint;
+  if (docUrl) out.docUrl = docUrl;
   return out;
 }
 function okResult(source, items, warning) {
@@ -998,12 +999,142 @@ function imapQuote(s) {
   return '"' + String(s).replace(/([\\"])/g, '\\$1') + '"';
 }
 
+/* ---- IMAP failure classification (2026-09-04) ------------------------------
+ *
+ * "IMAP login failed" was the whole story for four different failures: bad
+ * credentials, credentials fine but the provider wants an APP password,
+ * a certificate problem, and a network problem. Gmail literally answers
+ * "NO [ALERT] Application-specific password required: <url>", and that text
+ * was thrown away. Now the server's tagged reply and the stage ride the
+ * Error, a pure classifier names the failure, and the provider table adds
+ * the one sentence that unblocks the common case.
+ */
+
+// Host -> provider. `hint` is what to do; `appPasswordUrl` is where. Only
+// URLs verified against the provider's own pages are linked; the rest name
+// the path inside the app in words.
+const IMAP_PROVIDERS = [
+  {
+    id: 'gmail', label: 'Gmail', test: /gmail|googlemail/i,
+    appPasswordUrl: 'https://myaccount.google.com/apppasswords',
+    hint: 'Gmail needs an app password, not your account password. Turn on 2-step verification, then create one at myaccount.google.com/apppasswords.',
+  },
+  {
+    id: 'icloud', label: 'iCloud', test: /imap\.mail\.me\.com|icloud|mac\.com|me\.com/i,
+    appPasswordUrl: 'https://account.apple.com/account/manage',
+    hint: 'iCloud needs an app-specific password, not your Apple Account password. Create one at account.apple.com under Sign-In and Security, App-Specific Passwords.',
+  },
+  {
+    id: 'outlook', label: 'Outlook / Microsoft 365', test: /outlook|office365|office\.com|hotmail|live\.com/i,
+    appPasswordUrl: null,
+    hint: 'Microsoft retired password sign-in for IMAP, so Outlook and Microsoft 365 mailboxes cannot connect here yet; they need OAuth, which is on the way. Todoist, ClickUp and the calendar still sync.',
+  },
+  {
+    id: 'fastmail', label: 'Fastmail', test: /fastmail/i,
+    appPasswordUrl: null,
+    hint: 'Fastmail needs an app password: Settings, Privacy & Security, Integrations, then New app password.',
+  },
+  {
+    id: 'gmx', label: 'GMX', test: /gmx\./i,
+    appPasswordUrl: null,
+    hint: 'GMX: turn on IMAP in the webmail settings first (E-Mail, Einstellungen, POP3/IMAP Abruf).',
+  },
+  {
+    id: 'webde', label: 'web.de', test: /web\.de/i,
+    appPasswordUrl: null,
+    hint: 'web.de: turn on IMAP in the webmail settings first (E-Mail, Einstellungen, POP3/IMAP).',
+  },
+  {
+    id: 'yahoo', label: 'Yahoo', test: /yahoo|ymail/i,
+    appPasswordUrl: null,
+    hint: 'Yahoo needs an app password: Account Info, Account Security, Generate app password.',
+  },
+];
+const IMAP_GENERIC_PROVIDER = { id: 'generic', label: 'IMAP', appPasswordUrl: null, hint: null };
+
+function imapProviderOf(host) {
+  const h = String(host == null ? '' : host).trim();
+  if (!h) return IMAP_GENERIC_PROVIDER;
+  for (const p of IMAP_PROVIDERS) {
+    if (p.test.test(h)) return { id: p.id, label: p.label, appPasswordUrl: p.appPasswordUrl, hint: p.hint };
+  }
+  return IMAP_GENERIC_PROVIDER;
+}
+
+const TLS_ERROR_CODES = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+]);
+
+// err -> { reason, message, hint, docUrl }. Reasons: auth, auth-app-password,
+// auth-oauth-required, tls, dns, refused, timeout, protocol, unsupported.
+// Pure: reads err.message / err.code / err.stage / err.serverText and the
+// host, touches nothing else.
+function classifyImapError(err, host) {
+  const e = err || {};
+  const msg = String(e.message || '');
+  const code = String(e.code || '');
+  const serverText = String(e.serverText || '');
+  const provider = imapProviderOf(host);
+  const out = (reason, message, hint, docUrl) => ({ reason, message, hint: hint || null, docUrl: docUrl || null });
+  if (/tls unavailable/i.test(msg)) {
+    return out('unsupported', 'Starred email needs the desktop app (IMAP). Todoist, ClickUp and Calendar still sync here.');
+  }
+  if (provider.id === 'outlook') {
+    return out('auth-oauth-required', 'Outlook / Microsoft 365 cannot sign in with a password over IMAP.', provider.hint);
+  }
+  if (e.stage === 'login' || /^auth$/i.test(msg)) {
+    if (/app(lication)?[- ]specific password|app password/i.test(serverText)) {
+      const urlInReply = (/https?:\/\/\S+/.exec(serverText) || [null])[0];
+      return out('auth-app-password',
+        `IMAP login failed: ${provider.label} wants an app password, not your account password.`,
+        provider.hint || 'Create an app password in your mail provider\'s security settings and paste it here instead of your normal password.',
+        provider.appPasswordUrl || urlInReply);
+    }
+    if (/AUTHENTICATE|OAuth/i.test(serverText)) {
+      return out('auth-oauth-required', 'IMAP login failed: this mailbox wants OAuth sign-in, which this version cannot do.', provider.hint);
+    }
+    return out('auth', 'IMAP login failed. Check the address and the app password.', provider.hint, provider.appPasswordUrl);
+  }
+  if (TLS_ERROR_CODES.has(code) || /certificate|self.signed/i.test(msg)) {
+    return out('tls', 'The IMAP host presented a certificate this app does not trust.',
+      'A self-signed or expired certificate, or a host name that does not match it. Check the host name; a company or local mail server may need its certificate installed on this machine.');
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return out('dns', 'IMAP host not found.', 'Check the host name for typos.');
+  }
+  if (code === 'ECONNREFUSED' || /server refused/i.test(msg)) {
+    return out('refused', 'IMAP host refused the connection.', 'Check that the host accepts IMAP on port 993.');
+  }
+  if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
+    return out('timeout', 'IMAP host did not answer in time.', 'Check the network, then the host name.');
+  }
+  return out('protocol', `IMAP host answered unexpectedly${serverText ? ` (${serverText.slice(0, 80)})` : ''}.`);
+}
+
+// The one place a mailbox socket is opened, for both sessions. `deps.connect`
+// lets a test script the transport (or prove no socket was opened at all);
+// the default is implicit TLS on 993. Throws 'tls unavailable' on mobile.
+function imapConnect(host, deps) {
+  if (deps && typeof deps.connect === 'function') return deps.connect({ host, port: 993, servername: host });
+  let tls;
+  try { tls = require('tls'); } catch { throw new Error('tls unavailable'); }
+  return tls.connect({ host, port: 993, servername: host });
+}
+
+// A tagged non-OK reply as an Error that keeps what the server said and
+// where in the session it said it; the classifier reads both.
+function imapReplyError(stage, statusLine) {
+  return Object.assign(new Error(stage === 'login' ? 'auth' : `imap ${stage} failed`), {
+    stage, serverText: String(statusLine || ''),
+  });
+}
+
 // One short read-only IMAP session. Returns normalized task items.
-function imapFetchStarredRaw(host, user, pass, maxItems) {
+function imapFetchStarredRaw(host, user, pass, maxItems, deps) {
   return new Promise((resolve, reject) => {
-    let tls;
-    try { tls = require('tls'); } catch { return reject(new Error('tls unavailable')); }
-    const socket = tls.connect({ host, port: 993, servername: host });
+    let socket;
+    try { socket = imapConnect(host, deps); } catch (e) { return reject(e); }
     let buffer = '';
     let stage = 'greeting';
     let tagN = 0;
@@ -1023,10 +1154,7 @@ function imapFetchStarredRaw(host, user, pass, maxItems) {
 
     const step = (statusLine) => {
       const okTagged = statusLine.startsWith(`${pendingTag} OK`);
-      if (!okTagged) {
-        const authFail = stage === 'login';
-        return fail(new Error(authFail ? 'auth' : `imap ${stage} failed`));
-      }
+      if (!okTagged) return fail(imapReplyError(stage, statusLine));
       if (stage === 'login') {
         stage = 'examine';
         send('EXAMINE INBOX');
@@ -1113,35 +1241,41 @@ function imapFetchStarredRaw(host, user, pass, maxItems) {
   });
 }
 
-async function emailFetchStarred(settings) {
+// Classifier reason -> connector reason (the contract the UI renders).
+function imapReasonToConnector(reason) {
+  if (reason === 'unsupported') return 'unsupported';
+  if (/^auth/.test(reason)) return 'misconfigured';
+  return 'unreachable';
+}
+
+async function emailFetchStarred(settings, deps) {
   const host = (settings.imapHost || '').trim();
   const user = (settings.imapUser || '').trim();
   const pass = (settings.imapPassword || '').trim();
   if (!host || !user || !pass) {
     return degraded('email', 'no-token', 'Starred email is not connected (host, address or app password missing).');
   }
+  // A host that can never accept a password is answered before any socket
+  // opens: the failure is known, and a 20 s timeout teaches nothing.
+  if (imapProviderOf(host).id === 'outlook') {
+    const c = classifyImapError({ message: 'auth', stage: 'login' }, host);
+    return degraded('email', 'misconfigured', c.message, c.hint, c.docUrl);
+  }
   try {
-    const items = await imapFetchStarredRaw(host, user, pass, 50);
+    const items = await imapFetchStarredRaw(host, user, pass, 50, deps);
     return okResult('email', items);
   } catch (e) {
-    const msg = (e && e.message) || '';
-    if (/tls unavailable/i.test(msg)) {
-      return degraded('email', 'unsupported',
-        'Starred email needs the desktop app (IMAP). Todoist, ClickUp and Calendar still sync here.');
-    }
-    const auth = /auth|login|credential/i.test(msg);
-    return degraded('email', auth ? 'misconfigured' : 'unreachable',
-      auth ? 'IMAP login failed. Check the address and the app password.' : 'IMAP host unreachable.');
+    const c = classifyImapError(e, host);
+    return degraded('email', imapReasonToConnector(c.reason), c.message, c.hint, c.docUrl);
   }
 }
 
 // Set or clear \Flagged on one message. The ONLY write the mailbox ever
 // sees, armed by completeOnSource. SELECT (not EXAMINE) + UID STORE.
-function imapSetStarredRaw(host, user, pass, uid, starred) {
+function imapSetStarredRaw(host, user, pass, uid, starred, deps) {
   return new Promise((resolve, reject) => {
-    let tls;
-    try { tls = require('tls'); } catch { return reject(new Error('tls unavailable')); }
-    const socket = tls.connect({ host, port: 993, servername: host });
+    let socket;
+    try { socket = imapConnect(host, deps); } catch (e) { return reject(e); }
     let buffer = '';
     let stage = 'greeting';
     let tagN = 0;
@@ -1163,9 +1297,7 @@ function imapSetStarredRaw(host, user, pass, uid, starred) {
           continue;
         }
         if (pendingTag && entry.startsWith(`${pendingTag} `)) {
-          if (!entry.startsWith(`${pendingTag} OK`)) {
-            return fail(new Error(stage === 'login' ? 'auth' : `imap ${stage} failed`));
-          }
+          if (!entry.startsWith(`${pendingTag} OK`)) return fail(imapReplyError(stage, entry));
           if (stage === 'login') { stage = 'select'; send('SELECT INBOX'); }
           else if (stage === 'select') {
             stage = 'store';
@@ -2390,9 +2522,16 @@ class IcorPlannerPlugin extends Plugin {
         const result = await promise;
         this.syncStatus[source] = {
           ok: result.ok, reason: result.reason || null, message: result.message || null,
+          hint: result.hint || null, docUrl: result.docUrl || null,
           count: result.items.length, at: new Date().toISOString(),
         };
         if (result.ok) await this.upsertSource(source, result.items);
+      }
+      // A sync the user pressed for, with the mailbox misconfigured: say what
+      // went wrong and what to do about it, once, here, not only in the tray.
+      if (manual && this.syncStatus.email && this.syncStatus.email.reason === 'misconfigured') {
+        const st = this.syncStatus.email;
+        new Notice(`Email: ${st.message}${st.hint ? `\n${st.hint}` : ''}`, 12000);
       }
       // Calendar: no per-event notes; a healthy fetch replaces the defs,
       // clears the stale look and rewrites the ONE cache file. A failed fetch
@@ -3366,7 +3505,9 @@ class PlannerBoardView extends ItemView {
     const notices = [];
     for (const key of ['todoist', 'clickup', 'email']) {
       const st = this.plugin.syncStatus[key];
-      if (st && !st.ok && st.reason !== 'no-token') notices.push(`${SOURCES[key].label}: ${st.message}`);
+      if (st && !st.ok && st.reason !== 'no-token') {
+        notices.push(`${SOURCES[key].label}: ${st.message}${st.hint ? ` ${st.hint}` : ''}`);
+      }
     }
     if (this.plugin.calendarStatus && !this.plugin.calendarStatus.ok &&
         this.plugin.calendarStatus.reason !== 'no-token') {
@@ -3661,7 +3802,11 @@ function trayEmptyState(source, configured, status, count, total) {
   // A configured source reporting no-token means settings and the connector
   // disagree; trust the connector's message rather than inventing one.
   if (status && !status.ok) {
-    return { kind: 'error', text: status.message || TRAY_COPY.errorFallback };
+    // `hint` is the second line: what to do. `docUrl` is where.
+    return {
+      kind: 'error', text: status.message || TRAY_COPY.errorFallback,
+      hint: status.hint || null, docUrl: status.docUrl || null,
+    };
   }
   if (!status) return count > 0 ? null : { kind: 'unsynced', text: TRAY_COPY.unsynced };
   return count > 0 ? null : { kind: 'empty', text: TRAY_COPY.empty };
@@ -4089,7 +4234,15 @@ class PlannerTrayView extends ItemView {
         });
         connect.addEventListener('click', () => this.plugin.openPluginSettings());
       } else if (state) {
-        body.createDiv({ cls: 'iplan-tray-note', text: state.text });
+        const note = body.createDiv({ cls: 'iplan-tray-note', text: state.text });
+        if (state.hint) {
+          const hintEl = note.createDiv({ cls: 'iplan-tray-note-hint', text: state.hint });
+          if (state.docUrl) {
+            hintEl.appendText(' ');
+            const a = hintEl.createEl('a', { text: 'Open', href: state.docUrl });
+            a.addEventListener('click', (e) => { e.preventDefault(); window.open(state.docUrl, '_external'); });
+          }
+        }
       }
       for (const it of list) body.appendChild(renderCard(this.plugin, it, 'tray', this));
     }
@@ -4166,10 +4319,28 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       ' (host imap.mail.me.com).');
     li('Fastmail: Settings, Privacy & Security, app passwords (host imap.fastmail.com).', null, null, null);
     li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here.', null, null, null);
-    new Setting(containerEl)
-      .setName('IMAP host')
-      .addText((t) => t.setValue(this.plugin.settings.imapHost)
-        .onChange(async (v) => { this.plugin.settings.imapHost = v.trim(); await this.plugin.saveSettings(); }));
+    // The host decides the provider, and the provider decides the one
+    // sentence that unblocks most first attempts. It re-renders as the host
+    // is typed, so the advice is never about a host the field no longer says.
+    const hostSetting = new Setting(containerEl).setName('IMAP host');
+    const renderHostHint = (host) => {
+      const p = imapProviderOf(host);
+      hostSetting.descEl.empty();
+      if (!p.hint) return;
+      hostSetting.descEl.appendText(p.hint);
+      if (p.appPasswordUrl) {
+        hostSetting.descEl.appendText(' ');
+        const a = hostSetting.descEl.createEl('a', { text: 'Open', href: p.appPasswordUrl });
+        a.addEventListener('click', (e) => { e.preventDefault(); window.open(p.appPasswordUrl, '_external'); });
+      }
+    };
+    hostSetting.addText((t) => t.setValue(this.plugin.settings.imapHost)
+      .onChange(async (v) => {
+        this.plugin.settings.imapHost = v.trim();
+        renderHostHint(v);
+        await this.plugin.saveSettings();
+      }));
+    renderHostHint(this.plugin.settings.imapHost);
     new Setting(containerEl)
       .setName('Email address')
       .addText((t) => t.setValue(this.plugin.settings.imapUser)
@@ -4283,6 +4454,7 @@ module.exports.__test = {
   mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel,
   decodeRfc2047, icsUnescape,
   todoistPriorityRank, imapSplitResponses, imapQuote,
+  imapProviderOf, classifyImapError, imapReplyError, imapReasonToConnector, imapConnect, IMAP_PROVIDERS,
   parseIcs, icsParseDate, expandOccurrences, icsEventsForWeek,
   googleCalendarEventUrl,
   serializeCalendarDefs, reviveCalendarDefs,
