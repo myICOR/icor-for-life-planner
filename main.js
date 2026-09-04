@@ -41,7 +41,8 @@ const PLANNER_FOLDER = '02 Planner';
 const CALENDAR_CACHE_FILE = PLANNER_FOLDER + '/Calendar Events.md';
 const BOARD_VIEW_TYPE = 'icor-for-life-planner-board';
 const TRAY_VIEW_TYPE = 'icor-for-life-planner-tray';
-const PLUGIN_VERSION = '0.7.1';
+// The version lives in manifest.json only (this.manifest.version at runtime).
+// A second copy here drifted one release behind and nothing read it.
 const DATA_JSON_GITIGNORE_LINE = '.obsidian/plugins/icor-for-life-planner/data.json';
 
 // Source registry. Folder is the subfolder of PLANNER_FOLDER the items land in.
@@ -135,7 +136,6 @@ const DEFAULT_SETTINGS = {
   lunchEnd: '13:30',
   dayStart: '08:00',
   dayEnd: '18:00',
-  includeDatelessTasks: true,
   // two-way sync (v0.2.0). completeOnSource is the user's explicit arm switch:
   // checking a card also closes the task at the source / unstars the mail.
   completeOnSource: false,

@@ -9,7 +9,11 @@ week is decided.
 
 **Beta release.** This plugin works and is in daily use in a real vault,
 but you will find rough edges. If something looks off, open an issue on
-this repo and it gets fixed fast.
+this repo, or post in the ICOR for Life community: the
+[planner channel](https://app.myicor.com/icor-for-life?channel=planner)
+for questions and ideas, the
+[bug-reports channel](https://app.myicor.com/icor-for-life?channel=bug-reports)
+for defects. It gets fixed fast.
 
 ## What it does
 
