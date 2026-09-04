@@ -1220,3 +1220,117 @@ ul.iplan-settings-list li { margin: 3px 0; }
 @media (any-pointer: coarse) {
   .iplan-root button.iplan-card-sub-toggle, .iplan-tray-root button.iplan-card-sub-toggle { min-height: 44px; }
 }
+
+/* ----------------------------------------------------------- habits ---- */
+/* The all-day block under the afternoon lane: not a lane and not a card. A
+ * hairline above it closes the lanes; the head is the day-head voice with
+ * the count on the right; the rows are the shared checklist, so a habit
+ * check reads as the same object as a task check and a routine step. */
+.iplan-habits {
+  margin-top: 2px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid var(--iplan-hairline);
+}
+.iplan-habits-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  font-size: 10px;
+  color: var(--iplan-dim);
+  padding: 0 2px 4px;
+}
+.iplan-habits-count {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--iplan-faint);
+}
+.iplan-habits .iplan-checklist { margin-top: 0; }
+/* A day still ahead: the head takes the quiet ink too, a token step; the
+ * rows say it through aria-disabled (the disabled-row rule above). */
+.iplan-habits.is-future .iplan-habits-head { color: var(--iplan-faint); }
+.iplan-board.is-day .iplan-habits { padding: 12px 6px 4px; }
+.iplan-board.is-day .iplan-habits-head { font-size: 12px; padding-bottom: 8px; }
+.iplan-board.is-day .iplan-habits-count { font-size: 11px; }
+
+/* ------------------------------------------- HABITS tab (the tray) ---- */
+/* One row per habit: the name (a button that opens the note), the cadence
+ * or the reason it takes no edit, then the seven toggles filling the row.
+ * A greyed row is the dim ink as a token step, never an opacity dial. */
+.iplan-habit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--iplan-hairline-subtle);
+}
+.iplan-habit-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.iplan-tray-root button.iplan-habit-name {
+  all: unset;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  font-family: var(--iplan-display);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--iplan-paper);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 4px;
+}
+.iplan-tray-root button.iplan-habit-name:hover { color: var(--iplan-marker); }
+.iplan-tray-root button.iplan-habit-name:focus-visible { box-shadow: 0 0 0 1px var(--iplan-marker); }
+.iplan-habit-row.is-quiet button.iplan-habit-name { color: var(--iplan-dim); }
+.iplan-tray-root .iplan-weekdays {
+  display: flex;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+.iplan-tray-root .iplan-weekdays button.iplan-seg-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 0;
+  text-align: center;
+}
+/* A row that takes no edit (paused, monthly): reachable, inert, dim. */
+.iplan-weekdays[aria-disabled="true"] button.iplan-seg-btn { cursor: default; color: var(--iplan-dim); }
+.iplan-weekdays[aria-disabled="true"] button.iplan-seg-btn:hover { color: var(--iplan-dim); }
+.iplan-weekdays[aria-disabled="true"] button.iplan-seg-btn.is-active {
+  background: transparent;
+  color: var(--iplan-dim);
+  box-shadow: inset 0 0 0 1px var(--iplan-hairline);
+}
+
+/* --------------------------------------------- the collapsible tab ---- */
+/* Four labels do not fit a 250px sidebar (measured: about 227px of strip
+ * against 230px of tray width), so the HABITS tab carries a glyph and shows
+ * only the glyph while the tray is narrower than 300px. The button's
+ * aria-label names it either way. The tray is a container for this one
+ * query; its width is the sidebar's, so nothing else changes. */
+.iplan-tray-root {
+  container-type: inline-size;
+  container-name: iplan-tray;
+}
+.iplan-tray-tabs .iplan-tab-icon { display: none; }
+.iplan-tray-tabs .iplan-tab-icon svg { width: 11px; height: 11px; }
+@container iplan-tray (max-width: 299px) {
+  .iplan-tray-tabs .is-collapsible .iplan-tab-text { display: none; }
+  .iplan-tray-tabs .is-collapsible .iplan-tab-icon { display: inline-flex; }
+}
+
+/* ----------------------------------------------- coarse pointer (c) ---- */
+@media (any-pointer: coarse) {
+  .iplan-tray-root .iplan-weekdays button.iplan-seg-btn { min-height: 44px; }
+  .iplan-tray-root button.iplan-habit-name { min-height: 44px; }
+}

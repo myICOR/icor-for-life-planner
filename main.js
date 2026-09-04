@@ -240,6 +240,13 @@ const DEFAULT_SETTINGS = {
   // subtaskChecklist draws the "n of m subtasks" row on a parent card.
   clickupIncludeSubtasks: false,
   subtaskChecklist: true,
+  // Habits (2026-09-04): the vault's Habits room, read for the all-day block
+  // under each day and written for the check-in row in the note body. The
+  // folder is the scaffold's; a moved room is one setting away, validated
+  // the same way as the planner folder.
+  habitsEnabled: true,
+  habitsFolder: '04 Inner World/My Life/Habits',
+  habitStreaks: true,
 };
 
 const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
@@ -256,15 +263,28 @@ const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
 // Validates a typed folder. Pure. Trims, strips surrounding slashes,
 // collapses repeated ones; refuses empty, anything under .obsidian, and any
-// '.' or '..' segment. Returns { ok, folder, error }.
-function normalizePlannerFolder(raw) {
+// '.' or '..' segment. Returns { ok, folder, error }. `what` names the
+// folder in the sentence (the planner room, the habits room).
+function normalizeVaultFolder(raw, what) {
+  const label = what || 'planner';
   let f = String(raw == null ? '' : raw).trim().replace(/\\/g, '/');
   f = f.replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
   f = normalizePath(f);
-  if (!f) return { ok: false, folder: null, error: 'The planner folder cannot be empty.' };
-  if (/^\.obsidian(\/|$)/i.test(f)) return { ok: false, folder: null, error: 'The planner folder cannot live inside .obsidian.' };
-  if (f.split('/').some((seg) => seg === '.' || seg === '..')) return { ok: false, folder: null, error: 'The planner folder cannot contain "." or ".." segments.' };
+  if (!f) return { ok: false, folder: null, error: `The ${label} folder cannot be empty.` };
+  if (/^\.obsidian(\/|$)/i.test(f)) return { ok: false, folder: null, error: `The ${label} folder cannot live inside .obsidian.` };
+  if (f.split('/').some((seg) => seg === '.' || seg === '..')) return { ok: false, folder: null, error: `The ${label} folder cannot contain "." or ".." segments.` };
   return { ok: true, folder: f, error: null };
+}
+function normalizePlannerFolder(raw) { return normalizeVaultFolder(raw, 'planner'); }
+function normalizeHabitsFolder(raw) { return normalizeVaultFolder(raw, 'habits'); }
+// The habits room, off the setting; an invalid or missing value is the default.
+function habitsFolderOf(settings) {
+  const n = normalizeHabitsFolder(settings && settings.habitsFolder);
+  return n.ok ? n.folder : DEFAULT_SETTINGS.habitsFolder;
+}
+// A folder boundary, not a prefix, same as plannerPaths().isInside.
+function habitPathInside(settings, path) {
+  return typeof path === 'string' && path.startsWith(`${habitsFolderOf(settings)}/`);
 }
 
 // Every path the plugin reads or writes, derived from the one setting. Pure.
@@ -3535,6 +3555,184 @@ function routineTemplate(name, type, weekdays, defaults, opts) {
 }
 
 /* ========================================================================== *
+ * Habits (2026-09-04)
+ *
+ * A habit is one yes or no per day, defined in the vault's Habits room by
+ * the person (and their coach), and it is the record the AI team asks about
+ * at boot and close. The planner reads that room and puts an all-day block
+ * under each day a habit is scheduled for; checking a row writes the same
+ * table row an agent writes in chat, so the two paths are one record.
+ *
+ * Two note shapes are read and one is written. The scaffold's example is
+ * `type: habit` plus `cadence`; the lived vault's notes carry `name`,
+ * `cadence`, `cadence_days`, `status` and `started_on` and no type at all,
+ * the folder being the identity. Identity here is therefore folder
+ * membership plus either mark. The check-in is a body table under the
+ * habit-log sentinel (schema=streak: date, marker, note; schema=process:
+ * date, marker, trigger), newest on top, streaks computed and never
+ * stored. A check-in never writes frontmatter; the HABITS tab writes
+ * `cadence` and `cadence_days` and nothing else.
+ * ========================================================================== */
+
+const HABIT_LOG_SENTINEL = 'habit-log';
+const HABIT_LOG_SECTION = { heading: '## Daily log', schema: 'streak', header: ['Date', 'Y/N', 'Note'] };
+const HABIT_CADENCES = ['daily', 'weekdays', 'weekly', 'monthly', 'adhoc'];
+const HABIT_STATUSES = ['active', 'paused', 'abandoned'];
+const HABIT_SKIP_NAMES = /^(index|readme)$/i;
+
+// 'weekday' (one live note) reads as 'weekdays'; anything unknown is adhoc.
+function normalizeCadence(raw) {
+  const c = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (c === 'weekday') return 'weekdays';
+  return HABIT_CADENCES.includes(c) ? c : 'adhoc';
+}
+function habitStatusOf(raw) {
+  const s = String(raw == null ? '' : raw).trim().toLowerCase();
+  return HABIT_STATUSES.includes(s) ? s : 'active';
+}
+// Folder membership plus either mark: the scaffold's type, or a cadence.
+function isHabitFrontmatter(fm) {
+  return !!fm && typeof fm === 'object'
+    && (String(fm.type == null ? '' : fm.type).trim().toLowerCase() === 'habit' || fm.cadence != null);
+}
+// INDEX.md, README.md and _-prefixed names are room furniture, not habits.
+function habitBasenameOk(basename) {
+  const b = String(basename == null ? '' : basename);
+  return !!b && !b.startsWith('_') && !HABIT_SKIP_NAMES.test(b);
+}
+
+// The habit a note describes, or null. `fm` is the metadata cache's
+// frontmatter, `path` the note path, `body` the note text (frontmatter
+// allowed; the log is read from it).
+function habitFromFrontmatter(fm, path, body) {
+  if (!isHabitFrontmatter(fm)) return null;
+  const basename = path ? String(path).split('/').pop().replace(/\.md$/i, '') : '';
+  if (!habitBasenameOk(basename)) return null;
+  const log = parseLogTable(stripFrontmatter(body), HABIT_LOG_SENTINEL);
+  const since = fm.started_on || fm.since || null;
+  return {
+    path: path || null,
+    slug: basename,
+    name: fm.name != null && String(fm.name).trim() ? String(fm.name).trim() : basename,
+    cadence: normalizeCadence(fm.cadence),
+    cadenceDays: fm.cadence_days == null ? null : normalizeWeekdays(fm.cadence_days),
+    status: habitStatusOf(fm.status),
+    since: since ? String(since).slice(0, 10) : null,
+    logSchema: log.found ? (log.schema || 'streak') : null,
+    log,
+  };
+}
+
+// The weekdays a cadence lands on. daily: all seven; weekdays: mon to fri;
+// weekly or adhoc: the listed days (none without a list); monthly: none (not
+// a weekday habit; listed greyed in the HABITS tab, never on the board).
+function daysFromCadence(cadence, cadenceDays) {
+  const c = normalizeCadence(cadence);
+  if (c === 'daily') return WEEKDAY_CODES.slice();
+  if (c === 'weekdays') return WEEKDAY_CODES.slice(0, 5);
+  if (c === 'monthly') return [];
+  return normalizeWeekdays(cadenceDays);
+}
+function habitDays(habit) { return daysFromCadence(habit.cadence, habit.cadenceDays); }
+// The inverse, for the HABITS tab: all seven is daily and the field goes;
+// exactly mon to fri is weekdays and the field goes; anything else is
+// weekly with the list (an empty list included: the person cleared it).
+// `cadenceDays: null` means delete the field.
+function cadenceFromDays(days) {
+  const d = normalizeWeekdays(days);
+  if (d.length === 7) return { cadence: 'daily', cadenceDays: null };
+  if (d.length === 5 && d.every((c, i) => c === WEEKDAY_CODES[i])) return { cadence: 'weekdays', cadenceDays: null };
+  return { cadence: 'weekly', cadenceDays: d };
+}
+
+// Consecutive scheduled days with a done marker, ending today or yesterday
+// (today pending does not break it: the day is not over). Unscheduled days
+// are skipped, so a weekday habit's Friday and Monday join across the
+// weekend. Computed at render, never written.
+function streakOf(log, days, today) {
+  const scheduled = normalizeWeekdays(days);
+  if (!scheduled.length || !log || !Array.isArray(log.rows)) return 0;
+  const markers = new Map();
+  for (const r of log.rows) if (r.date) markers.set(r.date, r.marker);
+  const end = String(today);
+  let d = end;
+  let n = 0;
+  for (let guard = 0; guard < 3660; guard++) {
+    if (scheduled.includes(dayCode(d))) {
+      const state = markerState(markers.has(d) ? markers.get(d) : '');
+      if (state === 'done') n++;
+      else if (!(d === end && state === 'pending')) break;
+    }
+    d = addDays(d, -1);
+  }
+  return n;
+}
+
+// One row's state on the board: checked for a done marker, missed for a
+// not-done marker, disabled when the day is still ahead (the week's plan is
+// visible, nothing is logged early). Past days stay checkable.
+function habitRowState(day, today, marker) {
+  const state = markerState(marker);
+  return { checked: state === 'done', missed: state === 'missed', disabled: String(day) > String(today) };
+}
+
+// The day's habit instances: every active habit scheduled for that weekday,
+// by name, each with its row state and (streak schema only, when asked) its
+// streak as of that day.
+function habitOccurrences(habits, day, today, opts) {
+  const o = opts || {};
+  const code = dayCode(day);
+  const out = [];
+  for (const h of habits || []) {
+    if (!h || h.status !== 'active') continue;
+    const days = habitDays(h);
+    if (!days.includes(code)) continue;
+    const row = logRowFor(h.log, day);
+    const marker = row ? row.marker : '';
+    const asOf = String(day) > String(today) ? today : day;
+    const streak = o.streaks !== false && h.logSchema === 'streak' ? streakOf(h.log, days, asOf) : null;
+    out.push({ habit: h, day, marker, ...habitRowState(day, today, marker), streak });
+  }
+  return out.sort((a, b) => a.habit.name.localeCompare(b.habit.name));
+}
+
+// The next body after a check or an uncheck. Runs inside vault.process, on
+// the bytes on disk. A check upserts Y (the note text a person wrote on the
+// row survives; a process-schema trigger column is left for the check-in
+// to fill); a note with no log yet gains "## Daily log", the sentinel and
+// the header. An uncheck writes _ (pending: the day is not over and the
+// session-close ask stays alive) when the row carries no text, N when it
+// does. No row to uncheck: nothing to do.
+function habitLogAfterCheck(data, day, next) {
+  if (next) return upsertLogRow(data, HABIT_LOG_SENTINEL, { date: day, marker: 'Y', createWith: HABIT_LOG_SECTION });
+  const row = logRowFor(parseLogTable(data, HABIT_LOG_SENTINEL), day);
+  if (!row) return String(data == null ? '' : data);
+  const noted = row.rest.some((c) => String(c).trim() !== '');
+  return upsertLogRow(data, HABIT_LOG_SENTINEL, { date: day, marker: noted ? 'N' : '_' });
+}
+
+// The HABITS tab: which rows take a weekday edit, and the word that says why not.
+function habitTabState(habit) {
+  if (habit.status === 'paused') return { editable: false, reason: 'PAUSED' };
+  if (habit.status === 'abandoned') return { editable: false, reason: 'ABANDONED' };
+  if (habit.cadence === 'monthly') return { editable: false, reason: 'MONTHLY' };
+  return { editable: true, reason: null };
+}
+function habitCadenceLabel(habit) {
+  return habit.cadence === 'adhoc' ? 'AD HOC' : String(habit.cadence).toUpperCase();
+}
+// The settings count line.
+function habitsCountText(habits, folder) {
+  const list = habits || [];
+  if (!list.length) return `No habits found in ${folder}.`;
+  const active = list.filter((h) => h.status === 'active').length;
+  const paused = list.filter((h) => h.status === 'paused').length;
+  const parts = [`${active} active habit${active === 1 ? '' : 's'} found`];
+  if (paused) parts.push(`${paused} paused`);
+  return `${parts.join(', ')}.`;
+}
+
+/* ========================================================================== *
  * The plugin
  * ========================================================================== */
 
@@ -3554,6 +3752,8 @@ class IcorPlannerPlugin extends Plugin {
     this._pushTimers = new Map();
     this.routines = [];              // the parsed routine notes (refreshRoutines); render reads this
     this._routineCache = new Map();  // path -> { mtime, routine }: zero body reads when nothing changed
+    this.habits = [];                // the parsed habit notes (refreshHabits); render reads this
+    this._habitCache = new Map();    // path -> { mtime, habit }: same rule
     this.calendarDefs = null;        // merged, deduplicated defs of every feed (mirrored to the cache note on healthy fetches)
     this.calendarDefsByFeed = {};    // feed id -> that feed's defs; a failed feed keeps its last entry
     this.calendarFeedSyncedAt = {};  // feed id -> ISO time of its last LIVE fetch (per-feed updated_at in the cache)
@@ -3597,9 +3797,9 @@ class IcorPlannerPlugin extends Plugin {
       // Instant calendar: rehydrate the last healthy fetch from the vault
       // cache (rendered pale + pulsing) before the live fetch replaces it.
       this.loadCalendarCache();
-      // The routine notes are read for their body, so they are parsed once
-      // here and re-read only when one changes (the hook below).
-      this.refreshRoutines().then(() => this.emitModelChanged());
+      // The routine and habit notes are read for their body, so they are
+      // parsed once here and re-read only when one changes (the hook below).
+      Promise.all([this.refreshRoutines(), this.refreshHabits()]).then(() => this.emitModelChanged());
       this.setupNextBadge();
       // First sync shortly after startup (never blocking plugin load), then on
       // the configured cadence.
@@ -3613,11 +3813,19 @@ class IcorPlannerPlugin extends Plugin {
     // writes, user edits, or the AI team moving an item by editing
     // frontmatter). The boundary is read at event time (this.paths()).
     const inside = (file) => !!(file && this.paths().isInside(file.path));
-    // A change under Routines/ re-reads the routine cache BEFORE the views
-    // re-render, because a routine's steps and log live in the note body,
-    // which the metadata cache does not carry.
-    const settle = (path) => (this.paths().isRoutine(path) ? this.refreshRoutines() : Promise.resolve());
-    const notify = (file) => { if (inside(file)) settle(file.path).then(() => this.emitModelChanged()); };
+    // The habits room is watched for re-render only: a habit note is never
+    // a planner item, so it never reaches the push check.
+    const habit = (path) => habitPathInside(this.settings, path);
+    const watched = (file, path) => !!(file && (inside(file) || habit(path == null ? file.path : path)));
+    // A change under Routines/ or in the habits room re-reads that cache
+    // BEFORE the views re-render, because steps and logs live in the note
+    // body, which the metadata cache does not carry.
+    const settle = (path) => {
+      if (this.paths().isRoutine(path)) return this.refreshRoutines();
+      if (habit(path)) return this.refreshHabits();
+      return Promise.resolve();
+    };
+    const notify = (file) => { if (watched(file)) settle(file.path).then(() => this.emitModelChanged()); };
     this.registerEvent(this.app.metadataCache.on('changed', (file) => {
       notify(file);
       // A routine is never a planner item, so there is nothing to push for it.
@@ -3625,7 +3833,7 @@ class IcorPlannerPlugin extends Plugin {
     }));
     this.registerEvent(this.app.vault.on('delete', notify));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
-      if (inside(file) || this.paths().isInside(oldPath)) {
+      if (watched(file) || this.paths().isInside(oldPath) || habit(oldPath)) {
         Promise.all([settle(file.path), settle(oldPath)]).then(() => this.emitModelChanged());
       }
     }));
@@ -4499,6 +4707,68 @@ class IcorPlannerPlugin extends Plugin {
     return path;
   }
 
+  /* ---- habits (2026-09-04): the Habits room, read and written in the body -- */
+
+  habitsFolder() { return habitsFolderOf(this.settings); }
+
+  // The habit notes, parsed. The room is flat (one note per habit, never a
+  // folder), so subfolders are not walked. Cached by mtime like routines.
+  async refreshHabits() {
+    const out = [];
+    try {
+      const folder = this.app.vault.getAbstractFileByPath(this.habitsFolder());
+      const seen = new Set();
+      const files = folder instanceof TFolder
+        ? (folder.children || []).filter((c) => c instanceof TFile && c.extension === 'md')
+        : [];
+      for (const file of files) {
+        const cache = this.app.metadataCache.getFileCache(file);
+        const fm = cache && cache.frontmatter;
+        if (!isHabitFrontmatter(fm) || !habitBasenameOk(file.basename)) continue;
+        seen.add(file.path);
+        const mtime = file.stat ? file.stat.mtime : 0;
+        const hit = this._habitCache.get(file.path);
+        if (hit && hit.mtime === mtime) { out.push(hit.habit); continue; }
+        const text = await this.app.vault.cachedRead(file);
+        const habit = habitFromFrontmatter(fm, file.path, text);
+        if (!habit) continue;
+        habit.file = file;
+        this._habitCache.set(file.path, { mtime, habit });
+        out.push(habit);
+      }
+      for (const key of Array.from(this._habitCache.keys())) if (!seen.has(key)) this._habitCache.delete(key);
+    } catch { /* an unreadable note is skipped; the next change re-reads it */ }
+    this.habits = out;
+    return out;
+  }
+
+  // The day's habit rows for the board block and the agenda.
+  habitsFor(day, today) {
+    if (this.settings.habitsEnabled === false) return [];
+    return habitOccurrences(this.habits || [], day, today || todayStr(), { streaks: this.settings.habitStreaks !== false });
+  }
+
+  // The check-in: one row in the habit note body, through vault.process.
+  // Never a frontmatter write.
+  async toggleHabit(path, day, next) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error('the habit note is gone');
+    await this.app.vault.process(file, (data) => habitLogAfterCheck(data, day, next));
+  }
+
+  // The HABITS tab's one frontmatter write: cadence and cadence_days, from
+  // the toggled weekdays, nothing else touched.
+  async setHabitDays(path, days) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error('the habit note is gone');
+    const c = cadenceFromDays(days);
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.cadence = c.cadence;
+      if (c.cadenceDays === null) delete fm.cadence_days;
+      else fm.cadence_days = c.cadenceDays;
+    });
+  }
+
   /* ---- manual items: the write path with no API key in front of it ------- */
 
   // Create one manual task and return its path (or null on an empty title).
@@ -4874,6 +5144,59 @@ function wireLongPress(el, onMenu) {
   el.addEventListener('pointercancel', lpCancel);
 }
 
+// The habits block (2026-09-04): under the afternoon lane, all-day, one row
+// per habit scheduled for that weekday. Not a lane (nothing drops here, it
+// is never wired as one) and not a card (nothing here drags). The head
+// carries the count in the day-head voice; the shared checklist carries the
+// rows, a future day's rows disabled; a streak chip on the row when the
+// habit's log is the streak schema. Right-click or long-press a row opens
+// the habit note.
+function renderHabitsBlock(plugin, occs, day, today, view) {
+  const block = document.createElement('div');
+  block.className = 'iplan-habits';
+  if (String(day) > String(today)) block.classList.add('is-future');
+  const head = document.createElement('div');
+  head.className = 'iplan-habits-head';
+  const word = document.createElement('span');
+  word.textContent = 'HABITS';
+  const count = document.createElement('span');
+  count.className = 'iplan-habits-count';
+  const say = (n, m) => { count.textContent = `${n} OF ${m}`; };
+  say(occs.filter((o) => o.checked).length, occs.length);
+  head.appendChild(word);
+  head.appendChild(count);
+  block.appendChild(head);
+  const model = checklistModel({
+    rows: occs.map((o) => ({
+      id: o.habit.path, label: o.habit.name, checked: o.checked, missed: o.missed, disabled: o.disabled,
+      meta: o.streak > 0 ? `STREAK ${o.streak}` : null,
+    })),
+  });
+  renderChecklist(block, model, {
+    ariaLabel: `Habits for ${fmtDayLabel(day)}`,
+    progress: false,
+    onToggle: (id, next) => plugin.toggleHabit(String(id), day, next),
+    onProgress: say,
+  });
+  const rowMenu = (target, pos) => {
+    const row = target instanceof Element ? target.closest('.iplan-checklist-row') : null;
+    if (!row) return;
+    const path = row.getAttribute('data-id');
+    const menu = new Menu();
+    menu.addItem((mi) => mi.setTitle('Open habit note').setIcon('file-text').onClick(() => {
+      const file = plugin.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
+    }));
+    menu.showAtPosition(pos);
+  };
+  block.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    rowMenu(e.target, { x: e.clientX, y: e.clientY });
+  });
+  wireLongPress(block, (pos) => rowMenu(document.elementFromPoint(pos.x, pos.y), pos));
+  return block;
+}
+
 // One routine block (2026-09-04). Not draggable: it sits where its time
 // puts it. Row one the kicker (type and time), row two the name, row three
 // the steps as the shared checklist with its "n of m". Complete strikes
@@ -5165,11 +5488,17 @@ class EventDetailModal extends Modal {
 // Seven toggle buttons, M T W T F S S, each with aria-pressed and the full
 // day name as its label. `get()` returns the current codes, `set(codes)`
 // keeps them (may be async); the buttons repaint from get() after a press.
-function weekdayToggleRow(container, get, set, groupLabel) {
+// Seven aria-pressed toggles, one tab stop per row (the toolbar pattern):
+// arrow keys, Home and End move inside the row. `opts.disabled` keeps the
+// row reachable and inert (aria-disabled, no write), for a habit that takes
+// no weekday edit.
+function weekdayToggleRow(container, get, set, groupLabel, opts) {
+  const o = opts || {};
   const group = container.createDiv({
     cls: 'iplan-seg iplan-settings-presets iplan-weekdays',
     attr: { role: 'group', 'aria-label': groupLabel },
   });
+  if (o.disabled) group.setAttribute('aria-disabled', 'true');
   const buttons = [];
   const paint = () => {
     const on = get();
@@ -5179,19 +5508,36 @@ function weekdayToggleRow(container, get, set, groupLabel) {
       b.setAttribute('aria-pressed', is ? 'true' : 'false');
     }
   };
-  for (const code of WEEKDAY_CODES) {
+  const rove = (to) => {
+    for (const x of buttons) x.setAttribute('tabindex', x === to ? '0' : '-1');
+    to.focus();
+  };
+  WEEKDAY_CODES.forEach((code, i) => {
     const b = group.createEl('button', {
       cls: 'iplan-seg-btn', text: WEEKDAY_NAMES[code].charAt(0),
-      attr: { type: 'button', 'aria-label': WEEKDAY_NAMES[code], 'aria-pressed': 'false', 'data-day': code },
+      attr: {
+        type: 'button', 'aria-label': WEEKDAY_NAMES[code], 'aria-pressed': 'false', 'data-day': code,
+        tabindex: i === 0 ? '0' : '-1',
+      },
     });
+    if (o.disabled) b.setAttribute('aria-disabled', 'true');
     b.addEventListener('click', async () => {
+      if (o.disabled) return;
       const on = new Set(get());
       if (on.has(code)) on.delete(code); else on.add(code);
       await set(normalizeWeekdays(Array.from(on)));
       paint();
     });
+    b.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
+      e.preventDefault();
+      const k = buttons.indexOf(b);
+      if (e.key === 'Home') rove(buttons[0]);
+      else if (e.key === 'End') rove(buttons[buttons.length - 1]);
+      else rove(buttons[(k + (e.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length]);
+    });
     buttons.push(b);
-  }
+  });
   paint();
   return group;
 }
@@ -5544,6 +5890,10 @@ class PlannerBoardView extends ItemView {
         });
       }
 
+      // Habits (2026-09-04): the day's all-day block under the afternoon lane.
+      const habitOccs = this.plugin.habitsFor(day, today);
+      if (habitOccs.length) col.appendChild(renderHabitsBlock(this.plugin, habitOccs, day, today, this));
+
       if (day === today) {
         const rail = col.createDiv({ cls: 'iplan-now-rail' });
         col.dataset.railState = 'on';
@@ -5620,12 +5970,17 @@ class PlannerBoardView extends ItemView {
  *   AGENDA - what is planned for TODAY, chronological: all-day chips, then
  *            MORNING / AFTERNOON as the board lane's mixed sequence.
  *            Read-plus-click in v1: no drop targets here.
+ *   HABITS - (2026-09-04) weekly planning of the habits: one row per habit
+ *            with seven weekday toggles that write cadence / cadence_days
+ *            into the habit note. Board context only, like TASKS.
  *   GOALS  - only the weekly-goals list.
  * Default follows context (trayDefaultTab): board active -> TASKS, any other
  * main-area page -> AGENDA. A manual pick sticks until the context flips.
  * ========================================================================== */
 
-const TRAY_TABS = ['sync', 'agenda', 'goals'];
+const TRAY_TABS = ['sync', 'habits', 'agenda', 'goals'];
+// The tabs that assist planning and exist only beside the board.
+const BOARD_ONLY_TABS = ['sync', 'habits'];
 
 // Tom's default rule: with the planner board active the tray assists planning
 // (SYNC); on every other page it answers "what is planned today" (AGENDA).
@@ -5638,7 +5993,7 @@ function trayDefaultTab(contextIsBoard) {
 // planner page; on all other pages only AGENDA and GOALS exist. Pure helper
 // so render() and setTab() share one source of truth.
 function trayVisibleTabs(contextIsBoard) {
-  return contextIsBoard ? TRAY_TABS : TRAY_TABS.filter((t) => t !== 'sync');
+  return contextIsBoard ? TRAY_TABS : TRAY_TABS.filter((t) => !BOARD_ONLY_TABS.includes(t));
 }
 
 // Rendered label per tab id. 'sync' renders as TASKS since 0.6.1 (Tom calls
@@ -5646,6 +6001,11 @@ function trayVisibleTabs(contextIsBoard) {
 // wired to it needs a migration.
 function trayTabLabel(tab) {
   return tab === 'sync' ? 'TASKS' : tab.toUpperCase();
+}
+// The spoken name of a tab (the label is uppercase for the eye only).
+function trayTabName(tab) {
+  const l = trayTabLabel(tab);
+  return l.charAt(0) + l.slice(1).toLowerCase();
 }
 
 // The guarded active tab: whatever state claims, a tab that is not visible
@@ -5917,21 +6277,86 @@ class PlannerTrayView extends ItemView {
     if (this.plugin.syncing) syncBtn.addClass('is-syncing');
     syncBtn.addEventListener('click', () => this.plugin.syncNow(true));
 
-    // Tab strip: same visual family as the board's WEEK | DAY switch.
+    // Tab strip: same visual family as the board's WEEK | DAY switch. Four
+    // labels do not fit a 250px sidebar, so HABITS carries a glyph as well
+    // and the stylesheet shows the glyph alone below 300px of tray width;
+    // the spoken name is the aria-label either way.
     const tabsRow = el.createDiv({ cls: 'iplan-tray-tabs' });
     const seg = tabsRow.createDiv({ cls: 'iplan-seg', attr: { role: 'tablist', 'aria-label': 'Tray panel' } });
     for (const tab of trayVisibleTabs(this.contextIsBoard)) {
       const b = seg.createEl('button', {
-        cls: 'iplan-seg-btn', text: trayTabLabel(tab),
-        attr: { role: 'tab', 'aria-selected': String(this.activeTab === tab) },
+        cls: 'iplan-seg-btn',
+        attr: { role: 'tab', 'aria-selected': String(this.activeTab === tab), 'aria-label': trayTabName(tab) },
       });
+      if (tab === 'habits') {
+        b.addClass('is-collapsible');
+        const glyph = b.createSpan({ cls: 'iplan-tab-icon', attr: { 'aria-hidden': 'true' } });
+        setIcon(glyph, 'calendar-check');
+      }
+      b.createSpan({ cls: 'iplan-tab-text', text: trayTabLabel(tab) });
       if (this.activeTab === tab) b.addClass('is-active');
       b.addEventListener('click', () => this.setTab(tab));
     }
 
     if (this.activeTab === 'agenda') this.renderAgenda(el, items, today);
     else if (this.activeTab === 'goals') this.renderGoals(el, items);
+    else if (this.activeTab === 'habits') this.renderHabits(el);
     else this.renderSync(el, items, today);
+    // A weekday toggle writes the note, the note re-renders the tray, and
+    // the button that had the keyboard is gone with the old DOM. Hand the
+    // caret back to its successor: our own focus, never someone else's.
+    if (this._habitFocus) {
+      const { path, day } = this._habitFocus;
+      this._habitFocus = null;
+      const again = el.querySelector(`.iplan-habit-row[data-path="${CSS.escape(path)}"] [data-day="${day}"]`);
+      if (again) again.focus();
+    }
+  }
+
+  /* ---- HABITS (2026-09-04): the week's habits, one row each, seven toggles */
+  renderHabits(el) {
+    const s = this.plugin.settings;
+    const folder = this.plugin.habitsFolder();
+    const habits = (this.plugin.habits || [])
+      .filter((h) => h.status !== 'abandoned')
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const sec = el.createDiv({ cls: 'iplan-tray-section' });
+    sec.createDiv({ cls: 'iplan-tray-section-head', text: 'WEEKDAYS PER HABIT' });
+    const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
+    if (s.habitsEnabled === false) {
+      body.createDiv({ cls: 'iplan-tray-note', text: 'Habits are off in settings.' });
+      return;
+    }
+    if (!habits.length) {
+      body.createDiv({ cls: 'iplan-tray-note', text: `No habits in ${folder}.` });
+      return;
+    }
+    for (const h of habits) {
+      const st = habitTabState(h);
+      const row = body.createDiv({ cls: `iplan-habit-row${st.editable ? '' : ' is-quiet'}`, attr: { 'data-path': h.path } });
+      const top = row.createDiv({ cls: 'iplan-habit-row-head' });
+      const name = top.createEl('button', {
+        cls: 'iplan-habit-name', text: h.name,
+        attr: { type: 'button', 'aria-label': `Open ${h.name}` },
+      });
+      name.addEventListener('click', () => {
+        const file = this.app.vault.getAbstractFileByPath(h.path);
+        if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
+      });
+      top.createSpan({ cls: 'iplan-chip', text: st.reason || habitCadenceLabel(h) });
+      // The row paints from its own copy so a toggle shows at once; the
+      // note's re-render brings the truth a moment later.
+      let current = habitDays(h);
+      weekdayToggleRow(row, () => current, async (codes) => {
+        current = codes;
+        const active = el.ownerDocument && el.ownerDocument.activeElement;
+        this._habitFocus = { path: h.path, day: active && active.dataset ? active.dataset.day : null };
+        await this.plugin.setHabitDays(h.path, codes);
+      }, `Weekdays for ${h.name}`, { disabled: !st.editable });
+    }
+    const foot = el.createDiv({ cls: 'iplan-tray-foot' });
+    foot.createSpan({ text: 'A TOGGLE WRITES CADENCE AND CADENCE_DAYS INTO THE HABIT NOTE. NOTHING ELSE IS TOUCHED.' });
   }
 
   /* ---- AGENDA: today's plan, chronological, read-plus-click ---- */
@@ -5976,6 +6401,12 @@ class PlannerTrayView extends ItemView {
           body.appendChild(renderCard(this.plugin, entry.it, 'tray', this));
         }
       }
+    }
+    // Habits (2026-09-04): today's block, under AFTERNOON, as on the board.
+    const habitOccs = this.plugin.habitsFor(today, today);
+    if (habitOccs.length) {
+      const sec = el.createDiv({ cls: 'iplan-tray-section' });
+      sec.appendChild(renderHabitsBlock(this.plugin, habitOccs, today, today, this));
     }
   }
 
@@ -6682,6 +7113,43 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .addButton((b) => b.setButtonText('New routine').setCta()
         .onClick(() => new NewRoutineModal(this.app, this.plugin, () => this.display()).open()));
 
+    /* ---- habits (2026-09-04) ---- */
+    new Setting(containerEl).setName('Habits').setHeading();
+    new Setting(containerEl)
+      .setName('Show habits')
+      .setDesc('Reads the habit notes in the folder below and puts an all-day HABITS block under each day a habit is scheduled for. Checking one writes a row into the habit note\'s log table; nothing else in the note is touched. Off hides the block and the HABITS tab; the notes stay.')
+      .addToggle((t) => t.setValue(this.plugin.settings.habitsEnabled !== false)
+        .onChange(async (v) => { this.plugin.settings.habitsEnabled = v; await this.plugin.saveSettings(); }));
+    // The folder: typing validates live (announced) and a valid folder is
+    // adopted as typed; an invalid one is refused and the last good one
+    // stays. The count line says what the folder holds.
+    const habitsFolderSetting = new Setting(containerEl).setName('Habits folder');
+    habitsFolderSetting.descEl.setAttribute('aria-live', 'polite');
+    const renderHabitsFolder = (raw) => {
+      const n = normalizeHabitsFolder(raw);
+      if (!n.ok) { habitsFolderSetting.setDesc(n.error); return; }
+      const exists = this.app.vault.getAbstractFileByPath(n.folder) instanceof TFolder;
+      habitsFolderSetting.setDesc(exists
+        ? habitsCountText(this.plugin.habits, n.folder)
+        : `"${n.folder}" does not exist in this vault.`);
+    };
+    habitsFolderSetting.addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.habitsFolder).setValue(this.plugin.settings.habitsFolder)
+      .onChange(async (v) => {
+        const n = normalizeHabitsFolder(v);
+        if (!n.ok) { renderHabitsFolder(v); return; }
+        this.plugin.settings.habitsFolder = n.folder;
+        await this.plugin.saveSettings();
+        await this.plugin.refreshHabits();
+        this.plugin.emitModelChanged();
+        renderHabitsFolder(n.folder);
+      }));
+    renderHabitsFolder(this.plugin.settings.habitsFolder);
+    new Setting(containerEl)
+      .setName('Streaks')
+      .setDesc('Shows STREAK n on a habit row: consecutive scheduled days with a done mark, computed from the note\'s log at render and never written anywhere. A habit whose log says schema=process shows none.')
+      .addToggle((t) => t.setValue(this.plugin.settings.habitStreaks !== false)
+        .onChange(async (v) => { this.plugin.settings.habitStreaks = v; await this.plugin.saveSettings(); }));
+
     new Setting(containerEl).setName('Two-way sync').setHeading();
     new Setting(containerEl)
       .setName('Complete on source')
@@ -6760,5 +7228,10 @@ module.exports.__test = {
   validateRoutineInput, routineTemplate,
   clickupQuery, buildItemIndex, parentOf, parentTitleFor, childrenOfItem, subtaskCounter, subtaskCounterText,
   subtaskRowMeta, cardChips, isDone, fmtDayNum,
+  HABIT_LOG_SENTINEL, HABIT_LOG_SECTION, HABIT_CADENCES, HABIT_STATUSES, BOARD_ONLY_TABS,
+  normalizeVaultFolder, normalizeHabitsFolder, habitsFolderOf, habitPathInside,
+  normalizeCadence, habitStatusOf, isHabitFrontmatter, habitBasenameOk, habitFromFrontmatter,
+  daysFromCadence, habitDays, cadenceFromDays, streakOf, habitRowState, habitOccurrences,
+  habitLogAfterCheck, habitTabState, habitCadenceLabel, habitsCountText, trayTabName,
   SOURCES, DEFAULT_SETTINGS,
 };
