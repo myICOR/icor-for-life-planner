@@ -138,12 +138,15 @@ The connection settings, for anyone reading or scripting `data.json`:
 
 | key | meaning | default |
 | --- | --- | --- |
-| `todoistToken`, `clickupToken`, `clickupTeamId` | the task-source credentials; the workspace id is optional | empty |
-| `imapHost`, `imapUser`, `imapPassword` | the mailbox: host, address, app password | `imap.gmail.com`, empty, empty |
+| `todoistToken`, `clickupToken` | **secret.** The task-source API tokens. On Obsidian 1.11.4 or newer these fields are empty and the values live in Obsidian's secret store (see Secrets below) | empty |
+| `clickupTeamId` | the ClickUp workspace id, optional | empty |
+| `imapHost`, `imapUser` | the mailbox host and address; neither is a secret | `imap.gmail.com`, empty |
+| `imapPassword` | **secret.** The app password; empty here on Obsidian 1.11.4 or newer, where it lives in the secret store | empty |
 | `imapPort` | the IMAP port | `993` |
 | `imapSecurity` | `tls` (encrypted from the first byte) or `starttls` (plain connect, upgraded before login, never a plain login) | `tls` |
 | `imapAllowSelfSigned` | accept the host's own certificate; honoured only when the host is loopback, enforced in the transport code, not just in the settings tab | `false` |
-| `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the secret iCal address, `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics`. An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and is read nowhere else | empty |
+| `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the **secret** iCal address (empty here on Obsidian 1.11.4 or newer, where it lives in the secret store under the feed's `id`), `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics`. An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and the key is then deleted | empty |
+| `secretsInKeychain` | `true` once any secret has been written to Obsidian's secret store. Not a secret; it lets an older Obsidian explain its empty fields | `false` |
 | `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`, `<folder>/Routines`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
 | `routinesEnabled` | show routine blocks on the board and in the agenda; off hides them, the notes stay | `true` |
 | `routineDefaults` | the times a new routine starts with, per type: `{ morning: { start, end }, afternoon: { start, end }, evening: { start, end } }`, each `HH:MM`; each routine keeps its own times in its note | `06:30` to `07:30`, `13:00` to `13:30`, `21:00` to `21:45` |
@@ -159,10 +162,31 @@ badge, the two-way toggles) sit beside them under their own names.
 
 ## Secrets
 
-API keys live in this plugin's `data.json`. The plugin writes a `.gitignore`
-guard into the vault so the folder never reaches your vault's git
-repository, and this repository ignores `data.json` itself. Treat the iCal
-URL like a password (it is one).
+Five things the plugin holds are secrets: the Todoist token, the ClickUp
+token, the mailbox app password, every calendar feed address (a Google
+secret address or a published Apple, Proton or Outlook link is a bearer
+credential: anyone holding it can read the calendar), and, when the
+Outlook connector lands, its refresh token. Where they live depends on
+the Obsidian you run:
+
+- **Obsidian 1.11.4 or newer (desktop and mobile):** in Obsidian's secret
+  store, which is backed by the system keychain, under keys prefixed
+  `icor-for-life-planner-`. The fields in `data.json` are empty. On the
+  first launch after updating, any secret still in `data.json` is moved
+  over once and its field blanked; nothing to do. The settings tab says
+  "Secrets are stored in the system keychain through Obsidian".
+- **Older Obsidian:** in this plugin's `data.json`, as before. The
+  settings tab says so in one line. If a newer Obsidian on another
+  machine has already moved this vault's secrets into its keychain, the
+  fields here are empty; paste them again or update Obsidian.
+
+The secret store is feature-detected at load, so the plugin's minimum
+Obsidian version is unchanged. Nothing the plugin writes into the vault
+ever carries a secret: not the item notes, not the calendar cache, not a
+log line. The plugin also writes a `.gitignore` guard into the vault so
+its folder never reaches your vault's git repository, and this
+repository ignores `data.json` itself. Treat an iCal address like a
+password (it is one).
 
 ## The frontmatter contract (for people and agents)
 
@@ -360,7 +384,9 @@ the cache, its events render pale and pulsing on the board.
 
 ## Install
 
-Requires Obsidian 1.4.0 or newer.
+Requires Obsidian 1.4.0 or newer. On 1.11.4 or newer your tokens,
+password and feed addresses are kept in the system keychain instead of
+`data.json` (see Secrets).
 
 1. Copy `main.js`, `manifest.json` and `styles.css` from the latest
    release into `.obsidian/plugins/icor-for-life-planner/` in your vault.

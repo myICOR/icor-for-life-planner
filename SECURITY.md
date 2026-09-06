@@ -60,16 +60,25 @@ We are not going to publish a version-support table we would not honour.
 This is what the plugin does, so you can aim your effort at the parts that matter.
 The figures below describe the shipped `main.js` on `main` (the 0.8.0 line).
 
-**Credentials it stores.** The plugin keeps user-supplied secrets in Obsidian's
-per-plugin `data.json` inside the vault, at
-`.obsidian/plugins/icor-for-life-planner/data.json`:
+**Credentials it stores.** The plugin holds these user-supplied secrets:
 
 - a Todoist API token
 - a ClickUp API token
-- IMAP host, username and password for the starred-email sync
+- the IMAP password for the starred-email sync (the host and the username
+  are stored beside it and are not secrets)
 - one or more calendar feed URLs (`calendars[].url`); each is a bearer
-  credential: anyone holding it can read that calendar. `icsUrl` from a
-  release before 0.8.0 is kept for one release and read nowhere else.
+  credential: anyone holding it can read that calendar
+- a slot reserved for an Outlook refresh token (not stored yet)
+
+Where they live depends on the Obsidian running the plugin. On Obsidian
+1.11.4 or newer (desktop and mobile) they are in Obsidian's secret store,
+`app.secretStorage`, backed by the system keychain, under ids prefixed
+`icor-for-life-planner-`; the matching fields in `data.json` are empty, and
+any secret found in `data.json` on load is moved over once and blanked. On
+an older Obsidian they are in the plugin's `data.json` inside the vault, at
+`.obsidian/plugins/icor-for-life-planner/data.json`, as in every release
+before 0.9.0. The store is feature-detected; there is no third place. The
+single `icsUrl` key of releases before 0.8.0 is deleted on load.
 
 `data.json` is git-ignored in this repository and is never transmitted anywhere by
 the plugin other than to the services the credential belongs to.
@@ -120,11 +129,15 @@ published in this repository.
 
 These are not vulnerabilities and we will close them as such:
 
-- **Your own API keys being stored in your own vault.** That is the design. The
-  plugin needs the token to call the service, and Obsidian's storage for that is
-  `data.json` in your vault. If your vault is synced somewhere, those credentials
-  go with it, which is a property of your sync setup rather than a flaw in this
-  plugin. Exfiltration *away* from your vault is in scope; storage *in* it is not.
+- **Your own API keys being stored in your own vault on an Obsidian older than
+  1.11.4.** That is the design there. The plugin needs the token to call the
+  service, and the only storage those versions offer a plugin is `data.json` in
+  your vault. If your vault is synced somewhere, those credentials go with it,
+  which is a property of your sync setup rather than a flaw in this plugin. On
+  1.11.4 or newer the secrets are in the system keychain and never in the
+  vault; a secret found in `data.json` there IS in scope. Exfiltration *away*
+  from your vault is in scope everywhere; storage *in* it, on an older
+  Obsidian, is not.
 - Anyone with filesystem access to your vault being able to read `data.json`. If
   an attacker is already reading your vault, the credentials are the smaller
   problem.
