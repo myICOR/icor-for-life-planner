@@ -444,8 +444,12 @@ the ones to take and, for each, the planner:
    writes `planner_habit: "[[<planner note>]]"`, the link back. Every
    other field, the body and its links stay.
 
-A note already linked is skipped, so pressing the button again is a no-op.
-From then on check-ins land in the planner note, and the My Life note keeps
+A My Life note counts as imported once its own frontmatter carries
+`planner_habit`, so pressing the button again does nothing to it. If a
+run stops half way (the planner note made, the My Life note not yet
+rewritten), the note is listed again and the import resumes into the
+planner note that already links back, never making a second one; the log
+table moves only if it is still in the My Life note. From then on check-ins land in the planner note, and the My Life note keeps
 the meaning: the why, the links to your Key Elements, whatever you and the
 AI team wrote there. The row's menu opens it.
 
@@ -474,7 +478,9 @@ the cache, its events render pale and pulsing on the board.
 
 ## Install
 
-Requires Obsidian 1.4.0 or newer. On 1.11.4 or newer your tokens,
+Requires Obsidian 1.6.6 or newer (0.10.0 deletes a habit note through
+Obsidian's own trash, an API of that release; 0.9.x ran on 1.4.0). On
+1.11.4 or newer your tokens,
 password and feed addresses are kept in Obsidian's secret storage
 (outside the vault and outside `data.json`, so they are never synced or
 committed with your notes) instead of `data.json` (see Secrets).

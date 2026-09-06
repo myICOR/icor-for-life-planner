@@ -122,8 +122,9 @@ the same way) it replaces the `habit-log` table with one pointer line and,
 in the frontmatter, removes `cadence`, `cadence_days`, `started_on` and
 `since`, writes `type: habit` when the note had no type, and writes
 `planner_habit` (a wikilink to the planner note).
-Nothing else in that folder is ever written, and a note already linked to a
-planner note is not touched again.
+Nothing else in that folder is ever written, and a note whose frontmatter
+already carries `planner_habit` is not touched again. The modal and the
+settings button say exactly this before you confirm.
 
 **In scope, and we want to hear about it:**
 

@@ -4984,17 +4984,21 @@ function importMapping(fm, basename) {
   };
 }
 // The import's rows: the My Life notes that are habits (by the My Life
-// shape), are not room furniture, and have no planner note linking to them
-// yet. `notes` are { path, basename, fm }; `plannerHabits` the parsed
-// planner notes. Sorted by name.
+// shape), are not room furniture, and do not carry the back-link yet
+// (importDone, read on the source). When a planner note already links to
+// such a note, a run stopped half way; the row carries that note's path as
+// `existingPlanner` so the import resumes into it instead of making a
+// second one. `notes` are { path, basename, fm }; `plannerHabits` the
+// parsed planner notes. Sorted by name.
 function importPlan(notes, plannerHabits) {
-  const linked = new Set((plannerHabits || []).map((h) => h && h.linkedBasename).filter(Boolean));
+  const byLink = new Map();
+  for (const h of plannerHabits || []) if (h && h.linkedBasename && !byLink.has(h.linkedBasename)) byLink.set(h.linkedBasename, h.path);
   const out = [];
   for (const n of notes || []) {
-    if (!n || !isHabitFrontmatter(n.fm) || isPlannerHabitFrontmatter(n.fm)) continue;
+    if (!n || !isHabitFrontmatter(n.fm) || isPlannerHabitFrontmatter(n.fm) || importDone(n.fm)) continue;
     const basename = n.basename || basenameOf(n.path);
-    if (!habitBasenameOk(basename) || linked.has(basename)) continue;
-    out.push({ path: n.path, basename, ...importMapping(n.fm, basename) });
+    if (!habitBasenameOk(basename)) continue;
+    out.push({ path: n.path, basename, ...importMapping(n.fm, basename), existingPlanner: byLink.get(basename) || null });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -5043,6 +5047,30 @@ function importSourceFrontmatter(fm, plannerSlug) {
   if (fm.type == null || String(fm.type).trim() === '') fm.type = 'habit';
   fm.planner_habit = `[[${plannerSlug}]]`;
   return fm;
+}
+// What the import changes in each My Life note, said at the point of
+// consent: the sentence above the modal's checkboxes and under the settings
+// button are this one string, so the two can never drift apart.
+const IMPORT_EDITS_TEXT = 'In each My Life note the import: removes cadence, cadence_days, started_on, since from the frontmatter; adds type: habit when missing and planner_habit; moves the log table into the planner note and leaves a pointer line.';
+// A My Life note is imported once it carries the back-link. Read on the
+// SOURCE, never inferred from the planner side, so a run that stopped
+// between its writes shows the note again and the import resumes it.
+function importDone(fm) {
+  return !!fm && typeof fm === 'object' && fm.planner_habit != null && String(fm.planner_habit).trim() !== '';
+}
+// The planner note adopting a log block that is still in the source (a
+// run that stopped before the body write): only when the planner note has
+// no sentinel block of its own yet; under its Log heading when it has one,
+// else appended as a Log section. Pure.
+function adoptLogBlock(plannerBody, block) {
+  const text = String(plannerBody == null ? '' : plannerBody);
+  if (!block || parseLogTable(text, HABIT_LOG_SENTINEL).found) return text;
+  const lines = splitLogLines(text);
+  const at = lines.findIndex((l) => l.replace(/\r$/, '') === HABIT_LOG_SECTION.heading);
+  if (at >= 0) { lines.splice(at + 1, 0, block); return lines.join('\n'); }
+  let base = text;
+  if (base.length && !base.endsWith('\n')) base += '\n';
+  return `${base}\n${HABIT_LOG_SECTION.heading}\n${block}\n`;
 }
 // The import modal's line under a candidate, and its button.
 function importCandidateText(c) {
@@ -6475,23 +6503,40 @@ class IcorPlannerPlugin extends Plugin {
   // planner note is created with the log block copied into it; then the My
   // Life note gives up the block for the pointer line (vault.process) and
   // its schedule fields, gaining its type and the back-link in the same
-  // frontmatter write (processFrontMatter). A failure between the two
-  // leaves the log in the source, never lost. A note already linked is
-  // skipped, so a second run is a no-op. Returns { done, skipped, failed }.
+  // frontmatter write (processFrontMatter). The three writes are not one
+  // transaction, so each is written to be redone: a note is done only when
+  // its own frontmatter carries the back-link (importDone, read here on
+  // the source), and a note that is not done resumes from whatever is
+  // missing. A planner note that already links back is reused (never a
+  // second one); it adopts the log block only if the source still holds
+  // it; the body is rewritten only while the block or the pointer says
+  // so; the frontmatter step always runs last. Nothing is ever lost: the
+  // block leaves the source only after the planner note holds it.
+  // Returns { done, skipped, failed }.
   async importHabits(candidates) {
-    const linked = new Set((this.habits || []).map((h) => h.linkedBasename).filter(Boolean));
     const result = { done: 0, skipped: 0, failed: [] };
     for (const c of candidates || []) {
-      if (!c || linked.has(c.basename) || !importPathInside(this.settings, c.path)) { result.skipped++; continue; }
+      if (!c || !importPathInside(this.settings, c.path)) { result.skipped++; continue; }
       try {
         const src = this.app.vault.getAbstractFileByPath(c.path);
         if (!(src instanceof TFile)) { result.skipped++; continue; }
-        const logBlock = habitLogBlockOf(await this.app.vault.read(src));
-        const path = await this.createHabit(c, { logBlock, quiet: true, lenient: true });
+        const cache = this.app.metadataCache.getFileCache(src);
+        if (importDone(cache && cache.frontmatter)) { result.skipped++; continue; }
+        const body = await this.app.vault.read(src);
+        const logBlock = habitLogBlockOf(body);
+        const existing = c.existingPlanner && this.app.vault.getAbstractFileByPath(c.existingPlanner);
+        let path;
+        if (existing instanceof TFile) {
+          path = c.existingPlanner;
+          if (logBlock) await this.app.vault.process(this.habitFile(path), (data) => adoptLogBlock(data, logBlock));
+        } else {
+          path = await this.createHabit(c, { logBlock, quiet: true, lenient: true });
+        }
         const slug = basenameOf(path);
-        await this.app.vault.process(src, (data) => moveHabitLog(data, slug));
+        if (logBlock || !body.includes(habitPointerLine(slug))) {
+          await this.app.vault.process(src, (data) => moveHabitLog(data, slug));
+        }
         await this.app.fileManager.processFrontMatter(src, (fm) => { importSourceFrontmatter(fm, slug); });
-        linked.add(c.basename);
         result.done++;
       } catch (e) {
         result.failed.push(`${c.basename}: ${(e && e.message) || e}`);
@@ -7611,9 +7656,10 @@ class ImportHabitsModal extends Modal {
     kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
     kicker.createSpan({ text: ' IMPORT FROM MY LIFE' });
     contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: `${n} habit note${n === 1 ? '' : 's'} in ${this.plugin.habitsImportFolder()}.` });
+    contentEl.createDiv({ cls: 'iplan-settings-note', text: IMPORT_EDITS_TEXT });
     contentEl.createDiv({
       cls: 'iplan-settings-note',
-      text: `For each note ticked: a habit note is created under ${this.plugin.habitsFolder()}/ with the schedule, the log table moves into it, and the My Life note keeps one line pointing at it. Its meaning, its links and its other fields stay where they are. A note already linked is skipped.`,
+      text: `The planner note is created under ${this.plugin.habitsFolder()}/ with the schedule. Everything else in the My Life note stays. A note that already carries planner_habit is skipped.`,
     });
     const chosen = new Set(this.candidates.map((c) => c.path));
     let btn = null;
@@ -9401,7 +9447,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       }));
     new Setting(containerEl)
       .setName('Import from My Life')
-      .setDesc('Once per note: creates the planner habit note with the schedule, moves the log table into it, leaves one pointer line and the meaning in the My Life note, and links the two. A note already linked is skipped.')
+      .setDesc(`${IMPORT_EDITS_TEXT} A note that already carries planner_habit is skipped.`)
       .addButton((b) => {
         importBtn = b;
         b.setButtonText('Import from My Life')
@@ -9510,6 +9556,7 @@ module.exports.__test = {
   habitLogAfterCheck, habitRowModel, applyHabitCadence, validateHabitInput, habitFrontmatterOf, habitTemplate,
   importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, stripHabitScheduleFields, importSourceFrontmatter,
   importCandidateText, importButtonText, importSummaryText, importFolderText, habitsCountText, trayTabName,
+  IMPORT_EDITS_TEXT, importDone, adoptLogBlock,
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
