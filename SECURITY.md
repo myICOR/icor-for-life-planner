@@ -58,7 +58,7 @@ We are not going to publish a version-support table we would not honour.
 ## Scope: what this plugin actually touches
 
 This is what the plugin does, so you can aim your effort at the parts that matter.
-The figures below describe the shipped `main.js` on `main` (the 0.8.0 line).
+The figures below describe the shipped `main.js` on `main` (the 0.9.0 line).
 
 **Credentials it stores.** The plugin holds these user-supplied secrets:
 
