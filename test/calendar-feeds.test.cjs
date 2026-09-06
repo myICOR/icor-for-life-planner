@@ -261,7 +261,7 @@ test('the modal links to Google only for a Google-shaped address', () => {
   assert.ok(!/text: ' GOOGLE CALENDAR' \}\)/.test(c), 'the kicker is no longer a Google literal');
   assert.ok(!/\/r\/day\//.test(c), 'no Google day-view fallback for a non-Google feed');
   assert.match(c, /text: 'OPEN EVENT LINK'/, 'the event URL is the fallback link');
-  assert.match(c, /new EventDetailModal\(plugin\.app, ev, calendarFeedFor\(plugin\.settings, ev\)/, 'the chip resolves the feed from the settings by id');
+  assert.match(c, /new EventDetailModal\(plugin\.app, ev, calendarFeedFor\(plugin\.withSecrets\(\), ev\)/, 'the chip resolves the feed from the resolved settings by id (the address may live in the secret store)');
   assert.match(c, /chip\.addClass\(`iplan-cal-\$\{clampSwatch\(ev\.feedColor\)\}`\)/, 'the chip wears its lens class');
   assert.match(c, /\$\{ev\.feedName \? ', ' \+ ev\.feedName : ''\}/, 'the aria label speaks the feed name');
 });

@@ -192,7 +192,7 @@ test('the probe and the sync classify the same failure with the same words', asy
 test('the settings tab wires the probe and the presets accessibly', () => {
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
-  assert.match(code, /renderProbe\(await imapProbe\(this\.plugin\.settings\)\)/, 'the Test button runs the probe');
+  assert.match(code, /renderProbe\(await imapProbe\(this\.plugin\.withSecrets\(\)\)\)/, 'the Test button runs the probe on the resolved settings');
   assert.match(code, /probeSetting\.descEl\.setAttribute\('aria-live', 'polite'\)/, 'the outcome is announced');
   assert.match(code, /role: 'radiogroup'/, 'the presets are a radio group');
   assert.match(code, /role: 'radio'/, 'each preset chip is a radio');

@@ -90,6 +90,6 @@ test('no per-source comparison survives outside the registry', () => {
   const c = code();
   assert.doesNotMatch(c, /source === '(todoist|clickup|email)'/, 'a write client is still chosen by comparing the source name');
   assert.doesNotMatch(c, /source !== 'email'/, 'the push guard must ask canPushToSource, not the name');
-  assert.match(c, /await c\.setClosed\(this\.settings, item, closed\);/, 'applyDoneOnSource goes through the registry');
+  assert.match(c, /await c\.setClosed\(this\.withSecrets\(\), item, closed\);/, 'applyDoneOnSource goes through the registry with the resolved settings');
   assert.equal((c.match(/CONNECTORS\[[a-z.]+\]\.pushFields\(s, /g) || []).length, 2, 'both push paths (sync-time and edit-time) go through the registry');
 });

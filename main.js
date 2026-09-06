@@ -204,6 +204,10 @@ const DEFAULT_SETTINGS = {
   // colour is an index into the four lenses styles.css declares; the user
   // picks a swatch, never a hex, so no colour value lives in data.json.
   calendars: [],
+  // Set the first time a secret is written to Obsidian's secret store
+  // (0.9.0). Never a secret itself; it lets an older Obsidian opening this
+  // vault say why its fields are empty (secretsNoteText).
+  secretsInKeychain: false,
   syncMinutes: 10,
   showWeekend: false,
   splitTime: '13:00',
@@ -248,6 +252,210 @@ const DEFAULT_SETTINGS = {
   habitsFolder: '04 Inner World/My Life/Habits',
   habitStreaks: true,
 };
+
+/* ========================================================================== *
+ * Secret vault (0.9.0) - where the credentials live.
+ *
+ * API facts, verified against obsidian.d.ts (obsidian-api, master, fetched
+ * 2026-09-06), not recalled from memory:
+ *   - `app.secretStorage: SecretStorage`, tagged @since 1.11.4. The class
+ *     extends Events and declares exactly three methods, all SYNCHRONOUS:
+ *       setSecret(id: string, secret: string): void   (throws on a bad id)
+ *       getSecret(id: string): string | null
+ *       listSecrets(): string[]
+ *     There is NO delete method in the typings. An entry is cleared by
+ *     writing the empty string; this layer treats '' and null alike.
+ *   - The id rule, from the setSecret doc: "Lowercase alphanumeric ID with
+ *     optional dashes". A colon is not allowed, so keys are prefixed with
+ *     `icor-for-life-planner-` (dash), never `icor-for-life-planner:`.
+ *   - The namespace is GLOBAL, not per plugin: listSecrets() returns every
+ *     id in the store, and the SettingSecretControl added in 1.13.2 persists
+ *     a key reference any plugin could name. Hence the prefix on every key,
+ *     and `secretKey` sanitising whatever it is handed into that alphabet.
+ *   - The typings do not say what backs the store. The platform review
+ *     names the system keychain, desktop and mobile alike. The plugin does
+ *     not depend on that: it feature-detects the two methods it uses and
+ *     falls back to data.json, so minAppVersion stays where it was.
+ *   - `SecretComponent` (a masked input bound to the store) is 1.11.1+ and
+ *     is not used here: the settings tab keeps its own password inputs so
+ *     the same rows work in both modes.
+ *
+ * The shape. `SecretVault` wraps the store (mode 'keychain') or nothing
+ * (mode 'data-json'). The settings object on disk carries a secret ONLY in
+ * data-json mode. In keychain mode `migrateSecrets` moves each one out on
+ * load, blanks its field, and every consumer that needs a credential
+ * receives `withSecrets(settings)`: a shallow copy with the fields and the
+ * feed addresses filled back in. The connectors, the fetchers and
+ * `sourceConfigured` stay pure and keep reading plain fields; they are
+ * simply never handed the raw settings any more (gated by the test suite).
+ * ========================================================================== */
+
+const SECRET_KEY_PREFIX = 'icor-for-life-planner-';
+// Settings field -> key suffix. `outlookRefreshToken` is reserved for the
+// Outlook connector: nothing reads it yet, the layer just knows its name so
+// the next connector stores through the same door.
+const SECRET_FIELDS = {
+  todoistToken: 'todoist-token',
+  clickupToken: 'clickup-token',
+  imapPassword: 'imap-password',
+  outlookRefreshToken: 'outlook-refresh-token',
+};
+const SECRET_FIELD_NAMES = Object.keys(SECRET_FIELDS);
+
+// A store id in the alphabet the API accepts: lowercase, digits, dashes.
+function secretKey(suffix) {
+  const slug = String(suffix == null ? '' : suffix).toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return SECRET_KEY_PREFIX + (slug || 'unnamed');
+}
+function fieldSecretKey(field) {
+  if (!SECRET_FIELDS[field]) throw new Error(`not a secret field: ${field}`);
+  return secretKey(SECRET_FIELDS[field]);
+}
+function calendarSecretKey(feedId) { return secretKey(`calendar-${feedId}`); }
+
+// Feature detection: the two methods this layer calls, and nothing else.
+function secretStorageUsable(storage) {
+  return !!(storage && typeof storage.getSecret === 'function' && typeof storage.setSecret === 'function');
+}
+
+class SecretVault {
+  constructor(storage) { this.storage = secretStorageUsable(storage) ? storage : null; }
+  get mode() { return this.storage ? 'keychain' : 'data-json'; }
+  available() { return !!this.storage; }
+  // '' when absent, unreadable, or cleared; never null, never a throw.
+  get(key) {
+    if (!this.storage) return '';
+    try { return trimmed(this.storage.getSecret(key)); } catch { return ''; }
+  }
+  // true when the store holds the value now. false means the caller must
+  // keep the value where it was: a blank is written to data.json only after
+  // the store accepted the secret.
+  set(key, value) {
+    if (!this.storage) return false;
+    const v = trimmed(value);
+    if (!v) return this.delete(key);
+    try { this.storage.setSecret(key, v); return true; } catch { return false; }
+  }
+  delete(key) {
+    if (!this.storage) return false;
+    if (this.get(key) === '') return true;
+    try { this.storage.setSecret(key, ''); return true; } catch { return false; }
+  }
+}
+
+// The address of one feed: the entry's own url when it has one (data-json
+// mode, or a feed already resolved by withSecrets), else the store's.
+// Every reader of a feed address goes through here.
+function feedUrl(feed, vault) {
+  const v = trimmed(feed && feed.url);
+  if (v || !vault || !vault.available() || !feed || !feed.id) return v;
+  return vault.get(calendarSecretKey(feed.id));
+}
+function setFeedUrl(feed, value, vault) {
+  const v = trimmed(value);
+  if (feed && feed.id && vault && vault.available() && vault.set(calendarSecretKey(feed.id), v)) {
+    feed.url = '';
+    return true;
+  }
+  feed.url = v;
+  return false;
+}
+function forgetFeedSecret(feed, vault) {
+  if (feed && feed.id && vault) vault.delete(calendarSecretKey(feed.id));
+}
+
+// One secret-typed settings field, read and written through the layer.
+function readSecret(settings, vault, field) {
+  const v = trimmed(settings && settings[field]);
+  if (v || !vault || !vault.available()) return v;
+  return vault.get(fieldSecretKey(field));
+}
+// Returns true when the value lives in the store now (the field is blank).
+function writeSecret(settings, vault, field, value) {
+  const v = trimmed(value);
+  if (vault && vault.available() && vault.set(fieldSecretKey(field), v)) {
+    settings[field] = '';
+    if (v) settings.secretsInKeychain = true;
+    return true;
+  }
+  settings[field] = v;
+  return false;
+}
+
+// Move every secret the settings object still carries into the store, IN
+// PLACE (the settings tab holds references into `calendars`, so entries are
+// blanked, never replaced). The stale `icsUrl` of releases before 0.8.0 is
+// dropped in both modes: the calendar migration has already turned it into
+// the first feed, and a second copy of a credential is one more to leak.
+// Returns { changed, moved }. Idempotent: a second call moves nothing.
+function migrateSecrets(settings, vault) {
+  const s = settings || {};
+  const moved = [];
+  let changed = false;
+  if (Object.prototype.hasOwnProperty.call(s, 'icsUrl')) { delete s.icsUrl; changed = true; }
+  if (!vault || !vault.available()) return { changed, moved };
+  for (const field of SECRET_FIELD_NAMES) {
+    const v = trimmed(s[field]);
+    if (!v) continue;
+    if (!vault.set(fieldSecretKey(field), v)) continue;
+    s[field] = '';
+    moved.push(field);
+    changed = true;
+  }
+  if (Array.isArray(s.calendars)) {
+    s.calendars.forEach((f, i) => {
+      if (!f || typeof f !== 'object') return;
+      const v = trimmed(f.url);
+      if (!v) return;
+      if (!f.id) f.id = normalizeCalendarFeed(f, i).id; // the key needs a stable id
+      if (!vault.set(calendarSecretKey(f.id), v)) return;
+      f.url = '';
+      moved.push(`calendar:${f.id}`);
+      changed = true;
+    });
+  }
+  if (moved.length && s.secretsInKeychain !== true) { s.secretsInKeychain = true; changed = true; }
+  return { changed, moved };
+}
+
+// The settings with every secret filled back in: a shallow copy, so the
+// `_shadow` map inside is the live one. In data-json mode the copy is the
+// settings as they are. Only ever handed to readers; never saved.
+function withSecrets(settings, vault) {
+  const s = Object.assign({}, settings || {});
+  if (!vault || !vault.available()) return s;
+  for (const field of SECRET_FIELD_NAMES) {
+    if (trimmed(s[field])) continue;
+    const v = vault.get(fieldSecretKey(field));
+    if (v) s[field] = v;
+  }
+  s.calendars = calendarFeeds(s).map((f) => Object.assign({}, f, { url: feedUrl(f, vault) }));
+  return s;
+}
+
+// What the plugin does with the bytes loadData returned, in order: the
+// calendar migration (icsUrl -> calendars[0]) on the raw object BEFORE the
+// defaults are laid under it, so the default `calendars: []` never masks
+// the old single-URL shape; then the secret migration; then the defaults.
+// `changed` says whether data.json must be written back once.
+function adoptSettings(loaded, vault) {
+  const raw = loaded && typeof loaded === 'object' ? loaded : {};
+  const migrated = migrateCalendarSettings(raw);
+  const secrets = migrateSecrets(migrated, vault);
+  const settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
+  return { settings, changed: migrated !== raw || secrets.changed, moved: secrets.moved };
+}
+
+// The settings tab's one line on where the secrets are.
+function secretsNoteText(mode, secretsInKeychain) {
+  if (mode === 'keychain') return 'Secrets are stored in the system keychain through Obsidian, not in this plugin\'s data.json.';
+  const base = 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in the system keychain).';
+  if (secretsInKeychain) {
+    return `${base} A newer Obsidian moved this vault's secrets into its keychain; this version cannot read them, so paste them again here or update Obsidian.`;
+  }
+  return base;
+}
 
 const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
@@ -2101,7 +2309,7 @@ function calendarFeeds(settings) {
   return list.map(normalizeCalendarFeed);
 }
 function enabledCalendarFeeds(settings) {
-  return calendarFeeds(settings).filter((f) => f.enabled && f.url);
+  return calendarFeeds(settings).filter((f) => f.enabled && feedUrl(f));
 }
 // The calendar counts as configured when at least one feed is on AND has an
 // address. Mirrors the no-token guard in calendarFetchAll, field for field.
@@ -2143,7 +2351,7 @@ function tagCalendarDefs(defs, feed) {
 // Fetch ONE feed. Same body every release had for the single URL: webcal
 // rewritten, https enforced, the ICS parsed; the defs come back tagged.
 async function calendarFetchFeed(feed) {
-  let raw = trimmed(feed && feed.url);
+  let raw = feedUrl(feed);
   if (!raw) return degraded('calendar', 'no-token', 'Calendar is not connected (no iCal URL).');
   if (/^webcal:\/\//i.test(raw)) raw = raw.replace(/^webcal:\/\//i, 'https://');
   if (!/^https:\/\//i.test(raw)) {
@@ -2171,7 +2379,7 @@ async function calendarFetchAll(settings) {
   const jobs = [];
   for (const id of CALENDAR_SOURCES) {
     const c = CONNECTORS[id];
-    for (const feed of c.feeds(settings)) if (feed.enabled && feed.url) jobs.push({ feed, connector: c });
+    for (const feed of c.feeds(settings)) if (feed.enabled && feedUrl(feed)) jobs.push({ feed, connector: c });
   }
   const settled = await Promise.allSettled(jobs.map(({ feed, connector }) => connector.fetchFeed(feed)));
   const results = {};
@@ -2266,8 +2474,10 @@ function calendarAggregateStatus(feeds, results, merged, now) {
 }
 
 // The settings row's status sentence for one feed, from its last sync.
-function calendarFeedStatusText(feed, st) {
-  if (!feed || !trimmed(feed.url)) return 'Paste the iCal address to connect this calendar.';
+// `vault` is optional: the settings tab passes it so a feed whose address
+// lives in the store still reads as connected.
+function calendarFeedStatusText(feed, st, vault) {
+  if (!feed || !feedUrl(feed, vault)) return 'Paste the iCal address to connect this calendar.';
   if (feed.enabled === false) return 'Off: its events are hidden until it is switched on.';
   if (!st) return 'Not synced yet this session.';
   if (!st.ok) return `Failed: ${st.message || 'no reply.'}`;
@@ -3765,14 +3975,16 @@ function habitsCountText(habits, folder) {
 
 class IcorPlannerPlugin extends Plugin {
   async onload() {
-    // Settings from disk, then the 0.8.0 calendar migration on the raw bytes
-    // (icsUrl -> calendars[0]) BEFORE the defaults are laid under them: the
-    // default `calendars: []` must never mask a data.json that still speaks
-    // the old single-URL shape.
+    // The secret store, when this Obsidian has one (feature-detected; see
+    // the secret vault section). Then the settings from disk through
+    // adoptSettings: the calendar migration, the secret migration (each
+    // secret data.json still holds moves into the store and its field is
+    // blanked), the defaults. One write back when anything moved.
+    this.secrets = new SecretVault(this.app && this.app.secretStorage);
     const loaded = (await this.loadData()) || {};
-    const migrated = migrateCalendarSettings(loaded);
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
-    if (migrated !== loaded) await this.saveData(this.settings);
+    const adopted = adoptSettings(loaded, this.secrets);
+    this.settings = adopted.settings;
+    if (adopted.changed) await this.persistSettings();
     // _shadow: per-item last-synced baseline for the two-way fields. Lives in
     // data.json beside the settings; never shown in the settings UI.
     if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
@@ -3869,6 +4081,20 @@ class IcorPlannerPlugin extends Plugin {
   // Every path, derived from the setting at call time.
   paths() { return plannerPaths(this.settings); }
 
+  // The settings with the secrets filled in, for anything that needs a
+  // credential: the connectors, the fetchers, the probe, the configured
+  // checks. A fresh shallow copy each call; never saved.
+  withSecrets() { return withSecrets(this.settings, this.secrets); }
+
+  // The one write of the settings to disk. Belt and braces: a secret that
+  // reached the in-memory object by any path (a hand edit, a data.json
+  // synced in from a machine without a store) is moved out first, so in
+  // keychain mode data.json never carries one.
+  async persistSettings() {
+    migrateSecrets(this.settings, this.secrets);
+    await this.saveData(this.settings);
+  }
+
   // Boot: if the configured folder is missing but exactly one top-level
   // folder is called "... planner", use it. Several: say so once and leave
   // the setting alone. The vault is never guessed at.
@@ -3879,7 +4105,7 @@ class IcorPlannerPlugin extends Plugin {
       const d = detectPlannerFolder(names, this.paths().root);
       if (d.action === 'adopt') {
         this.settings.plannerFolder = d.folder;
-        await this.saveData(this.settings);
+        await this.persistSettings();
         new Notice(`Planner: using the folder "${d.folder}".`);
       } else if (d.action === 'ask') {
         new Notice(`Planner: several folders look like the planner (${d.candidates.join(', ')}). Pick one under Settings, ICOR for Life - Planner, Planner folder.`, 12000);
@@ -3895,11 +4121,12 @@ class IcorPlannerPlugin extends Plugin {
   // Any source with a connector, calendar included. Manual is excluded on
   // purpose: it needs no fetch, so it must never make the scheduler start one.
   anySourceConfigured() {
-    return FETCHED_SOURCES.some((k) => sourceConfigured(this.settings, k));
+    const resolved = this.withSecrets();
+    return FETCHED_SOURCES.some((k) => sourceConfigured(resolved, k));
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.persistSettings();
     this.scheduleSync();
     this.emitModelChanged();
   }
@@ -3959,7 +4186,7 @@ class IcorPlannerPlugin extends Plugin {
       if (!parsed) return;
       // The cache meets today's settings: names and colours from the feeds,
       // a feed that is gone or off drops out, a v1 array joins the first feed.
-      const feeds = enabledCalendarFeeds(this.settings);
+      const feeds = enabledCalendarFeeds(this.withSecrets());
       const defs = adoptCacheDefs(parsed.defs, feeds);
       if (defs.length && !this.calendarDefs) {
         for (const g of groupDefsByFeed(defs)) if (g.id) this.calendarDefsByFeed[g.id] = g.defs;
@@ -3976,7 +4203,7 @@ class IcorPlannerPlugin extends Plugin {
   // board follows at once instead of at the next sync. A feed no longer
   // enabled drops out; the rest keep their order and their dedupe.
   recomputeCalendarDefs() {
-    const ids = enabledCalendarFeeds(this.settings).map((f) => f.id);
+    const ids = enabledCalendarFeeds(this.withSecrets()).map((f) => f.id);
     for (const id of Object.keys(this.calendarDefsByFeed)) {
       if (!ids.includes(id)) delete this.calendarDefsByFeed[id];
     }
@@ -4186,7 +4413,7 @@ class IcorPlannerPlugin extends Plugin {
     this.emitModelChanged();
     try {
       await this.ensureFolders();
-      const s = this.settings;
+      const s = this.withSecrets();
       // Every task connector starts at once, in registry order; results are
       // awaited and applied in that same order.
       const runs = SYNCED_SOURCES.map((k) => [k, CONNECTORS[k].fetchOpen(s)]);
@@ -4231,7 +4458,7 @@ class IcorPlannerPlugin extends Plugin {
         }
       }
       this.lastSyncAt = new Date().toISOString();
-      await this.saveData(this.settings); // persist the refreshed shadows
+      await this.persistSettings(); // persist the refreshed shadows
       if (manual) {
         const okCount = SYNCED_SOURCES.filter((k) => this.syncStatus[k] && this.syncStatus[k].ok).length;
         new Notice(`Planner sync done (${okCount} task source${okCount === 1 ? '' : 's'} healthy).`);
@@ -4250,7 +4477,7 @@ class IcorPlannerPlugin extends Plugin {
   // Failed pushes keep the old baseline so the next sync retries them.
   async upsertSource(source, items) {
     const folder = this.paths().sourceFolder(source);
-    const s = this.settings;
+    const s = this.withSecrets(); // shallow: s._shadow is the live map
     const allItems = collectItems(this.app, this.paths().root);
     const existing = new Map(); // external id -> item
     for (const it of allItems) {
@@ -4371,7 +4598,7 @@ class IcorPlannerPlugin extends Plugin {
   async applyDoneOnSource(item, closed) {
     const c = CONNECTORS[item.source];
     if (!c || !c.setClosed) return; // manual: nowhere to write
-    await c.setClosed(this.settings, item, closed);
+    await c.setClosed(this.withSecrets(), item, closed);
     new Notice(c.doneNotice(closed));
   }
 
@@ -4386,7 +4613,7 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   async detectAndPush(path) {
-    const s = this.settings;
+    const s = this.withSecrets(); // shallow: s._shadow is the live map
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
     const item = itemFromFile(this.app, file);
@@ -4445,7 +4672,7 @@ class IcorPlannerPlugin extends Plugin {
     }
     if (dirty) {
       if (this._shadowSaveTimer) window.clearTimeout(this._shadowSaveTimer);
-      this._shadowSaveTimer = window.setTimeout(() => this.saveData(this.settings), 1500);
+      this._shadowSaveTimer = window.setTimeout(() => this.persistSettings(), 1500);
     }
   }
 
@@ -4984,7 +5211,7 @@ function wireEventChip(plugin, chip, ev) {
   if (ev.feedId) chip.setAttribute('data-feed', ev.feedId);
   chip.setAttribute('aria-label',
     `${ev.title}${ev.location ? ', ' + ev.location : ''}${ev.feedName ? ', ' + ev.feedName : ''}${ev.tzUnresolved ? ', time zone not recognised, shown as written' : ''}`);
-  chip.addEventListener('click', () => new EventDetailModal(plugin.app, ev, calendarFeedFor(plugin.settings, ev), plugin.manifest.id).open());
+  chip.addEventListener('click', () => new EventDetailModal(plugin.app, ev, calendarFeedFor(plugin.withSecrets(), ev), plugin.manifest.id).open());
 }
 
 // One task card. mode: 'board' | 'tray'. `view.index` (buildItemIndex) is
@@ -5502,7 +5729,7 @@ class EventDetailModal extends Modal {
     // iCal shape; an iCloud, Proton or Outlook feed has no web edit URL, so
     // there is no calendar button to invent for it. The event's own URL
     // property, when it has one, is the fallback link.
-    const gcalUrl = this.feed ? googleCalendarEventUrl(ev, this.feed.url) : null;
+    const gcalUrl = this.feed ? googleCalendarEventUrl(ev, feedUrl(this.feed)) : null;
     if (gcalUrl) {
       const btn = row.createEl('button', { cls: 'iplan-event-modal-open', text: 'EDIT IN GOOGLE CALENDAR' });
       btn.addEventListener('click', () => window.open(gcalUrl, '_external'));
@@ -6550,7 +6777,8 @@ class PlannerTrayView extends ItemView {
 
   /* ---- SYNC: the classic tray (goals pinned + unscheduled by source) ---- */
   renderSync(el, items, today) {
-    const conn = trayConnectionState(this.plugin.settings);
+    const resolved = this.plugin.withSecrets();
+    const conn = trayConnectionState(resolved);
 
     // 1. The composer. Chrome, first, always, in every connection state.
     this.renderComposer(el);
@@ -6588,7 +6816,7 @@ class PlannerTrayView extends ItemView {
       if (key !== MANUAL_SOURCE && conn.allCold) continue;
 
       const meta = SOURCES[key];
-      const configured = sourceConfigured(this.plugin.settings, key);
+      const configured = sourceConfigured(resolved, key);
       const st = this.plugin.syncStatus[key];
       const list = items
         .filter((i) => i.source === key && !i.plannedDay && !isDone(i) && !i.weeklyGoal)
@@ -6671,6 +6899,15 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       });
     };
 
+    // Where the secrets are, in one sentence, before the first field that
+    // takes one.
+    const secrets = this.plugin.secrets;
+    new Setting(containerEl).setName('Secrets').setHeading();
+    new Setting(containerEl)
+      .setName('Where they live')
+      .setDesc(secretsNoteText(secrets.mode, this.plugin.settings.secretsInKeychain === true))
+      .setClass('iplan-settings-secrets');
+
     // The planner folder. Typing validates live (announced); Apply commits,
     // moving the existing notes with a link-safe rename when the new folder
     // does not exist yet, refusing when both exist rather than guessing.
@@ -6723,15 +6960,15 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     secret(new Setting(containerEl)
       .setName('API token')
       .setDesc('Todoist -> Settings -> Integrations -> Developer -> API token.'),
-      () => this.plugin.settings.todoistToken,
-      (v) => { this.plugin.settings.todoistToken = v; }, 'paste token');
+      () => readSecret(this.plugin.settings, secrets, 'todoistToken'),
+      (v) => { writeSecret(this.plugin.settings, secrets, 'todoistToken', v); }, 'paste token');
 
     new Setting(containerEl).setName('ClickUp').setHeading();
     secret(new Setting(containerEl)
       .setName('Personal API token')
       .setDesc('ClickUp -> avatar -> Settings -> Apps -> API Token. Starts with pk_.'),
-      () => this.plugin.settings.clickupToken,
-      (v) => { this.plugin.settings.clickupToken = v; }, 'pk_...');
+      () => readSecret(this.plugin.settings, secrets, 'clickupToken'),
+      (v) => { writeSecret(this.plugin.settings, secrets, 'clickupToken', v); }, 'pk_...');
     new Setting(containerEl)
       .setName('Workspace ID (optional)')
       .setDesc('Leave empty to read every workspace the token can see.')
@@ -6868,8 +7105,8 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     secret(new Setting(containerEl)
       .setName('App password')
       .setDesc('Never your normal password. Paste the app password without spaces.'),
-      () => this.plugin.settings.imapPassword,
-      (v) => { this.plugin.settings.imapPassword = v.replace(/\s+/g, ''); }, 'app password');
+      () => readSecret(this.plugin.settings, secrets, 'imapPassword'),
+      (v) => { writeSecret(this.plugin.settings, secrets, 'imapPassword', v.replace(/\s+/g, '')); }, 'app password');
     // Test connection: the probe logs in and straight out, so a wrong host,
     // port, certificate or password is named here, now, with the same
     // sentence the tray would show after the next sync. The outcome lands in
@@ -6894,7 +7131,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       b.setDisabled(true);
       probeSetting.descEl.empty();
       probeSetting.descEl.appendText('Connecting...');
-      try { renderProbe(await imapProbe(this.plugin.settings)); }
+      try { renderProbe(await imapProbe(this.plugin.withSecrets())); }
       finally { b.setDisabled(false); }
     }));
 
@@ -6915,7 +7152,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       const row = new Setting(containerEl)
         .setName(`Calendar ${i + 1}`)
         .setClass('iplan-settings-feed');
-      row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id]));
+      row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id], secrets));
       row.descEl.setAttribute('aria-live', 'polite');
       row.addText((t) => {
         t.setPlaceholder('Name').setValue(feed.name);
@@ -6929,7 +7166,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           this.plugin.emitModelChanged();
         });
       });
-      secret(row, () => feed.url, (v) => { feed.url = v; },
+      secret(row, () => feedUrl(feed, secrets), (v) => { setFeedUrl(feed, v, secrets); },
         'https://... or webcal://...', `iCal address of calendar ${i + 1} (kept secret)`);
       const group = row.controlEl.createDiv({
         cls: 'iplan-seg iplan-settings-presets iplan-settings-swatches',
@@ -6970,7 +7207,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           feed.enabled = v;
           await this.plugin.saveSettings();
           this.plugin.recomputeCalendarDefs();
-          row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id]));
+          row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id], secrets));
         });
       });
       // Remove is two presses: the first arms it and says so, the second
@@ -6991,6 +7228,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           if (disarm) window.clearTimeout(disarm);
           const at = feedList.indexOf(feed);
           if (at >= 0) feedList.splice(at, 1);
+          forgetFeedSecret(feed, secrets);
           await this.plugin.saveSettings();
           this.plugin.recomputeCalendarDefs();
           new Notice(`Planner: removed ${feed.name}.`);
@@ -7271,4 +7509,6 @@ module.exports.__test = {
   daysFromCadence, habitDays, cadenceFromDays, streakOf, habitRowState, habitOccurrences,
   habitLogAfterCheck, habitTabState, habitCadenceLabel, habitsCountText, trayTabName,
   SOURCES, DEFAULT_SETTINGS,
+  SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
+  feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
 };
