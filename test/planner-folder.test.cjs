@@ -125,7 +125,9 @@ test('the literal default appears exactly once in code, and no constant path sur
   assert.doesNotMatch(c, /startsWith\(PLANNER_FOLDER/, 'no prefix test against the constant');
   assert.equal((c.match(/collectItems\(this\.app, this\.paths\(\)\.root\)/g) || []).length, 1, 'the sync collects from the setting');
   assert.equal((c.match(/collectItems\(this\.plugin\.app, this\.plugin\.paths\(\)\.root\)/g) || []).length, 2, 'the board and the tray collect from the setting');
-  assert.match(c, /data-path="\$\{this\.paths\(\)\.root\}"/, 'the file-tree click hook reads the setting at click time');
+  // 0.9.2: the file-tree click hook is gone (the folder opens like any
+  // folder), so no code builds a selector from the folder path any more.
+  assert.doesNotMatch(c, /data-path="\$\{this\.paths\(\)\.root\}"/, 'the retired file-tree click hook is back');
   assert.match(c, /this\.paths\(\)\.isInside\(/, 'the live-render guards ask the boundary helper');
   assert.match(c, /this\.adoptPlannerFolder\(\);\n\s*this\.ensureGitignore\(\);/, 'adoption runs first on layout ready');
   assert.match(c, /await this\.app\.fileManager\.renameFile\(fp\.current, fp\.folder\)/, 'the move is a link-safe rename');

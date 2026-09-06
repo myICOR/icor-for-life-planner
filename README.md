@@ -52,10 +52,11 @@ for defects. It gets fixed fast.
   `data.json` (or in your vault on an older Obsidian).
   Works on desktop and mobile; the sign-in comes back through an
   `obsidian://` link, with a device code as the fallback.
-- A "Planner" entry in the file tree (between INBOX and WiP) opens the
-  weekly board, and brings the tray up in the right sidebar with it. That
-  happens once per session: if you close the tray or collapse the sidebar,
-  opening the board again leaves it alone.
+- A Planner button on the file-tree toolbar under the sidebar logo, and
+  one in the left ribbon, open the weekly board and bring the tray up in
+  the right sidebar with it. That happens once per session: if you close
+  the tray or collapse the sidebar, opening the board again leaves it
+  alone. The planner folder itself opens like any folder.
 - The tray has four tabs. TASKS holds the unscheduled items grouped by
   source, with your weekly goals pinned on top. HABITS plans the week's
   habits: one row per habit, seven weekday toggles. AGENDA answers "what is
@@ -426,9 +427,9 @@ committed with your notes) instead of `data.json` (see Secrets).
 1. Copy `main.js`, `manifest.json` and `styles.css` from the latest
    release into `.obsidian/plugins/icor-for-life-planner/` in your vault.
 2. Enable the plugin in Settings, Community plugins.
-3. Open the "Planner" entry in the file tree (or run the command
-   "ICOR for Life - Planner: Open the board") and start adding tasks in the tray with
-   "+ ADD TASK".
+3. Click the Planner button on the file-tree toolbar or in the left
+   ribbon (or run the command "ICOR for Life - Planner: Open the board")
+   and start adding tasks in the tray with "+ ADD TASK".
 4. When you want your accounts in there too, add the keys in the plugin
    settings and drag the cards that arrive onto your week.
 
