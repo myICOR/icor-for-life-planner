@@ -18,7 +18,7 @@ test('manual is a source, and it is not a synced source', () => {
   assert.ok(T.SOURCES.manual.svg, 'manual needs its own mark, or cards borrow Todoist\'s');
   assert.equal(T.SOURCES.manual.folder, 'Manual');
   assert.equal(T.isSyncedSource('manual'), false);
-  assert.deepEqual(T.SYNCED_SOURCES, ['todoist', 'clickup', 'email']);
+  assert.deepEqual(T.SYNCED_SOURCES, ['todoist', 'clickup', 'email', 'outlook']);
   assert.ok(T.TASK_SOURCES.includes('manual'));
 });
 

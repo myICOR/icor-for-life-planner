@@ -155,5 +155,7 @@ test('the hint reaches the tray note and the board notice', () => {
   assert.match(main, /iplan-tray-note-hint/, 'the tray renders the hint line');
   assert.match(main, /notices\.push\(`\$\{SOURCES\[key\]\.label\}: \$\{st\.message\}\$\{st\.hint/, 'the board notice appends the hint');
   assert.match(main, /renderHostHint\(v\)/, 'the settings hint re-renders on host change');
-  assert.match(main, /this\.syncStatus\.email\.reason === 'misconfigured'/, 'a manual sync shows the email failure as a Notice');
+  // Since Outlook joined (2026-09-06) the manual-sync Notice is registry-derived: every misconfigured source, not the mailbox by name.
+  assert.match(main, /for \(const key of SYNCED_SOURCES\) \{\n\s*const st = this\.syncStatus\[key\];\n\s*if \(st && st\.reason === 'misconfigured'\) new Notice\(/, 'a manual sync shows a misconfigured source\'s failure as a Notice, hint included');
+  assert.doesNotMatch(main, /this\.syncStatus\.email\.reason/, 'no source is named by hand in the sync loop');
 });

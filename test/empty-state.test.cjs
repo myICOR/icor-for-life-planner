@@ -78,7 +78,7 @@ test('the connectors agree with sourceConfigured about what "not connected" mean
   // If they ever disagree the tray claims one thing and the fetch does another.
   const fetchers = {
     todoist: T.todoistFetchOpen, clickup: T.clickupFetchOpen,
-    email: T.emailFetchStarred, calendar: T.calendarFetchDefs,
+    email: T.emailFetchStarred, calendar: T.calendarFetchDefs, outlook: T.outlookFetchOpen,
   };
   for (const [source, fn] of Object.entries(fetchers)) {
     const res = await fn(COLD);
@@ -97,7 +97,7 @@ test('trayConnectionState leads with one CTA only when every task source is cold
   const oneWarm = T.trayConnectionState({ todoistToken: 'abc' });
   assert.equal(oneWarm.allCold, false);
   assert.deepEqual(oneWarm.configured, ['todoist']);
-  assert.deepEqual(oneWarm.unconfigured, ['clickup', 'email']);
+  assert.deepEqual(oneWarm.unconfigured, ['clickup', 'email', 'outlook']);
 
   // A calendar-only setup still leaves the task tray with nothing to show,
   // so it still earns the lead block.

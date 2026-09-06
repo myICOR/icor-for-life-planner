@@ -116,18 +116,57 @@ const CONNECTORS = {
     // fill-rendered mark, so email uses a simple filled envelope path instead.
     svg: 'M1.5 4.5h21a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-21A1.5 1.5 0 0 1 0 18V6a1.5 1.5 0 0 1 1.5-1.5zm10.5 8.25L2.25 6.375v11.25h19.5V6.375L12 12.75zM3.375 6l8.625 5.625L20.625 6H3.375z',
   },
+  // Outlook (2026-09-06): flagged mail through Microsoft Graph, signed in
+  // with the member's OWN Entra app registration (the client id is theirs,
+  // the tokens are theirs, nothing passes through myICOR). The one write is
+  // the flag status of a message, behind Complete on source, and it needs
+  // the Mail.ReadWrite permission the sign-in asks for only once that
+  // toggle is on. Runs on desktop and mobile: every call is requestUrl and
+  // the redirect is the obsidian:// protocol handler, one path for both.
+  outlook: {
+    id: 'outlook', label: 'Outlook', folder: 'Outlook', kind: 'task',
+    configured: (s) => outlookSignedIn(s),
+    fetchOpen: (s, deps) => outlookFetchOpen(s, deps),
+    setClosed: (s, item, closed, deps) => outlookSetClosed(s, item, closed, deps),
+    // The flag is the one thing the mailbox takes; never field writes.
+    pushFields: null,
+    doneNotice: (closed) => (closed ? 'Planner: marked the email complete in Outlook.' : 'Planner: flagged the email again in Outlook.'),
+    platforms: ['desktop', 'mobile'],
+    // A flag, not a brand mark: a card from here IS a flagged email, and the
+    // Microsoft marks are not in the icon set this file draws from.
+    svg: 'M4 2h2v20H4V2zm3 1h12.5l-3.4 4.75L19.5 12.5H7V3z',
+  },
   calendar: {
     id: 'calendar', label: 'Calendar', folder: null, kind: 'calendar', // no per-event notes; one cache file
     // A calendar connector carries FEEDS, not one credential: feeds(settings)
-    // lists them in settings order and fetchFeed(feed) fetches one of them.
-    // A later Graph or CalDAV connector is one more entry with the same two
-    // hooks; calendarFetchAll walks every connector of kind 'calendar'.
-    feeds: (s) => calendarFeeds(s),
+    // lists the feeds of its kind in settings order, ready(feed, settings)
+    // says whether one of them can be fetched (an address here, a sign-in
+    // for the Graph one), and fetchFeed(feed, settings, deps) fetches it.
+    // calendarFetchAll walks every connector of kind 'calendar'; the feed's
+    // `kind` names which connector owns it (calendarFeedConnector).
+    feedKind: 'ics',
+    feeds: (s) => calendarFeeds(s).filter((f) => f.kind === 'ics'),
+    ready: (feed) => !!feedUrl(feed),
     configured: (s) => calendarFeedConfigured(s),
     fetchFeed: (feed) => calendarFetchFeed(feed),
     fetchOpen: null, setClosed: null, pushFields: null,
     platforms: ['desktop', 'mobile'],
     svg: 'M18.316 5.684H24v12.632h-5.684V5.684zM5.684 24h12.632v-5.684H5.684V24zM18.316 5.684V0H1.895A1.894 1.894 0 0 0 0 1.895v16.421h5.684V5.684h12.632zm-7.207 6.25v-.065c.272-.144.5-.349.687-.617s.279-.595.279-.982c0-.379-.099-.72-.3-1.025a2.05 2.05 0 0 0-.832-.714 2.703 2.703 0 0 0-1.197-.257c-.6 0-1.094.156-1.481.467-.386.311-.65.671-.793 1.078l1.085.452c.086-.249.224-.461.413-.633.189-.172.445-.257.767-.257.33 0 .602.088.816.264a.86.86 0 0 1 .322.703c0 .33-.12.589-.36.778-.24.19-.535.284-.886.284h-.567v1.085h.633c.407 0 .748.109 1.02.327.272.218.407.499.407.843 0 .336-.129.614-.387.832s-.565.327-.924.327c-.351 0-.651-.103-.897-.311-.248-.208-.422-.502-.521-.881l-1.096.452c.178.616.505 1.082.977 1.401.472.319.984.478 1.538.477a2.84 2.84 0 0 0 1.293-.291c.382-.193.684-.458.902-.794.218-.336.327-.72.327-1.149 0-.429-.115-.797-.344-1.105a2.067 2.067 0 0 0-.881-.689zm2.093-1.931l.602.913L15 10.045v5.744h1.187V8.446h-.827l-2.158 1.557zM22.105 0h-3.289v5.184H24V1.895A1.894 1.894 0 0 0 22.105 0zm-3.289 23.5l4.684-4.684h-4.684V23.5zM0 22.105C0 23.152.848 24 1.895 24h3.289v-5.184H0v3.289z',
+  },
+  // The Outlook calendar (2026-09-06): one feed of kind 'graph', created on
+  // sign-in, fetched through calendarView, which already returns one row per
+  // occurrence, so its defs are marked expanded and never enter the
+  // recurrence expansion. Read-only like every calendar.
+  'outlook-calendar': {
+    id: 'outlook-calendar', label: 'Outlook calendar', folder: null, kind: 'calendar',
+    feedKind: 'graph',
+    feeds: (s) => calendarFeeds(s).filter((f) => f.kind === 'graph'),
+    ready: (feed, s) => outlookSignedIn(s || {}),
+    configured: (s) => enabledCalendarFeeds(s).some((f) => f.kind === 'graph'),
+    fetchFeed: (feed, s, deps) => outlookCalendarFetchFeed(feed, s, deps),
+    fetchOpen: null, setClosed: null, pushFields: null,
+    platforms: ['desktop', 'mobile'],
+    svg: 'M4 2h2v20H4V2zm3 1h12.5l-3.4 4.75L19.5 12.5H7V3z',
   },
 };
 
@@ -197,6 +236,20 @@ const DEFAULT_SETTINGS = {
   imapPort: 993,
   imapSecurity: 'tls',
   imapAllowSelfSigned: false,
+  // Outlook through the member's own Microsoft app registration
+  // (2026-09-06). The client id is a public-client GUID, not a secret; the
+  // tenant is the login segment (common, organizations, consumers); the
+  // four token fields are secret-typed and live in the store on Obsidian
+  // 1.11.4 or newer (SECRET_FIELDS); outlookScopes records what the last
+  // sign-in granted, so the plugin knows whether a flag may be written
+  // without asking Microsoft first.
+  outlookClientId: '',
+  outlookTenant: 'common',
+  outlookRefreshToken: '',
+  outlookAccessToken: '',
+  outlookExpiresAt: '',
+  outlookAccount: '',
+  outlookScopes: '',
   // The calendars (v0.8.0): one entry per feed,
   //   { id, name, url, color: 1..4, enabled, kind: 'ics' }.
   // The single icsUrl of earlier releases becomes the first entry on load
@@ -291,14 +344,18 @@ const DEFAULT_SETTINGS = {
  * ========================================================================== */
 
 const SECRET_KEY_PREFIX = 'icor-for-life-planner-';
-// Settings field -> key suffix. `outlookRefreshToken` is reserved for the
-// Outlook connector: nothing reads it yet, the layer just knows its name so
-// the next connector stores through the same door.
+// Settings field -> key suffix. The four Outlook fields are one sign-in: the
+// refresh token (the credential), the access token with its expiry (a
+// short-lived cache, refreshed from the first), and the account name shown
+// in settings. Signing out clears all four.
 const SECRET_FIELDS = {
   todoistToken: 'todoist-token',
   clickupToken: 'clickup-token',
   imapPassword: 'imap-password',
   outlookRefreshToken: 'outlook-refresh-token',
+  outlookAccessToken: 'outlook-access-token',
+  outlookExpiresAt: 'outlook-expires-at',
+  outlookAccount: 'outlook-account',
 };
 const SECRET_FIELD_NAMES = Object.keys(SECRET_FIELDS);
 
@@ -424,6 +481,13 @@ function migrateSecrets(settings, vault) {
 // settings as they are. Only ever handed to readers; never saved.
 function withSecrets(settings, vault) {
   const s = Object.assign({}, settings || {});
+  // Hidden links back to what the copy was made from, for the one writer
+  // that runs inside a connector (a rotated Outlook refresh token,
+  // saveOutlookTokens): a write must land in the store, or in the settings
+  // that will be saved, never on this throwaway copy. Non-enumerable, so
+  // neither JSON nor a further copy carries them.
+  Object.defineProperty(s, '_live', { value: settings || null, enumerable: false });
+  Object.defineProperty(s, '_vault', { value: vault || null, enumerable: false });
   if (!vault || !vault.available()) return s;
   for (const field of SECRET_FIELD_NAMES) {
     if (trimmed(s[field])) continue;
@@ -935,6 +999,16 @@ function calendarTzWarning(defs) {
 
 // A vault-safe file basename from a task title. Windows-illegal + Obsidian-hot
 // characters are stripped; length bounded so paths stay sane.
+// The id part of a note name. A Todoist, ClickUp or IMAP id is short and
+// plain; a Graph message id runs to 150 characters that share a long prefix
+// per mailbox, so its first 70 would collide. Such an id is named by its
+// tail and a hash of the whole, never truncated at the front.
+function noteIdPart(id) {
+  const s = String(id == null ? '' : id);
+  if (s.length <= 40) return safeBasename(s);
+  return `${safeBasename(s.slice(-16))}-${Math.abs(hashStr(s)).toString(36)}`;
+}
+
 function safeBasename(title) {
   const cleaned = String(title || 'untitled')
     .replace(/[\\/:*?"<>|#^[\]{}]/g, ' ')
@@ -1362,6 +1436,600 @@ async function clickupPushFields(token, id, pushes) {
   }
   if (Object.keys(payload).length) await clickupWrite(token, `/task/${encodeURIComponent(id)}`, payload);
 }
+
+/* ========================================================================== *
+ * Connector: Outlook through Microsoft Graph (2026-09-06), signed in with the
+ * member's OWN Entra app registration. myICOR holds no developer account,
+ * never sees a client id or a token; each member registers the app in their
+ * own Microsoft account (docs/outlook-setup-guide.md) and pastes the
+ * Application (client) ID here.
+ *
+ * The sign-in is the authorization code flow with PKCE (S256), a public
+ * client, no secret. The redirect is the obsidian:// protocol handler,
+ * registered in the Entra app as obsidian://icor-for-life-planner/auth under
+ * "Mobile and desktop applications": the one redirect that works the same on
+ * desktop and mobile, so the one path built. The device code flow is the
+ * fallback for a device where that path is closed by policy; there is no
+ * loopback listener (it would cover desktop only, which the scheme already
+ * covers, at the price of a second auth path to keep).
+ *
+ * Every call to Microsoft goes through Obsidian's requestUrl, never the
+ * renderer's fetch: fetch carries Origin: app://obsidian.md, and Entra then
+ * treats the token call as a browser (SPA) request and refuses it
+ * (AADSTS9002326). requestUrl is a native request with no Origin.
+ *
+ * Scopes are incremental. The first sign-in asks for
+ *   offline_access openid profile Mail.Read Calendars.Read
+ * and Mail.ReadWrite joins only when Complete on source is switched on: the
+ * one write this connector ever makes (a flag status) is the one that earns
+ * the write-capable permission, and a member who never turns the toggle on
+ * never sees one on their consent screen.
+ *
+ * Tokens go through the secret vault and nowhere else. The refresh token
+ * rotates on every use, so whatever comes back is stored over the old one;
+ * an absent refresh_token in a response leaves the stored one untouched.
+ * ========================================================================== */
+
+const OUTLOOK_REDIRECT_URI = 'obsidian://icor-for-life-planner/auth';
+// The action string for registerObsidianProtocolHandler: the redirect URI
+// with the scheme stripped.
+const OUTLOOK_PROTOCOL_ACTION = 'icor-for-life-planner/auth';
+const OUTLOOK_LOGIN_HOST = 'https://login.microsoftonline.com';
+const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
+const OUTLOOK_TENANTS = ['common', 'organizations', 'consumers'];
+const OUTLOOK_SCOPES_READ = ['offline_access', 'openid', 'profile', 'Mail.Read', 'Calendars.Read'];
+const OUTLOOK_SCOPES_WRITE = ['offline_access', 'openid', 'profile', 'Mail.Read', 'Mail.ReadWrite', 'Calendars.Read'];
+// Refresh this long before the access token's stated expiry.
+const OUTLOOK_TOKEN_SLACK_MS = 60000;
+// The notice under the client id field. Shipped exactly as given.
+const OUTLOOK_NOTICE = 'You are creating this in your own Microsoft account. Paperless Movement, S.L. never sees or stores your client id or token; you are bound by Microsoft\'s developer terms for it.';
+const OUTLOOK_GUIDE_URL = 'https://github.com/myICOR/icor-for-life-planner/blob/main/docs/outlook-setup-guide.md';
+// Where the member revokes the grant on Microsoft's side. Signing out here
+// deletes the local tokens; it cannot revoke anything server-side.
+const OUTLOOK_REVOKE_URLS = {
+  work: 'https://myaccount.microsoft.com/',
+  personal: 'https://account.live.com/consent/Manage',
+};
+
+/* ---- the injectable runtime: requestUrl, sleep, now, crypto ---- */
+// Every network path takes `deps` so a test can script the wire; the real
+// thing is what runs when nothing is handed in.
+const requestUrlOf = (deps) => (deps && deps.requestUrl) || requestUrl;
+const sleepOf = (deps) => (deps && deps.sleep) || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+const nowOf = (deps) => (deps && deps.now) || (() => Date.now());
+const cryptoOf = (deps) => (deps && deps.crypto) || globalThis.crypto;
+
+/* ---- PKCE, the state nonce, the authorize URL ---- */
+function base64url(bytes) {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const b64 = typeof btoa === 'function' ? btoa(bin) : Buffer.from(bin, 'binary').toString('base64');
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+// The S256 challenge of a verifier: base64url(SHA-256(verifier)), no padding.
+// WebCrypto on desktop and mobile alike (Node's global crypto in the tests).
+async function pkceChallenge(verifier, deps) {
+  const digest = await cryptoOf(deps).subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return base64url(new Uint8Array(digest));
+}
+async function pkcePair(deps) {
+  const raw = new Uint8Array(32);
+  cryptoOf(deps).getRandomValues(raw);
+  const verifier = base64url(raw);
+  return { verifier, challenge: await pkceChallenge(verifier, deps) };
+}
+function randomState(deps) {
+  const raw = new Uint8Array(16);
+  cryptoOf(deps).getRandomValues(raw);
+  return base64url(raw);
+}
+
+function outlookTenant(settings) {
+  const t = trimmed(settings && settings.outlookTenant);
+  return OUTLOOK_TENANTS.includes(t) ? t : 'common';
+}
+function outlookScopeString(write) { return (write ? OUTLOOK_SCOPES_WRITE : OUTLOOK_SCOPES_READ).join(' '); }
+
+function authorizeUrl({ clientId, tenant, scopes, redirectUri, state, challenge }) {
+  const q = [
+    ['client_id', clientId],
+    ['response_type', 'code'],
+    ['redirect_uri', redirectUri || OUTLOOK_REDIRECT_URI],
+    ['response_mode', 'query'],
+    ['scope', scopes],
+    ['state', state],
+    ['code_challenge', challenge],
+    ['code_challenge_method', 'S256'],
+    // A member may have a work and a personal account: never silently reuse
+    // whichever one the browser last signed into.
+    ['prompt', 'select_account'],
+  ].map(([k, v]) => `${k}=${encodeURIComponent(String(v == null ? '' : v))}`).join('&');
+  return `${OUTLOOK_LOGIN_HOST}/${tenant || 'common'}/oauth2/v2.0/authorize?${q}`;
+}
+
+// What came back on the obsidian:// URL, checked against the state nonce
+// this session issued. Never trusts a code whose state does not match.
+function parseAuthCallback(params, expectedState) {
+  const p = params && typeof params === 'object' ? params : {};
+  if (p.error) {
+    const m = mapAadError({ error: String(p.error), error_description: p.error_description ? String(p.error_description) : '' });
+    return { ok: false, reason: m.reason, message: m.message, hint: m.hint || null };
+  }
+  const code = trimmed(p.code);
+  if (!code) return { ok: false, reason: 'misconfigured', message: 'Microsoft sent no code back.', hint: null };
+  if (!expectedState) return { ok: false, reason: 'misconfigured', message: 'No sign-in was waiting for this reply. Start the sign-in again from the settings.', hint: null };
+  if (trimmed(p.state) !== String(expectedState)) return { ok: false, reason: 'misconfigured', message: 'The reply did not match the sign-in that was started (state mismatch). Start the sign-in again.', hint: null };
+  return { ok: true, code };
+}
+
+/* ---- token responses and the AADSTS error mapping ---- */
+// The body as JSON, or null. requestUrl's `json` is a getter that throws on
+// a non-JSON body, so both doors are tried and neither is allowed to throw.
+function tokenJson(res) {
+  if (!res) return null;
+  try { if (res.json && typeof res.json === 'object') return res.json; } catch { /* not JSON */ }
+  try { return res.text ? JSON.parse(res.text) : null; } catch { return null; }
+}
+
+function outlookError(reason, message, hint, codes) {
+  const e = new Error(message);
+  e.reason = reason;
+  if (hint) e.hint = hint;
+  if (codes && codes.length) e.codes = codes;
+  return e;
+}
+
+// The AADSTS numbers a response carries: the error_codes array and the
+// ones spelled inside the description, deduplicated.
+function aadCodesOf(body) {
+  const out = new Set();
+  const b = body || {};
+  for (const c of Array.isArray(b.error_codes) ? b.error_codes : []) if (Number.isFinite(Number(c))) out.add(Number(c));
+  const re = /AADSTS(\d+)/g;
+  let m;
+  while ((m = re.exec(String(b.error_description || '')))) out.add(Number(m[1]));
+  return Array.from(out).sort((a, b2) => a - b2);
+}
+// Microsoft's description: the sentence, without the AADSTS prefix and the
+// trace, correlation and timestamp tail.
+function cleanAadDescription(desc) {
+  let s = String(desc == null ? '' : desc).trim();
+  const cut = s.search(/\s+Trace ID:/);
+  if (cut > 0) s = s.slice(0, cut);
+  s = s.replace(/^AADSTS\d+:\s*/, '').trim();
+  return s;
+}
+
+// The plain-language map. `message` is what the tray shows; `hint` the
+// second line when there is something to do. Anything not listed shows
+// Microsoft's own sentence rather than a blank; the table is Microsoft's
+// and changes, so it is not chased beyond these rows.
+const AAD_ERROR_ROWS = [
+  { codes: [7000218], reason: 'misconfigured', message: 'Your Entra app isn\'t set up as a public client yet.', hint: 'Open Authentication in the Azure/Entra portal and set \'Allow public client flows\' to Yes.' },
+  { codes: [50011], reason: 'misconfigured', message: 'The sign-in redirect doesn\'t match what\'s registered.', hint: `Check that ${OUTLOOK_REDIRECT_URI} is added exactly under 'Mobile and desktop applications'.` },
+  { codes: [65001, 90094], reason: 'misconfigured', message: 'Consent is needed for one of the permissions.', hint: 'If you\'re on a work account, ask your admin to grant consent, or try again and approve the prompt yourself.' },
+  { codes: [700016], reason: 'misconfigured', message: 'Wrong Client ID, or the app is registered in a different tenant than the Tenant field says.', hint: 'Recheck the Overview page.' },
+  { codes: [70008, 700082], reason: 'no-token', message: 'You haven\'t used this connection in a while, so Microsoft expired it. Sign in again.' },
+  { codes: [700020], reason: 'no-token', message: 'Microsoft needs you to sign in interactively again.' },
+];
+const AAD_CONFIG_ERRORS = new Set(['invalid_client', 'unauthorized_client', 'invalid_request', 'invalid_scope', 'unsupported_grant_type', 'invalid_resource']);
+
+function mapAadError(body) {
+  const b = body || {};
+  const codes = aadCodesOf(b);
+  const error = trimmed(b.error);
+  for (const row of AAD_ERROR_ROWS) {
+    if (row.codes.some((c) => codes.includes(c))) return { reason: row.reason, message: row.message, hint: row.hint || null, codes };
+  }
+  if (error === 'interaction_required') return { reason: 'no-token', message: 'Microsoft needs you to sign in interactively again.', hint: null, codes };
+  if (error === 'invalid_grant') return { reason: 'no-token', message: 'Some of the authentication material (code, refresh token, or PKCE challenge) is no longer valid. Sign in again.', hint: null, codes };
+  if (error === 'access_denied') return { reason: 'no-token', message: 'The sign-in was declined, so nothing is connected.', hint: null, codes };
+  const desc = cleanAadDescription(b.error_description);
+  const reason = AAD_CONFIG_ERRORS.has(error) ? 'misconfigured' : 'unreachable';
+  const message = desc || (error ? `Microsoft sign-in failed (${error}).` : 'Microsoft sign-in failed.');
+  return { reason, message, hint: null, codes };
+}
+
+// A token endpoint reply -> { accessToken, refreshToken | null, expiresIn,
+// scope }, or a thrown error carrying the mapped reason and the AADSTS codes.
+function parseTokenResponse(res) {
+  const status = Number(res && res.status) || 0;
+  const json = tokenJson(res);
+  if (status >= 200 && status < 300 && json && json.access_token) {
+    return {
+      accessToken: String(json.access_token),
+      refreshToken: json.refresh_token ? String(json.refresh_token) : null,
+      expiresIn: Number(json.expires_in) || 0,
+      scope: json.scope ? String(json.scope) : '',
+    };
+  }
+  if (json && (json.error || json.error_description)) {
+    const m = mapAadError(json);
+    throw outlookError(m.reason, m.message, m.hint, m.codes);
+  }
+  const body = String((res && res.text) || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  throw outlookError('unreachable', `Microsoft returned HTTP ${status}${body ? `: ${body}` : '.'}`);
+}
+
+// Retry-After in milliseconds; 2 seconds when the header is missing (one
+// retry, so the backoff is one step).
+function retryAfterMs(res) {
+  const h = (res && res.headers) || {};
+  const raw = h['retry-after'] != null ? h['retry-after'] : h['Retry-After'];
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 1000) : 2000;
+}
+
+// One form-encoded POST to login.microsoftonline.com, retried exactly once
+// after a 429 or 503, waiting the Retry-After it named.
+async function oauthPost(url, form, deps) {
+  const rq = requestUrlOf(deps);
+  const body = new URLSearchParams(form).toString();
+  const send = () => rq({
+    url, method: 'POST', throw: false,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body,
+  });
+  let res = await send();
+  if (res && (res.status === 429 || res.status === 503)) {
+    await sleepOf(deps)(retryAfterMs(res));
+    res = await send();
+  }
+  return res;
+}
+const tokenEndpoint = (tenant) => `${OUTLOOK_LOGIN_HOST}/${tenant || 'common'}/oauth2/v2.0/token`;
+
+async function tokenExchange({ clientId, tenant, code, redirectUri, verifier, scopes }, deps) {
+  const res = await oauthPost(tokenEndpoint(tenant), {
+    client_id: clientId,
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: redirectUri || OUTLOOK_REDIRECT_URI,
+    code_verifier: verifier,
+    scope: scopes,
+  }, deps);
+  return parseTokenResponse(res);
+}
+async function tokenRefresh({ clientId, tenant, refreshToken, scopes }, deps) {
+  const res = await oauthPost(tokenEndpoint(tenant), {
+    client_id: clientId,
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    scope: scopes,
+  }, deps);
+  return parseTokenResponse(res);
+}
+
+/* ---- the device code fallback ---- */
+async function deviceCodeStart({ clientId, tenant, scopes }, deps) {
+  const res = await oauthPost(`${OUTLOOK_LOGIN_HOST}/${tenant || 'common'}/oauth2/v2.0/devicecode`, { client_id: clientId, scope: scopes }, deps);
+  const json = tokenJson(res);
+  const status = Number(res && res.status) || 0;
+  if (status >= 200 && status < 300 && json && json.device_code && json.user_code) {
+    return {
+      deviceCode: String(json.device_code),
+      userCode: String(json.user_code),
+      verificationUri: String(json.verification_uri || 'https://microsoft.com/devicelogin'),
+      expiresIn: Number(json.expires_in) || 900,
+      interval: Number(json.interval) || 5,
+      message: json.message ? String(json.message) : '',
+    };
+  }
+  if (json && (json.error || json.error_description)) {
+    const m = mapAadError(json);
+    throw outlookError(m.reason, m.message, m.hint, m.codes);
+  }
+  throw outlookError('unreachable', `Microsoft returned HTTP ${status}.`);
+}
+// Poll until Microsoft confirms, declines, or the code expires; slow_down
+// widens the interval as the protocol asks. `deps.cancelled()` stops it.
+async function deviceCodePoll({ clientId, tenant, deviceCode, interval, expiresIn }, deps) {
+  const sleep = sleepOf(deps);
+  const now = nowOf(deps);
+  const deadline = now() + (Number(expiresIn) || 900) * 1000;
+  let wait = Math.max(1, Number(interval) || 5) * 1000;
+  const expired = () => outlookError('no-token', 'The code expired before it was used. Start the sign-in again.');
+  while (now() < deadline) {
+    if (deps && typeof deps.cancelled === 'function' && deps.cancelled()) throw outlookError('cancelled', 'Sign-in cancelled.');
+    await sleep(wait);
+    if (now() >= deadline) break; // the code expired while waiting: no pointless call
+    const res = await oauthPost(tokenEndpoint(tenant), {
+      client_id: clientId,
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      device_code: deviceCode,
+    }, deps);
+    const json = tokenJson(res);
+    if (json && json.access_token) return parseTokenResponse(res);
+    const err = json ? trimmed(json.error) : '';
+    if (err === 'authorization_pending') continue;
+    if (err === 'slow_down') { wait += 5000; continue; }
+    if (err === 'expired_token') throw expired();
+    if (err === 'authorization_declined') throw outlookError('no-token', 'The sign-in was declined, so nothing is connected.');
+    parseTokenResponse(res); // throws the mapped error for anything else
+  }
+  throw expired();
+}
+
+/* ---- the stored sign-in ---- */
+function outlookSignedIn(settings) {
+  const s = settings || {};
+  return !!(trimmed(s.outlookClientId) && trimmed(s.outlookRefreshToken));
+}
+function outlookHasWriteScope(settings) {
+  return /(^|\s)Mail\.ReadWrite(\s|$)/.test(String((settings && settings.outlookScopes) || ''));
+}
+function outlookTokens(settings) {
+  const s = settings || {};
+  return {
+    refreshToken: trimmed(s.outlookRefreshToken),
+    accessToken: trimmed(s.outlookAccessToken),
+    expiresAt: Number(s.outlookExpiresAt) || 0,
+    account: trimmed(s.outlookAccount),
+  };
+}
+// Where a token write lands when it happens inside a connector: the copy the
+// connector holds knows the settings it was resolved from and the vault
+// (withSecrets). `view` is that copy, kept current so the rest of the same
+// run reads the rotated token, never the one Microsoft just retired.
+function outlookTokenSink(s) {
+  const view = s || {};
+  return { live: view._live || view, vault: view._vault || null, view };
+}
+// Persist what a token response carried. The refresh token rotates: a new
+// one overwrites the stored one; an absent one leaves it untouched.
+function saveOutlookTokens(sink, tokens, now) {
+  const k = sink || {};
+  const live = k.live || {};
+  const t = tokens || {};
+  const at = (now == null ? Date.now() : now) + Math.max(0, Number(t.expiresIn) || 0) * 1000;
+  const put = (field, value) => {
+    writeSecret(live, k.vault, field, value);
+    if (k.view && k.view !== live) k.view[field] = value;
+  };
+  put('outlookAccessToken', t.accessToken ? String(t.accessToken) : '');
+  put('outlookExpiresAt', t.accessToken ? String(at) : '');
+  if (t.refreshToken) put('outlookRefreshToken', String(t.refreshToken));
+  if (t.account != null) put('outlookAccount', String(t.account));
+  // Without a store the token lives in the settings: reach disk now, not at
+  // the next save that happens to come along.
+  if (!(k.vault && k.vault.available()) && typeof live._persist === 'function') live._persist();
+}
+// Sign-out: the four keys cleared, in the store or in the settings.
+function clearOutlookTokens(sink) {
+  const k = sink || {};
+  const live = k.live || {};
+  for (const f of ['outlookRefreshToken', 'outlookAccessToken', 'outlookExpiresAt', 'outlookAccount']) {
+    writeSecret(live, k.vault, f, '');
+    if (k.view && k.view !== live) k.view[f] = '';
+  }
+  if (!(k.vault && k.vault.available()) && typeof live._persist === 'function') live._persist();
+}
+
+// A usable access token: the cached one while it has a minute left, else a
+// refresh (proactive), and a refresh on demand (`force`, after a 401).
+async function ensureAccessToken(s, deps, force) {
+  const t = outlookTokens(s);
+  if (!t.refreshToken) throw outlookError('no-token', 'Outlook is not signed in.');
+  const now = nowOf(deps)();
+  if (!force && t.accessToken && t.expiresAt - now > OUTLOOK_TOKEN_SLACK_MS) return t.accessToken;
+  const fresh = await tokenRefresh({
+    clientId: trimmed(s.outlookClientId), tenant: outlookTenant(s),
+    refreshToken: t.refreshToken, scopes: outlookScopeString(outlookHasWriteScope(s)),
+  }, deps);
+  saveOutlookTokens(outlookTokenSink(s), fresh, now);
+  return fresh.accessToken;
+}
+
+/* ---- Graph requests ---- */
+function graphHttpError(res) {
+  const status = Number(res && res.status) || 0;
+  const json = tokenJson(res);
+  const code = json && json.error && json.error.code ? String(json.error.code) : '';
+  if (status === 401) return outlookError('no-token', 'Microsoft rejected the token. Sign in again.');
+  if (status === 403) return outlookError('misconfigured', `Microsoft refused the request${code ? ` (${code})` : ''}: a permission is missing.`, 'Sign in again and approve every permission on the consent screen.');
+  return outlookError('unreachable', `Microsoft Graph returned HTTP ${status}${code ? ` (${code})` : ''}.`);
+}
+// One Graph call with the retry contract: a 401 refreshes the token once
+// and retries once (never twice); a 429 or 503 waits Retry-After and
+// retries once; anything else that is not 2xx is the mapped error, without
+// a retry. Returns the JSON body ({} for an empty reply).
+async function graphRequest(s, deps, req) {
+  const rq = requestUrlOf(deps);
+  const r = req || {};
+  const call = (token) => rq({
+    url: r.url, method: r.method || 'GET', throw: false,
+    headers: Object.assign(
+      { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      r.body ? { 'Content-Type': 'application/json' } : {},
+      r.headers || {},
+    ),
+    body: r.body ? JSON.stringify(r.body) : undefined,
+  });
+  let token = await ensureAccessToken(s, deps, false);
+  let res = await call(token);
+  if (res && res.status === 401) {
+    token = await ensureAccessToken(s, deps, true);
+    res = await call(token);
+  } else if (res && (res.status === 429 || res.status === 503)) {
+    await sleepOf(deps)(retryAfterMs(res));
+    res = await call(token);
+  }
+  const status = Number(res && res.status) || 0;
+  if (status >= 200 && status < 300) return tokenJson(res) || {};
+  throw graphHttpError(res);
+}
+
+/* ---- flagged mail -> planner items ---- */
+// The first page. Later pages come from @odata.nextLink verbatim: Graph
+// forbids ordering by a property that is not first in the filter, so the
+// list is not ordered here (the tray sorts what it shows).
+function outlookMessagesQuery() {
+  return `$filter=${encodeURIComponent("flag/flagStatus eq 'flagged'")}&$select=id,subject,bodyPreview,from,receivedDateTime,importance,webLink,flag,parentFolderId,conversationId&$top=50`;
+}
+// Outlook's three levels onto the planner's five, the same rungs ClickUp's
+// normal and low land on: high 1, normal 3, low 4.
+function outlookPriorityRank(importance) {
+  const v = String(importance == null ? '' : importance).toLowerCase();
+  if (v === 'high') return 1;
+  if (v === 'low') return 4;
+  return 3;
+}
+// One Graph message -> the normalized item every task connector returns.
+// Mail carries no due date in this design; the folder id is the list id.
+function outlookItemFromMessage(m) {
+  const msg = m || {};
+  return {
+    source: 'outlook',
+    id: String(msg.id || ''),
+    title: trimmed(msg.subject) || '(no subject)',
+    description: String(msg.bodyPreview || '').replace(/\s+$/, ''),
+    due: null,
+    priority: outlookPriorityRank(msg.importance),
+    url: trimmed(msg.webLink) || null,
+    tags: [],
+    status: msg.flag && msg.flag.flagStatus ? String(msg.flag.flagStatus) : null,
+    listId: msg.parentFolderId ? String(msg.parentFolderId) : null,
+    recurring: false,
+    dueString: null,
+    parentId: null,
+  };
+}
+async function outlookFetchOpen(settings, deps) {
+  const s = settings || {};
+  if (!trimmed(s.outlookClientId)) return degraded('outlook', 'no-token', 'Outlook is not connected (no client id).');
+  if (!outlookSignedIn(s)) return degraded('outlook', 'no-token', 'Outlook is not signed in.');
+  try {
+    const items = [];
+    let url = `${GRAPH_BASE}/me/messages?${outlookMessagesQuery()}`;
+    for (let page = 0; page < 10 && url; page++) {
+      const data = await graphRequest(s, deps, { url });
+      for (const m of Array.isArray(data.value) ? data.value : []) {
+        const it = outlookItemFromMessage(m);
+        if (it.id) items.push(it);
+      }
+      url = data['@odata.nextLink'] ? String(data['@odata.nextLink']) : null;
+    }
+    return okResult('outlook', items);
+  } catch (e) {
+    return degraded('outlook', (e && e.reason) || 'unreachable', (e && e.message) || 'Outlook is unreachable.', e && e.hint);
+  }
+}
+// The one write: the flag status. complete on close, flagged on reopen.
+// Refused here, before any call, when the sign-in never granted the write
+// permission; the toggle's own hint says how to grant it.
+async function outlookSetClosed(settings, item, closed, deps) {
+  const s = settings || {};
+  if (!outlookSignedIn(s)) throw new Error('Outlook is not signed in');
+  if (!outlookHasWriteScope(s)) throw new Error('Outlook has not granted the Mail.ReadWrite permission yet: sign in again under Outlook in the settings');
+  await graphRequest(s, deps, {
+    url: `${GRAPH_BASE}/me/messages/${encodeURIComponent(String(item.id))}`,
+    method: 'PATCH',
+    body: { flag: { flagStatus: closed ? 'complete' : 'flagged' } },
+  });
+}
+
+// The settings tab's one line on the sign-in.
+function outlookStatusText(settings) {
+  const s = settings || {};
+  if (!trimmed(s.outlookClientId)) return 'Paste your Application (client) ID above, then sign in.';
+  if (!outlookSignedIn(s)) return 'Not signed in. Sign in opens Microsoft in your browser and brings you back here.';
+  const base = `Signed in as ${trimmed(s.outlookAccount) || 'your Microsoft account'}.`;
+  if (s.completeOnSource === true && !outlookHasWriteScope(s)) return `${base} Flag changes need one more permission (Mail.ReadWrite): sign in again to grant it.`;
+  return base;
+}
+
+/* ---- the Outlook calendar through calendarView ---- */
+// The window: from a week before the earliest week the board shows (or
+// this week) to two weeks past the latest one. Day strings, end exclusive.
+function graphCalendarWindow(today, visibleWeekStarts) {
+  const starts = [mondayOf(today)]
+    .concat((visibleWeekStarts || []).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d))).map((d) => mondayOf(String(d))))
+    .sort();
+  return { startDay: addDays(starts[0], -7), endDay: addDays(starts[starts.length - 1], 7 + 14) };
+}
+const localDayStart = (day) => { const [y, m, d] = String(day).split('-').map(Number); return new Date(y, m - 1, d); };
+// The query string for one window. The bounds carry a trailing Z: Graph
+// reads them by the offset they state, whatever the Prefer header says.
+function graphCalendarQuery(win) {
+  const start = localDayStart(win.startDay).toISOString();
+  const end = localDayStart(win.endDay).toISOString();
+  return `startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$select=id,subject,bodyPreview,start,end,isAllDay,location,onlineMeeting,isOnlineMeeting,webLink,importance&$top=200`;
+}
+// A Graph dateTimeTimeZone -> the ICS-shaped timed date. The trap: with
+// Prefer: outlook.timezone="UTC" the string comes back WITHOUT a trailing Z
+// even though it is UTC, so it is read as UTC explicitly, never handed to
+// new Date() to guess local time. Any other zone Microsoft names goes
+// through the same resolver the ICS path uses; one it cannot resolve is
+// read as UTC and flagged, never guessed with confidence.
+function graphInstant(x) {
+  const raw = String((x && x.dateTime) || '').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?$/.exec(raw);
+  if (!m) return null;
+  const [, y, mo, d, hh, mm, ss, zone] = m;
+  const parts = [+y, +mo, +d, +hh, +mm, +ss];
+  const utc = () => new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4], parts[5]));
+  if (zone === 'Z') return { allDay: false, day: null, instant: utc(), tzUnresolved: null };
+  if (zone) return { allDay: false, day: null, instant: new Date(`${y}-${mo}-${d}T${hh}:${mm}:${ss}${zone}`), tzUnresolved: null };
+  const tz = trimmed(x && x.timeZone) || 'UTC';
+  if (/^utc$/i.test(tz)) return { allDay: false, day: null, instant: utc(), tzUnresolved: null };
+  const r = resolveTzid(tz, null);
+  if (r.tz) {
+    try { return { allDay: false, day: null, instant: zonedToUtc(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], r.tz), tzUnresolved: null }; } catch { /* flagged below */ }
+  }
+  if (r.fixedOffsetMin != null) return { allDay: false, day: null, instant: new Date(utc().getTime() - r.fixedOffsetMin * 60000), tzUnresolved: null };
+  return { allDay: false, day: null, instant: utc(), tzUnresolved: tz };
+}
+function graphAllDay(x) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String((x && x.dateTime) || ''));
+  if (!m) return null;
+  return { allDay: true, day: `${m[1]}-${m[2]}-${m[3]}`, instant: new Date(+m[1], +m[2] - 1, +m[3]), tzUnresolved: null };
+}
+// One calendarView row -> one def in the ICS def shape, marked expanded: no
+// rrule, no exdates, no override; the server already unrolled the series.
+// The meeting link is stated as such (conferenceUrl) only when Graph says
+// the event is an online meeting; otherwise the key is absent.
+function graphEventDef(ev) {
+  if (!ev || !ev.id || !ev.start) return null;
+  const allDay = ev.isAllDay === true;
+  const start = allDay ? graphAllDay(ev.start) : graphInstant(ev.start);
+  if (!start) return null;
+  const end = ev.end ? (allDay ? graphAllDay(ev.end) : graphInstant(ev.end)) : null;
+  const def = {
+    uid: String(ev.id),
+    title: trimmed(ev.subject) || '(no title)',
+    description: String(ev.bodyPreview || ''),
+    location: trimmed(ev.location && ev.location.displayName) || null,
+    url: trimmed(ev.webLink) || null,
+    start, end,
+    rrule: null, exdates: new Set(), recurrenceDay: null,
+    tzUnresolved: start.tzUnresolved || (end && end.tzUnresolved) || null,
+    expanded: true,
+  };
+  const join = ev.isOnlineMeeting === true && ev.onlineMeeting ? trimmed(ev.onlineMeeting.joinUrl) : '';
+  if (join) def.conferenceUrl = join;
+  return def;
+}
+async function outlookCalendarFetchFeed(feed, settings, deps) {
+  const s = settings || {};
+  if (!outlookSignedIn(s)) return degraded('outlook-calendar', 'no-token', 'Outlook calendar is not connected (not signed in).');
+  try {
+    const win = graphCalendarWindow(todayStr(), deps && deps.visibleWeekStarts);
+    const defs = [];
+    let url = `${GRAPH_BASE}/me/calendarView?${graphCalendarQuery(win)}`;
+    for (let page = 0; page < 10 && url; page++) {
+      const data = await graphRequest(s, deps, { url, headers: { Prefer: 'outlook.timezone="UTC"' } });
+      for (const ev of Array.isArray(data.value) ? data.value : []) {
+        const d = graphEventDef(ev);
+        if (d) defs.push(d);
+      }
+      url = data['@odata.nextLink'] ? String(data['@odata.nextLink']) : null;
+    }
+    return okResult('outlook-calendar', tagCalendarDefs(defs, feed), calendarTzWarning(defs));
+  } catch (e) {
+    return degraded('outlook-calendar', (e && e.reason) || 'unreachable', (e && e.message) || 'Outlook calendar is unreachable.', e && e.hint);
+  }
+}
+
 
 /* ========================================================================== *
  * Connector: starred email over IMAP (Superhuman = the Gmail/Outlook account
@@ -2083,7 +2751,10 @@ const ICS_BYDAY = { MO: 0, TU: 1, WE: 2, TH: 3, FR: 4, SA: 5, SU: 6 };
 // Expand one event def into occurrence start Dates within [winStart, winEnd).
 function expandOccurrences(def, winStart, winEnd) {
   const startInstant = def.start.instant;
-  if (!def.rrule) {
+  // An expanded def (one calendarView row) is one occurrence by definition:
+  // the server already unrolled the series, and unrolling again would
+  // duplicate it. Never enters the recurrence branch, whatever it carries.
+  if (def.expanded || !def.rrule) {
     return (startInstant < winEnd) ? [startInstant] : [];
   }
   const freq = def.rrule.FREQ;
@@ -2199,7 +2870,7 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
             kind: 'event', source: 'calendar',
             uid: `${def.uid}::${day}`, title: eff.title, description: eff.description,
             start: null, end: null, allDay: true, day, half: null,
-            location: eff.location, url: eff.url, continues: i > 0,
+            location: eff.location, url: eff.url, conferenceUrl: eff.conferenceUrl || null, continues: i > 0,
             masterUid: def.uid, recurring, occStartUtc, tzUnresolved,
             feedId, feedName, feedColor,
           });
@@ -2218,7 +2889,7 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
               start: effStart.toISOString(), end: effEnd.toISOString(),
               allDay: !first, day,
               half: first ? (effStart.getHours() < splitHour ? 'am' : 'pm') : null,
-              location: eff.location, url: eff.url, continues: !first,
+              location: eff.location, url: eff.url, conferenceUrl: eff.conferenceUrl || null, continues: !first,
               masterUid: def.uid, recurring, occStartUtc, tzUnresolved,
               feedId, feedName, feedColor,
             });
@@ -2308,12 +2979,34 @@ function calendarFeeds(settings) {
   const list = Array.isArray(s.calendars) ? s.calendars : migrateCalendarSettings(s).calendars;
   return list.map(normalizeCalendarFeed);
 }
-function enabledCalendarFeeds(settings) {
-  return calendarFeeds(settings).filter((f) => f.enabled && feedUrl(f));
+// The connector that owns a feed of this kind; an unknown kind is read as an
+// iCal feed, the shape every entry had before there was a second kind.
+function calendarFeedConnector(kind) {
+  return CALENDAR_SOURCES.map((id) => CONNECTORS[id]).find((c) => c.feedKind === kind) || CONNECTORS.calendar;
 }
-// The calendar counts as configured when at least one feed is on AND has an
-// address. Mirrors the no-token guard in calendarFetchAll, field for field.
-function calendarFeedConfigured(settings) { return enabledCalendarFeeds(settings).length > 0; }
+// Can this feed be fetched at all: an address for an iCal feed, a sign-in
+// for the Graph one. The connector answers, so every reader agrees.
+function calendarFeedReady(feed, settings) {
+  return !!(feed && calendarFeedConnector(feed.kind).ready(feed, settings || {}));
+}
+function enabledCalendarFeeds(settings) {
+  return calendarFeeds(settings).filter((f) => f.enabled && calendarFeedReady(f, settings));
+}
+// The iCal calendar counts as configured when at least one of its feeds is
+// on AND has an address. Mirrors the guard in calendarFetchAll, field for
+// field.
+function calendarFeedConfigured(settings) { return enabledCalendarFeeds(settings).some((f) => f.kind === 'ics'); }
+
+// The Outlook calendar entry, added once on sign-in (removable; a later
+// sign-in adds it again). Takes the least-used lens like a pasted feed.
+const GRAPH_FEED_ID = 'outlook-graph';
+function ensureGraphCalendarFeed(settings) {
+  const s = settings || {};
+  if (!Array.isArray(s.calendars)) s.calendars = calendarFeeds(s);
+  if (s.calendars.some((f) => f && f.kind === 'graph')) return false;
+  s.calendars.push({ id: GRAPH_FEED_ID, name: 'Outlook calendar', url: '', color: leastUsedSwatch(s.calendars), enabled: true, kind: 'graph' });
+  return true;
+}
 
 // 0.7.x -> 0.8.0: the one icsUrl becomes the one feed, on lens 1. Returns
 // the SAME object when `calendars` already exists (nothing to do, nothing
@@ -2375,13 +3068,13 @@ async function calendarFetchFeed(feed) {
 // feed's failure never touches another's result: allSettled, and a fetch
 // that throws anyway becomes a degraded result for that feed alone.
 // Returns { feeds, results } with results keyed by feed id in feed order.
-async function calendarFetchAll(settings) {
+async function calendarFetchAll(settings, deps) {
   const jobs = [];
   for (const id of CALENDAR_SOURCES) {
     const c = CONNECTORS[id];
-    for (const feed of c.feeds(settings)) if (feed.enabled && feedUrl(feed)) jobs.push({ feed, connector: c });
+    for (const feed of c.feeds(settings)) if (feed.enabled && c.ready(feed, settings)) jobs.push({ feed, connector: c });
   }
-  const settled = await Promise.allSettled(jobs.map(({ feed, connector }) => connector.fetchFeed(feed)));
+  const settled = await Promise.allSettled(jobs.map(({ feed, connector }) => connector.fetchFeed(feed, settings, deps)));
   const results = {};
   jobs.forEach(({ feed }, i) => {
     const r = settled[i];
@@ -2476,8 +3169,11 @@ function calendarAggregateStatus(feeds, results, merged, now) {
 // The settings row's status sentence for one feed, from its last sync.
 // `vault` is optional: the settings tab passes it so a feed whose address
 // lives in the store still reads as connected.
-function calendarFeedStatusText(feed, st, vault) {
-  if (!feed || !feedUrl(feed, vault)) return 'Paste the iCal address to connect this calendar.';
+// `settings` (optional, resolved) is what the Graph feed's readiness reads.
+function calendarFeedStatusText(feed, st, vault, settings) {
+  if (feed && feed.kind === 'graph') {
+    if (!outlookSignedIn(settings || {})) return 'Sign in to your Microsoft account under Outlook to connect this calendar.';
+  } else if (!feed || !feedUrl(feed, vault)) return 'Paste the iCal address to connect this calendar.';
   if (feed.enabled === false) return 'Off: its events are hidden until it is switched on.';
   if (!st) return 'Not synced yet this session.';
   if (!st.ok) return `Failed: ${st.message || 'no reply.'}`;
@@ -2490,8 +3186,8 @@ function calendarFeedStatusText(feed, st, vault) {
 // The calendar's ConnectorResult for the sync loop: every feed fetched,
 // merged over the previous per-feed defs, one status. Items are the merged,
 // deduplicated defs; byFeed and perFeed ride along for the plugin state.
-async function calendarFetchDefs(settings, prevByFeed) {
-  const { feeds, results } = await calendarFetchAll(settings);
+async function calendarFetchDefs(settings, prevByFeed, deps) {
+  const { feeds, results } = await calendarFetchAll(settings, deps);
   const merged = mergeCalendarFeeds(prevByFeed || {}, results);
   const status = calendarAggregateStatus(feeds, results, merged);
   const out = status.ok
@@ -2537,6 +3233,9 @@ const CONFERENCE_URL_PATTERNS = [
 // expanded per-day events. Returns the clean URL or null.
 function detectConferenceUrl(ev) {
   if (!ev) return null;
+  // A meeting link the source stated as such (Graph's onlineMeeting.joinUrl)
+  // beats anything scanned out of the text.
+  if (ev.conferenceUrl) return String(ev.conferenceUrl);
   for (const field of [ev.location, ev.description, ev.url]) {
     if (!field) continue;
     const text = String(field);
@@ -2581,6 +3280,9 @@ function serializeCalendarDefs(defs) {
     exdates: Array.from(def.exdates || []),
     recurrenceDay: def.recurrenceDay || null,
     tzUnresolved: def.tzUnresolved || null,
+    // Only an expanded def carries the flag, so an iCal def's row is
+    // byte-identical to what every earlier release wrote.
+    ...(def.expanded ? { expanded: true } : {}),
   }));
 }
 
@@ -2606,6 +3308,7 @@ function reviveCalendarDefs(raw) {
       exdates: new Set(Array.isArray(d.exdates) ? d.exdates : []),
       recurrenceDay: d.recurrenceDay || null,
       tzUnresolved: d.tzUnresolved ? String(d.tzUnresolved) : null,
+      ...(d.expanded === true ? { expanded: true } : {}),
     });
   }
   return out;
@@ -3985,6 +4688,11 @@ class IcorPlannerPlugin extends Plugin {
     const adopted = adoptSettings(loaded, this.secrets);
     this.settings = adopted.settings;
     if (adopted.changed) await this.persistSettings();
+    // Without a secret store the Outlook tokens live in these settings, and
+    // a refresh token Microsoft rotated inside a sync must reach disk before
+    // the app closes. The sink calls this after such a write; hidden from
+    // JSON and from every copy.
+    Object.defineProperty(this.settings, '_persist', { value: () => { this.persistSettings(); }, enumerable: false, configurable: true });
     // _shadow: per-item last-synced baseline for the two-way fields. Lives in
     // data.json beside the settings; never shown in the settings UI.
     if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
@@ -4014,6 +4722,16 @@ class IcorPlannerPlugin extends Plugin {
     this.addCommand({ id: 'new-routine', name: 'New routine', callback: () => this.openNewRoutine() });
 
     this.addSettingTab(new IcorPlannerSettingTab(this.app, this));
+
+    // The Microsoft sign-in comes back through obsidian://icor-for-life-planner/auth
+    // (the redirect URI registered in the member's Entra app), on desktop
+    // and mobile alike. The action is registered in both spellings Obsidian
+    // could parse it as: the whole path, and the host alone with the path
+    // in the params. The callback checks the state nonce either way.
+    this.registerObsidianProtocolHandler(OUTLOOK_PROTOCOL_ACTION, (params) => this.outlookAuthCallback(params));
+    this.registerObsidianProtocolHandler(this.manifest.id, (params) => {
+      if (params && (params.code || params.error)) this.outlookAuthCallback(params);
+    });
 
     // The planner folder itself is the entry point (styled like the other
     // rooms by icor-rooms.css). A capture-phase listener turns its click into
@@ -4426,11 +5144,13 @@ class IcorPlannerPlugin extends Plugin {
         };
         if (result.ok) await this.upsertSource(source, result.items);
       }
-      // A sync the user pressed for, with the mailbox misconfigured: say what
+      // A sync the user pressed for, with a source misconfigured: say what
       // went wrong and what to do about it, once, here, not only in the tray.
-      if (manual && this.syncStatus.email && this.syncStatus.email.reason === 'misconfigured') {
-        const st = this.syncStatus.email;
-        new Notice(`Email: ${st.message}${st.hint ? `\n${st.hint}` : ''}`, 12000);
+      if (manual) {
+        for (const key of SYNCED_SOURCES) {
+          const st = this.syncStatus[key];
+          if (st && st.reason === 'misconfigured') new Notice(`${SOURCES[key].label}: ${st.message}${st.hint ? `\n${st.hint}` : ''}`, 12000);
+        }
       }
       // Calendar: no per-event notes. Every enabled feed is fetched on its
       // own; a healthy feed replaces its own entry, a failed feed keeps its
@@ -4438,7 +5158,7 @@ class IcorPlannerPlugin extends Plugin {
       // merged, deduplicated union. At least one live feed clears the stale
       // look and rewrites the ONE cache file. No feeds at all: nothing to
       // show, and nothing stale to keep.
-      const cal = await calendarFetchDefs(s, this.calendarDefsByFeed);
+      const cal = await calendarFetchDefs(s, this.calendarDefsByFeed, this.connectorDeps());
       this.calendarStatus = {
         ok: cal.ok, reason: cal.reason || null, message: cal.message || null,
         warning: cal.warning || null, perFeed: cal.perFeed || {}, at: new Date().toISOString(),
@@ -4602,6 +5322,125 @@ class IcorPlannerPlugin extends Plugin {
     new Notice(c.doneNotice(closed));
   }
 
+  /* ---- Outlook sign-in (2026-09-06) ---------------------------------------
+   * Authorization code with PKCE, the redirect through the obsidian://
+   * protocol handler, the device code as the fallback when that path is
+   * closed. The verifier and the state nonce live in memory for the one
+   * round-trip; the tokens go through the secret vault and nowhere else.
+   */
+
+  // What a connector may take beyond the resolved settings: here, the weeks
+  // the board shows, so the Outlook calendar window covers them.
+  connectorDeps() {
+    const weeks = [];
+    this.app.workspace.getLeavesOfType(BOARD_VIEW_TYPE).forEach((l) => {
+      if (l.view instanceof PlannerBoardView && l.view.weekStart) weeks.push(l.view.weekStart);
+    });
+    return { visibleWeekStarts: weeks };
+  }
+
+  async outlookSignIn(opts) {
+    const o = opts || {};
+    const clientId = trimmed(this.settings.outlookClientId);
+    if (!clientId) { new Notice('Planner: paste your Application (client) ID under Outlook first.'); return; }
+    // Mail.ReadWrite is asked for only once Complete on source is on: the
+    // one feature that writes a flag is the one that earns the permission.
+    const write = o.write === true || this.settings.completeOnSource === true;
+    const tenant = outlookTenant(this.settings);
+    const scopes = outlookScopeString(write);
+    const { verifier, challenge } = await pkcePair();
+    const state = randomState();
+    const url = authorizeUrl({ clientId, tenant, scopes, redirectUri: OUTLOOK_REDIRECT_URI, state, challenge });
+    this._outlookPending = { state, verifier, clientId, tenant, scopes, onDone: typeof o.onDone === 'function' ? o.onDone : null };
+    if (this._outlookModal) this._outlookModal.close();
+    this._outlookModal = new OutlookSignInModal(this.app, this, { url });
+    this._outlookModal.open();
+    window.open(url, '_external');
+  }
+
+  // The protocol handler's target. `params` is what Obsidian parsed off the
+  // obsidian:// URL: code and state on success, error and error_description
+  // when Microsoft declined.
+  async outlookAuthCallback(params) {
+    const pending = this._outlookPending;
+    const modal = this._outlookModal;
+    const parsed = parseAuthCallback(params, pending ? pending.state : null);
+    if (!parsed.ok) {
+      const text = `Outlook sign-in failed: ${parsed.message}`;
+      if (modal) modal.setStatus(text, true); else new Notice(text, 10000);
+      return;
+    }
+    this._outlookPending = null;
+    if (modal) modal.setStatus('Signed in. Finishing up...', false);
+    try {
+      const tokens = await tokenExchange({
+        clientId: pending.clientId, tenant: pending.tenant, code: parsed.code,
+        redirectUri: OUTLOOK_REDIRECT_URI, verifier: pending.verifier, scopes: pending.scopes,
+      });
+      await this.outlookFinishSignIn(tokens, pending);
+    } catch (e) {
+      const text = `Outlook sign-in failed: ${(e && e.message) || e}${e && e.hint ? ` ${e.hint}` : ''}`;
+      if (modal) modal.setStatus(text, true);
+      new Notice(text, 12000);
+    }
+  }
+
+  // The fallback: a code typed on any device, polled here until Microsoft
+  // confirms, gives up, or the modal is closed.
+  async outlookDeviceSignIn() {
+    const pending = this._outlookPending;
+    const modal = this._outlookModal;
+    if (!pending || !modal) return;
+    try {
+      const dc = await deviceCodeStart({ clientId: pending.clientId, tenant: pending.tenant, scopes: pending.scopes });
+      modal.showDeviceCode(dc);
+      const tokens = await deviceCodePoll(
+        { clientId: pending.clientId, tenant: pending.tenant, deviceCode: dc.deviceCode, interval: dc.interval, expiresIn: dc.expiresIn },
+        { cancelled: () => modal.closed || this._outlookPending !== pending },
+      );
+      this._outlookPending = null;
+      await this.outlookFinishSignIn(tokens, pending);
+    } catch (e) {
+      if (e && e.reason === 'cancelled') return;
+      const text = `Outlook sign-in failed: ${(e && e.message) || e}${e && e.hint ? ` ${e.hint}` : ''}`;
+      if (!modal.closed) modal.setStatus(text, true);
+      new Notice(text, 12000);
+    }
+  }
+
+  async outlookFinishSignIn(tokens, pending) {
+    const sink = { live: this.settings, vault: this.secrets };
+    saveOutlookTokens(sink, tokens);
+    this.settings.outlookScopes = trimmed(tokens.scope) || (pending && pending.scopes) || '';
+    let account = '';
+    try {
+      const me = await graphRequest(this.withSecrets(), undefined, { url: `${GRAPH_BASE}/me?$select=userPrincipalName,mail,displayName` });
+      account = trimmed(me.mail) || trimmed(me.userPrincipalName) || trimmed(me.displayName);
+    } catch { /* the account line is a nicety; the tokens are what matter */ }
+    writeSecret(this.settings, this.secrets, 'outlookAccount', account || 'Microsoft account');
+    ensureGraphCalendarFeed(this.settings);
+    delete this.syncStatus.outlook;
+    await this.saveSettings();
+    if (this._outlookModal) { this._outlookModal.close(); this._outlookModal = null; }
+    new Notice(`Planner: signed in to Outlook${account ? ` as ${account}` : ''}.`);
+    if (pending && pending.onDone) pending.onDone();
+    this.syncNow(false);
+  }
+
+  // Sign-out clears the four vault keys and the granted scopes. The notes
+  // stay, like a removed token elsewhere; the Outlook calendar row stays
+  // and says it wants a sign-in. Revoking on Microsoft's side is the
+  // member's own click, linked from the settings tab.
+  async outlookSignOut() {
+    clearOutlookTokens({ live: this.settings, vault: this.secrets });
+    this.settings.outlookScopes = '';
+    this._outlookPending = null;
+    delete this.syncStatus.outlook;
+    await this.saveSettings();
+    this.recomputeCalendarDefs();
+    new Notice('Planner: signed out of Outlook. The token is gone from this vault; to revoke the app on Microsoft\'s side too, use the link in settings.', 8000);
+  }
+
   // Debounced per-file: a local edit (user typing, a card action, or an agent
   // editing frontmatter) pushes out without waiting for the next sync.
   schedulePushCheck(path) {
@@ -4680,7 +5519,7 @@ class IcorPlannerPlugin extends Plugin {
   // safeBasename: an id is API-assigned and plain in practice, and the note
   // is confined to the folder whatever it carries.
   async createItemFile(folder, source, t) {
-    let base = `${safeBasename(t.title)} (${source}-${safeBasename(String(t.id))})`;
+    let base = `${safeBasename(t.title)} (${source}-${noteIdPart(t.id)})`;
     let path = normalizePath(`${folder}/${base}.md`);
     if (this.app.vault.getAbstractFileByPath(path)) {
       path = normalizePath(`${folder}/${base}-2.md`);
@@ -5743,6 +6582,73 @@ class EventDetailModal extends Modal {
     }
   }
   onClose() { this.contentEl.empty(); }
+}
+
+/* ========================================================================== *
+ * Outlook sign-in modal (2026-09-06). Open while the browser round-trip is
+ * out; offers the page again, the device code, and cancel. The status line
+ * is a live region so the outcome is heard, not hunted for.
+ * ========================================================================== */
+
+class OutlookSignInModal extends Modal {
+  constructor(app, plugin, opts) {
+    super(app);
+    this.plugin = plugin;
+    this.url = (opts && opts.url) || '';
+    this.closed = false;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass('iplan-event-modal');
+    contentEl.addClass('iplan-auth-modal');
+    markInkPlugin(contentEl, this.plugin.manifest.id);
+    const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' MICROSOFT SIGN-IN' });
+    contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: 'Sign in to Outlook' });
+    this.statusEl = contentEl.createDiv({ cls: 'iplan-auth-status', attr: { role: 'status', 'aria-live': 'polite' } });
+    this.setStatus('Your browser opened Microsoft\'s sign-in page. Sign in there and approve the permissions; you will be brought back here.', false);
+    this.bodyEl = contentEl.createDiv({ cls: 'iplan-auth-body' });
+    const row = contentEl.createDiv({ cls: 'iplan-event-modal-actions' });
+    const again = row.createEl('button', { cls: 'iplan-event-modal-open is-primary', text: 'OPEN THE SIGN-IN PAGE AGAIN', attr: { type: 'button' } });
+    again.addEventListener('click', () => window.open(this.url, '_external'));
+    const code = row.createEl('button', { cls: 'iplan-event-modal-open', text: 'USE A CODE INSTEAD', attr: { type: 'button' } });
+    code.addEventListener('click', () => { code.disabled = true; this.plugin.outlookDeviceSignIn(); });
+    const cancel = row.createEl('button', { cls: 'iplan-event-modal-open is-secondary', text: 'CANCEL', attr: { type: 'button' } });
+    cancel.addEventListener('click', () => this.close());
+    again.focus();
+  }
+  setStatus(text, failed) {
+    if (!this.statusEl) return;
+    this.statusEl.empty();
+    this.statusEl.setText(text);
+    this.statusEl.toggleClass('is-failed', !!failed);
+  }
+  // The device code view: the page to open, the code to type, a copy button.
+  showDeviceCode(dc) {
+    this.bodyEl.empty();
+    this.bodyEl.createDiv({ cls: 'iplan-auth-lead', text: 'Open this page on any device and enter the code:' });
+    const uri = dc.verificationUri || 'https://microsoft.com/devicelogin';
+    const link = this.bodyEl.createEl('a', { cls: 'iplan-auth-link', text: uri, href: uri });
+    link.addEventListener('click', (e) => { e.preventDefault(); window.open(uri, '_external'); });
+    this.bodyEl.createEl('code', {
+      cls: 'iplan-auth-code', text: dc.userCode,
+      attr: { 'aria-label': `Device code ${String(dc.userCode).split('').join(' ')}` },
+    });
+    const copy = this.bodyEl.createEl('button', { cls: 'iplan-event-modal-open', text: 'COPY CODE', attr: { type: 'button' } });
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(dc.userCode);
+        this.setStatus('Code copied. Waiting for Microsoft to confirm the sign-in...', false);
+      } catch { this.setStatus('Could not copy; type the code by hand. Waiting for Microsoft to confirm the sign-in...', true); }
+    });
+    this.setStatus('Waiting for Microsoft to confirm the sign-in...', false);
+  }
+  onClose() {
+    this.closed = true;
+    this.contentEl.empty();
+    if (this.plugin._outlookModal === this) this.plugin._outlookModal = null;
+  }
 }
 
 /* ========================================================================== *
@@ -7005,7 +7911,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       ' (host imap.mail.me.com).');
     li('Fastmail: Settings, Privacy & Security, app passwords (host imap.fastmail.com).', null, null, null);
     li('Proton Mail: install Proton Bridge, pick the Proton Bridge preset above the host, and use the mailbox password Bridge shows (host 127.0.0.1, port 1143, STARTTLS, its own certificate).', null, null, null);
-    li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here.', null, null, null);
+    li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here: use the Outlook section below instead.', null, null, null);
     // Presets: one chip per known provider fills the host and the
     // connection shape. A radio group for the keyboard and the screen reader
     // (arrow keys move, aria-checked says which is on), rendered on the
@@ -7135,11 +8041,92 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       finally { b.setDisabled(false); }
     }));
 
-    // Calendars: one row per feed. Name, the secret address, the four-swatch
-    // lens picker (a radio group: arrow keys move, aria-checked says which is
-    // on), an on/off toggle, remove, and the feed's own status line from the
-    // last sync. The list is normalised in place first so every row has an
-    // id to key its controls and its status by.
+    /* ---- Outlook (2026-09-06) ---- */
+    new Setting(containerEl).setName('Outlook (Microsoft 365, outlook.com)').setHeading();
+    const osetup = containerEl.createEl('details', { cls: 'iplan-setup' });
+    osetup.createEl('summary', { text: 'Setup guide: your own Microsoft app registration' });
+    const osetupBody = osetup.createEl('div', { cls: 'iplan-setup-body' });
+    osetupBody.createEl('p', {
+      text: 'Flagged emails land in the tray as tasks and your Outlook calendar joins the board, through an app you register in your own Microsoft account (about ten minutes, once). Reading is read-only; the one write is the flag status on complete, and only while "Complete on source" is on.',
+    });
+    const olist = osetupBody.createEl('ul');
+    for (const line of [
+      'entra.microsoft.com, App registrations, New registration. Supported account types: "any organizational directory and personal Microsoft accounts".',
+      `Authentication, Add a platform, Mobile and desktop applications, custom redirect URI: ${OUTLOOK_REDIRECT_URI}`,
+      'Authentication, Advanced settings: "Allow public client flows" = Yes.',
+      'API permissions, Microsoft Graph, Delegated: Mail.Read, Mail.ReadWrite, Calendars.Read, offline_access.',
+      'Overview: copy the Application (client) ID into the field below, then Sign in.',
+    ]) olist.createEl('li', { text: line });
+    const guideP = osetupBody.createEl('p');
+    guideP.appendText('The full guide, every step and the error codes: ');
+    const guideA = guideP.createEl('a', { text: 'Connecting Outlook to the Planner', href: OUTLOOK_GUIDE_URL });
+    guideA.addEventListener('click', (e) => { e.preventDefault(); window.open(OUTLOOK_GUIDE_URL, '_external'); });
+    // The client id is a public-client GUID, not a secret: a plain field.
+    // The notice under it is the member's own-account terms, verbatim.
+    const clientSetting = new Setting(containerEl).setName('Application (client) ID').setDesc(OUTLOOK_NOTICE);
+    clientSetting.addText((t) => {
+      t.setPlaceholder('00000000-0000-0000-0000-000000000000').setValue(this.plugin.settings.outlookClientId);
+      t.inputEl.autocomplete = 'off';
+      t.inputEl.spellcheck = false;
+      t.inputEl.setAttribute('aria-label', 'Application (client) ID');
+      t.onChange(async (v) => {
+        this.plugin.settings.outlookClientId = v.trim();
+        await this.plugin.saveSettings();
+        renderOutlookStatus();
+      });
+    });
+    new Setting(containerEl)
+      .setName('Account type')
+      .setDesc('Which accounts the sign-in accepts: any Microsoft account (the default), work or school only, or personal only. Match what you chose under "Supported account types" when registering.')
+      .addDropdown((d) => d
+        .addOption('common', 'Any Microsoft account (common)')
+        .addOption('organizations', 'Work or school only (organizations)')
+        .addOption('consumers', 'Personal only (consumers)')
+        .setValue(outlookTenant(this.plugin.settings))
+        .onChange(async (v) => {
+          this.plugin.settings.outlookTenant = OUTLOOK_TENANTS.includes(v) ? v : 'common';
+          await this.plugin.saveSettings();
+        }));
+    const acct = new Setting(containerEl).setName('Microsoft account');
+    acct.descEl.setAttribute('aria-live', 'polite');
+    let signInBtn = null;
+    let signOutBtn = null;
+    const renderOutlookStatus = () => {
+      const r = this.plugin.withSecrets();
+      acct.setDesc(outlookStatusText(r));
+      const signed = outlookSignedIn(r);
+      if (signInBtn) {
+        signInBtn.setButtonText(signed ? 'Sign in again' : 'Sign in');
+        signInBtn.setDisabled(!trimmed(r.outlookClientId));
+        if (!signed) signInBtn.setCta(); else signInBtn.removeCta();
+      }
+      if (signOutBtn) signOutBtn.setDisabled(!signed);
+    };
+    acct.addButton((b) => {
+      signInBtn = b;
+      b.onClick(() => this.plugin.outlookSignIn({ onDone: () => this.display() }));
+    });
+    acct.addButton((b) => {
+      signOutBtn = b;
+      b.setButtonText('Sign out').onClick(async () => {
+        await this.plugin.outlookSignOut();
+        this.display();
+      });
+    });
+    renderOutlookStatus();
+    const revoke = new Setting(containerEl)
+      .setName('Manage or revoke access')
+      .setDesc('Signing out only removes the token from this vault. To fully revoke access on Microsoft\'s side, visit myaccount.microsoft.com (Apps & services), or account.live.com/consent/Manage for a personal account.');
+    revoke.addButton((b) => b.setButtonText('myaccount.microsoft.com').onClick(() => window.open(OUTLOOK_REVOKE_URLS.work, '_external')));
+    revoke.addButton((b) => b.setButtonText('Personal account').onClick(() => window.open(OUTLOOK_REVOKE_URLS.personal, '_external')));
+
+    // Calendars: one row per feed. Name, the secret address (or, for the
+    // Outlook calendar, the account it reads), the four-swatch lens picker
+    // (a radio group: arrow keys move, aria-checked says which is on), an
+    // on/off toggle, remove, and the feed's own status line from the last
+    // sync. The list is normalised in place first so every row has an id to
+    // key its controls and its status by.
+    const resolved = this.plugin.withSecrets();
     new Setting(containerEl).setName('Calendars').setHeading();
     this.plugin.settings.calendars = calendarFeeds(this.plugin.settings);
     const feedList = this.plugin.settings.calendars;
@@ -7152,7 +8139,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       const row = new Setting(containerEl)
         .setName(`Calendar ${i + 1}`)
         .setClass('iplan-settings-feed');
-      row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id], secrets));
+      row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id], secrets, resolved));
       row.descEl.setAttribute('aria-live', 'polite');
       row.addText((t) => {
         t.setPlaceholder('Name').setValue(feed.name);
@@ -7166,8 +8153,13 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           this.plugin.emitModelChanged();
         });
       });
-      secret(row, () => feedUrl(feed, secrets), (v) => { setFeedUrl(feed, v, secrets); },
-        'https://... or webcal://...', `iCal address of calendar ${i + 1} (kept secret)`);
+      if (feed.kind === 'graph') {
+        // No address to paste: the feed is the signed-in Microsoft account.
+        row.controlEl.createSpan({ cls: 'iplan-settings-feed-source', text: 'Microsoft account', attr: { 'aria-label': `Calendar ${i + 1} reads your Microsoft account` } });
+      } else {
+        secret(row, () => feedUrl(feed, secrets), (v) => { setFeedUrl(feed, v, secrets); },
+          'https://... or webcal://...', `iCal address of calendar ${i + 1} (kept secret)`);
+      }
       const group = row.controlEl.createDiv({
         cls: 'iplan-seg iplan-settings-presets iplan-settings-swatches',
         attr: { role: 'radiogroup', 'aria-label': `Colour of calendar ${i + 1}` },
@@ -7207,7 +8199,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           feed.enabled = v;
           await this.plugin.saveSettings();
           this.plugin.recomputeCalendarDefs();
-          row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id], secrets));
+          row.setDesc(calendarFeedStatusText(feed, perFeed[feed.id], secrets, resolved));
         });
       });
       // Remove is two presses: the first arms it and says so, the second
@@ -7262,7 +8254,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       'Google: Settings, the calendar, Integrate calendar, "Secret address in iCal format". Treat it like a password.',
       'Apple: iCloud Calendar, share the calendar as a Public Calendar, copy the webcal link. A calendar you have not shared cannot be read this way yet.',
       'Proton: Calendar, share via link. Sharing by link needs a paid Proton plan.',
-      'Outlook: Publish calendar, copy the ICS link.',
+      'Outlook: sign in under Outlook above and the Outlook calendar row appears here by itself; or Publish calendar and paste the ICS link like any other.',
     ]) calList.createEl('li', { text: line });
 
     new Setting(containerEl).setName('Board').setHeading();
@@ -7428,9 +8420,16 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Two-way sync').setHeading();
     new Setting(containerEl)
       .setName('Complete on source')
-      .setDesc('Checking a card here also closes the task in Todoist / ClickUp and unstars the email. Unchecking reopens or re-stars it, also after a sync has confirmed the close. Off = completing stays local to this vault: a task the source closed cannot be reopened from here, and a checked recurring task stays struck until it is completed in the source app.')
+      .setDesc('Checking a card here also closes the task in Todoist / ClickUp, unstars the email and marks the Outlook flag complete. Unchecking reopens, re-stars or re-flags it, also after a sync has confirmed the close. Off = completing stays local to this vault: a task the source closed cannot be reopened from here, and a checked recurring task stays struck until it is completed in the source app. For Outlook this needs the Mail.ReadWrite permission, which is asked for only when you switch this on: if Outlook is signed in, a Microsoft sign-in opens to grant it (switching off does not take it back; sign out for that).')
       .addToggle((t) => t.setValue(this.plugin.settings.completeOnSource)
-        .onChange(async (v) => { this.plugin.settings.completeOnSource = v; await this.plugin.saveSettings(); }));
+        .onChange(async (v) => {
+          this.plugin.settings.completeOnSource = v;
+          await this.plugin.saveSettings();
+          // The incremental-consent round-trip: the permission is requested
+          // the moment the feature that uses it is turned on, never before.
+          const r = this.plugin.withSecrets();
+          if (v && outlookSignedIn(r) && !outlookHasWriteScope(r)) this.plugin.outlookSignIn({ write: true, onDone: () => this.display() });
+        }));
     new Setting(containerEl)
       .setName('When a recurring task moves to its next date')
       .setDesc('A recurring task keeps one card. When its due date moves on (completed here or in the source app) the check clears and the card reopens; this decides where it lands. The finished occurrence stays on the day it was planned, struck through.')
@@ -7511,4 +8510,14 @@ module.exports.__test = {
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
+  // Outlook (2026-09-06)
+  OUTLOOK_REDIRECT_URI, OUTLOOK_PROTOCOL_ACTION, OUTLOOK_LOGIN_HOST, GRAPH_BASE, OUTLOOK_TENANTS, OUTLOOK_NOTICE,
+  OUTLOOK_GUIDE_URL, OUTLOOK_REVOKE_URLS, OUTLOOK_SCOPES_READ, OUTLOOK_SCOPES_WRITE, OUTLOOK_TOKEN_SLACK_MS,
+  base64url, pkceChallenge, pkcePair, randomState, authorizeUrl, parseAuthCallback, tokenJson, parseTokenResponse,
+  aadCodesOf, cleanAadDescription, mapAadError, outlookError, retryAfterMs, oauthPost, tokenExchange, tokenRefresh,
+  deviceCodeStart, deviceCodePoll, outlookTenant, outlookScopeString, outlookSignedIn, outlookHasWriteScope,
+  outlookTokens, outlookTokenSink, saveOutlookTokens, clearOutlookTokens, ensureAccessToken, graphRequest, graphHttpError,
+  outlookMessagesQuery, outlookPriorityRank, outlookItemFromMessage, outlookFetchOpen, outlookSetClosed, outlookStatusText,
+  graphCalendarWindow, graphCalendarQuery, graphInstant, graphAllDay, graphEventDef, outlookCalendarFetchFeed,
+  calendarFeedConnector, calendarFeedReady, ensureGraphCalendarFeed, GRAPH_FEED_ID, noteIdPart,
 };

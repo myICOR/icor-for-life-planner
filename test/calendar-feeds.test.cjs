@@ -83,7 +83,10 @@ test('sourceConfigured("calendar") is true only with an enabled feed carrying a 
   assert.equal(typeof c.feeds, 'function');
   assert.equal(typeof c.fetchFeed, 'function');
   assert.deepEqual(c.feeds({ calendars: [HOME, WORK] }).map((f) => f.id), ['cal-home', 'cal-work'], 'settings order');
-  assert.deepEqual(T.CALENDAR_SOURCES, ['calendar']);
+  assert.deepEqual(T.CALENDAR_SOURCES, ['calendar', 'outlook-calendar'], 'the iCal feeds and the Outlook calendar, each its own connector');
+  assert.equal(c.feedKind, 'ics');
+  assert.equal(typeof c.ready, 'function');
+  assert.deepEqual(c.feeds({ calendars: [HOME, { id: 'g', kind: 'graph' }] }).map((f) => f.id), ['cal-home'], 'the iCal connector lists its own kind only');
 });
 
 test('THE ASK: two feeds render with their own colour and name', () => {
@@ -269,7 +272,7 @@ test('the modal links to Google only for a Google-shaped address', () => {
 test('the sync fetches every feed on its own and never prunes on a blip', () => {
   const c = code();
   assert.match(c, /Promise\.allSettled\(jobs\.map/, 'feeds are fetched together, failures isolated');
-  assert.match(c, /calendarFetchDefs\(s, this\.calendarDefsByFeed\)/, 'the sync merges over the previous per-feed defs');
+  assert.match(c, /calendarFetchDefs\(s, this\.calendarDefsByFeed, this\.connectorDeps\(\)\)/, 'the sync merges over the previous per-feed defs, and tells the fetch which weeks the board shows');
   assert.match(c, /if \(cal\.reason === 'no-token'\) \{\s*\n\s*this\.calendarDefs = null;/, 'no feeds means nothing to show');
   assert.ok(!/settings\.icsUrl/.test(c.replace(/trimmed\(s\.icsUrl\)/, '')), 'icsUrl is read by the migration only');
   assert.match(c, /calendars: \[\]/, 'the default settings declare the list');

@@ -41,9 +41,11 @@ test('every synced source has fetchOpen and configured; manual has neither', () 
 });
 
 test('the derived lists are what the hand-kept lists used to say', () => {
-  assert.deepEqual(T.SYNCED_SOURCES, ['todoist', 'clickup', 'email']);
-  assert.deepEqual(T.TASK_SOURCES, ['manual', 'todoist', 'clickup', 'email']);
-  assert.deepEqual(T.FETCHED_SOURCES, ['todoist', 'clickup', 'email', 'calendar']);
+  // Outlook (2026-09-06) joined by one registry entry each: a task source
+  // and a calendar source. Nothing else in the file names them.
+  assert.deepEqual(T.SYNCED_SOURCES, ['todoist', 'clickup', 'email', 'outlook']);
+  assert.deepEqual(T.TASK_SOURCES, ['manual', 'todoist', 'clickup', 'email', 'outlook']);
+  assert.deepEqual(T.FETCHED_SOURCES, ['todoist', 'clickup', 'email', 'outlook', 'calendar', 'outlook-calendar']);
   assert.deepEqual(Object.keys(T.SOURCES), Object.keys(T.CONNECTORS), 'SOURCES is the registry\'s presentation view');
   for (const id of Object.keys(T.CONNECTORS)) {
     const c = T.CONNECTORS[id];
@@ -73,7 +75,7 @@ test('sourceConfigured is the registry\'s configured, calendar included', () => 
 
 test('email is desktop-only by declaration, the others run everywhere', () => {
   assert.deepEqual(T.CONNECTORS.email.platforms, ['desktop']);
-  for (const id of ['manual', 'todoist', 'clickup', 'calendar']) {
+  for (const id of ['manual', 'todoist', 'clickup', 'outlook', 'calendar', 'outlook-calendar']) {
     assert.deepEqual(T.CONNECTORS[id].platforms, ['desktop', 'mobile'], id);
   }
 });

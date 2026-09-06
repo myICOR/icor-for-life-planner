@@ -60,7 +60,18 @@ test('THE ASK: a synced note name passes the id through safeBasename, and a plai
   assert.match(calls.create[1].content, /^external_id: "\.\.\/\.\.\/evil#\[x\]\|y"$/m);
   // and the source line is the exact shape, so the name has no second path
   const main = fs.readFileSync(T.__mainPath, 'utf8');
-  assert.ok(main.includes('let base = `${safeBasename(t.title)} (${source}-${safeBasename(String(t.id))})`;'), 'the name is built through safeBasename twice');
+  assert.ok(main.includes('let base = `${safeBasename(t.title)} (${source}-${noteIdPart(t.id)})`;'), 'the name is built through safeBasename and noteIdPart');
+  // noteIdPart is safeBasename for every id a task app issues, and a tail
+  // plus a hash for a Graph message id (150 characters, a shared prefix per
+  // mailbox), so two long ids never collide on their first 70 characters.
+  assert.equal(T.noteIdPart('../../evil#[x]|y'), T.safeBasename('../../evil#[x]|y'));
+  assert.equal(T.noteIdPart('123456789'), '123456789');
+  const prefix = 'AAMkAGI2TG93AAA='.repeat(8);
+  const a = T.noteIdPart(prefix + 'AAAAA1=');
+  const b = T.noteIdPart(prefix + 'AAAAA2=');
+  assert.notEqual(a, b, 'two Graph ids differing at the tail get different names');
+  assert.ok(a.length < 40, a);
+  assert.doesNotMatch(a, /[\\/:*?"<>|#^[\]{}]/);
 });
 
 test('THE ASK: the habit writes refuse a path outside the habits folder before any file is looked up', async () => {

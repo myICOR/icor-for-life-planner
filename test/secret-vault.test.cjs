@@ -344,8 +344,12 @@ test('source scan: a feed address is read through feedUrl and nowhere else', () 
   }
   assert.deepEqual(offenders, [], 'a feed address is read off the entry directly');
   assert.match(c, /googleCalendarEventUrl\(ev, feedUrl\(this\.feed\)\)/, 'the modal reads the address through the accessor');
-  assert.match(c, /filter\(\(f\) => f\.enabled && feedUrl\(f\)\)/, 'enabledCalendarFeeds asks the accessor');
-  assert.match(c, /if \(feed\.enabled && feedUrl\(feed\)\) jobs\.push/, 'calendarFetchAll asks the accessor');
+  // Since the Outlook calendar (2026-09-06) a feed is ready by its KIND: the
+  // iCal connector still answers through the accessor, and both list
+  // readers ask the connector rather than the entry.
+  assert.match(c, /ready: \(feed\) => !!feedUrl\(feed\)/, 'the iCal connector asks the accessor');
+  assert.match(c, /filter\(\(f\) => f\.enabled && calendarFeedReady\(f, settings\)\)/, 'enabledCalendarFeeds asks the connector');
+  assert.match(c, /if \(feed\.enabled && c\.ready\(feed, settings\)\) jobs\.push/, 'calendarFetchAll asks the connector');
   assert.match(c, /secret\(row, \(\) => feedUrl\(feed, secrets\), \(v\) => \{ setFeedUrl\(feed, v, secrets\); \}/, 'the settings row reads and writes through the accessors');
   assert.match(c, /forgetFeedSecret\(feed, secrets\);\n\s*await this\.plugin\.saveSettings\(\);/, 'removing a feed forgets its address');
 });
