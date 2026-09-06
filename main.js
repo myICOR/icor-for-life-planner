@@ -1864,9 +1864,21 @@ async function graphRequest(s, deps, req) {
 }
 
 /* ---- flagged mail -> planner items ---- */
-// The first page. Later pages come from @odata.nextLink verbatim: Graph
-// forbids ordering by a property that is not first in the filter, so the
-// list is not ordered here (the tray sorts what it shows).
+// Graph's own pagination link, followed only when it is on Graph's origin.
+// The link is server-generated metadata, never mailbox content, but the
+// request it feeds carries the bearer token, so a response that named any
+// other host (a proxy that terminates TLS, a compromised service) must
+// not be able to send the token there. Anything else ends the page walk
+// as if there were no next page. Pure; a string in, the string or null.
+const GRAPH_ORIGIN = 'https://graph.microsoft.com/';
+function graphNextLink(link) {
+  const raw = link == null ? '' : String(link);
+  return raw.startsWith(GRAPH_ORIGIN) ? raw : null;
+}
+// The first page. Later pages come from @odata.nextLink, pinned to Graph's
+// origin by graphNextLink and otherwise untouched: Graph forbids ordering
+// by a property that is not first in the filter, so the list is not
+// ordered here (the tray sorts what it shows).
 function outlookMessagesQuery() {
   return `$filter=${encodeURIComponent("flag/flagStatus eq 'flagged'")}&$select=id,subject,bodyPreview,from,receivedDateTime,importance,webLink,flag,parentFolderId,conversationId&$top=50`;
 }
@@ -1911,7 +1923,7 @@ async function outlookFetchOpen(settings, deps) {
         const it = outlookItemFromMessage(m);
         if (it.id) items.push(it);
       }
-      url = data['@odata.nextLink'] ? String(data['@odata.nextLink']) : null;
+      url = graphNextLink(data['@odata.nextLink']);
     }
     return okResult('outlook', items);
   } catch (e) {
@@ -2026,7 +2038,7 @@ async function outlookCalendarFetchFeed(feed, settings, deps) {
         const d = graphEventDef(ev);
         if (d) defs.push(d);
       }
-      url = data['@odata.nextLink'] ? String(data['@odata.nextLink']) : null;
+      url = graphNextLink(data['@odata.nextLink']);
     }
     return okResult('outlook-calendar', tagCalendarDefs(defs, feed), calendarTzWarning(defs));
   } catch (e) {
@@ -8518,6 +8530,7 @@ module.exports.__test = {
   aadCodesOf, cleanAadDescription, mapAadError, outlookError, retryAfterMs, oauthPost, tokenExchange, tokenRefresh,
   deviceCodeStart, deviceCodePoll, outlookTenant, outlookScopeString, outlookSignedIn, outlookHasWriteScope,
   outlookTokens, outlookTokenSink, saveOutlookTokens, clearOutlookTokens, ensureAccessToken, graphRequest, graphHttpError,
+  GRAPH_ORIGIN, graphNextLink,
   outlookMessagesQuery, outlookPriorityRank, outlookItemFromMessage, outlookFetchOpen, outlookSetClosed, outlookStatusText,
   graphCalendarWindow, graphCalendarQuery, graphInstant, graphAllDay, graphEventDef, outlookCalendarFetchFeed,
   calendarFeedConnector, calendarFeedReady, ensureGraphCalendarFeed, GRAPH_FEED_ID, noteIdPart,

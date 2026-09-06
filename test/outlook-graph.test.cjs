@@ -88,7 +88,41 @@ test('a Graph message maps to the planner item shape: due null, importance onto 
   assert.equal(fm.id, GRAPH_ID);
 });
 
-test('outlookFetchOpen: not connected without a client id or a sign-in; pages through @odata.nextLink verbatim', async () => {
+test('THE GATE: a nextLink off graph.microsoft.com ends the page walk, the token never goes there', async () => {
+  // Pure first: the link comes back only on Graph's origin, else null.
+  assert.equal(typeof T.graphNextLink, 'function');
+  assert.equal(T.GRAPH_ORIGIN, 'https://graph.microsoft.com/');
+  const good = 'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=abc';
+  assert.equal(T.graphNextLink(good), good, 'the link is returned untouched, never rebuilt');
+  for (const bad of [
+    'https://evil.example.com/steal?token=x',
+    'http://graph.microsoft.com/v1.0/me/messages',
+    'https://graph.microsoft.com.evil.example/v1.0/me/messages',
+    'https://graph.microsoft.com:8443/v1.0/me/messages',
+    'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+    '//graph.microsoft.com/v1.0/me/messages',
+    'not a url', '', null, undefined, 42,
+  ]) assert.equal(T.graphNextLink(bad), null, `refused: ${String(bad)}`);
+  // Flagged mail: the off-host link is never fetched, the first page still counts.
+  const evil = 'https://evil.example.com/steal?token=x';
+  const w = wire([json(200, { value: [MESSAGE], '@odata.nextLink': evil })]);
+  const r = await T.outlookFetchOpen(resolved(), { requestUrl: w.requestUrl });
+  assert.equal(r.ok, true);
+  assert.equal(r.items.length, 1);
+  assert.equal(w.calls.length, 1, 'the off-host link is never fetched');
+  assert.ok(!w.calls.some((c) => c.url.startsWith('https://evil.example.com')), 'the bearer token never leaves Graph');
+  // The calendar walk, the same pin at the second call site.
+  const graph = { id: T.GRAPH_FEED_ID, name: 'Outlook calendar', url: '', color: 2, enabled: true, kind: 'graph' };
+  const ev = { id: 'a', subject: 'Ea', isAllDay: false, start: { dateTime: '2026-09-08T08:00:00.0000000', timeZone: 'UTC' }, end: { dateTime: '2026-09-08T08:30:00.0000000', timeZone: 'UTC' } };
+  const wc = wire([json(200, { value: [ev], '@odata.nextLink': evil })]);
+  const rc = await T.outlookCalendarFetchFeed(graph, resolved(), { requestUrl: wc.requestUrl, visibleWeekStarts: ['2026-09-07'] });
+  assert.equal(rc.ok, true);
+  assert.equal(rc.items.length, 1);
+  assert.equal(wc.calls.length, 1, 'the calendar walk stops at the off-host link too');
+  assert.ok(!wc.calls.some((c) => c.url.startsWith('https://evil.example.com')));
+});
+
+test('outlookFetchOpen: not connected without a client id or a sign-in; pages through @odata.nextLink on Graph\'s origin', async () => {
   assert.equal(typeof T.outlookFetchOpen, 'function');
   const cold = await T.outlookFetchOpen({});
   assert.equal(cold.ok, false);
