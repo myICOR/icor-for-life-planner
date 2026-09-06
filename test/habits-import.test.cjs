@@ -114,11 +114,25 @@ test('THE ASK: the log block moves byte-exact, the pointer line takes its place,
   assert.equal(T.habitLogBlockOf('## Log\n<!-- habit-log: -->\n\n# tail\n'), '<!-- habit-log: -->');
 });
 
-test('THE ASK: the schedule fields leave the My Life frontmatter; the rest stays', () => {
+test('THE ASK: the schedule fields and the start date leave the My Life frontmatter under either name; the rest stays', () => {
   const fm = { name: 'Morning pages', cadence: 'weekly', cadence_days: ['mon'], status: 'active', started_on: '2026-08-27', key_element: '[[Writing]]', tags: ['x'] };
   assert.deepEqual(T.stripHabitScheduleFields(fm), { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', tags: ['x'] });
-  assert.deepEqual(T.HABIT_IMPORT_REMOVED_FIELDS, ['cadence', 'cadence_days', 'started_on']);
-  assert.deepEqual(T.stripHabitScheduleFields({ type: 'habit', since: '2026-08-01' }), { type: 'habit', since: '2026-08-01' }, 'the scaffold\'s type and since stay');
+  assert.deepEqual(T.HABIT_IMPORT_REMOVED_FIELDS, ['cadence', 'cadence_days', 'started_on', 'since']);
+  assert.deepEqual(T.stripHabitScheduleFields({ type: 'habit', since: '2026-08-01' }), { type: 'habit' }, 'since goes too: the date lives once, as started_on in the planner note');
+  assert.deepEqual(T.stripHabitScheduleFields({ since: '2026-08-01', started_on: '2026-08-02' }), {}, 'both names');
+});
+
+test('THE ASK: the My Life note stays identifiable and linked: type: habit when it had none, and the back-link', () => {
+  // a lived-vault note: no type, the cadence was its only mark
+  const lived = { name: 'Morning pages', cadence: 'weekly', cadence_days: ['mon'], status: 'active', started_on: '2026-08-27', key_element: '[[Writing]]' };
+  assert.deepEqual(T.importSourceFrontmatter(lived, 'Morning pages'), { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', type: 'habit', planner_habit: '[[Morning pages]]' });
+  assert.equal(T.isHabitFrontmatter(lived), true, 'still a habit note after its cadence left');
+  // the scaffold shape keeps its type; an empty type is treated as none; another type is kept as it is
+  assert.deepEqual(T.importSourceFrontmatter({ type: 'habit', cadence: 'daily', since: '2026-08-01' }, 'Walk'), { type: 'habit', planner_habit: '[[Walk]]' });
+  assert.deepEqual(T.importSourceFrontmatter({ type: '', cadence: 'daily' }, 'Walk'), { type: 'habit', planner_habit: '[[Walk]]' });
+  assert.deepEqual(T.importSourceFrontmatter({ type: 'ritual', cadence: 'daily' }, 'Walk'), { type: 'ritual', planner_habit: '[[Walk]]' });
+  // the back-link names the planner note as created, so a -2 slug is the -2 slug
+  assert.equal(T.importSourceFrontmatter({ cadence: 'daily' }, 'Walk-2').planner_habit, '[[Walk-2]]');
 });
 
 // The plugin half: a vault with two My Life notes and an empty planner.
@@ -173,9 +187,9 @@ test('THE ASK: the import creates the planner note first, then edits the My Life
   assert.match(calls.create[1].content, /<!-- habit-log: schema=streak -->\n\| Date \| Y\/N \| Note \|\n\| --- \| --- \| --- \|\n$/, 'no log in the source: the empty section');
   // the My Life notes: the pointer in place of the block, the fields gone
   assert.equal(files[`${MY}/Morning pages.md`].text, MY_NOTE.replace(LOG_BLOCK, 'Schedule and check-ins: [[Morning pages]]'));
-  assert.deepEqual(files[`${MY}/Morning pages.md`].fm, { name: 'Morning pages', status: 'active', key_element: '[[Writing]]' });
+  assert.deepEqual(files[`${MY}/Morning pages.md`].fm, { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', type: 'habit', planner_habit: '[[Morning pages]]' }, 'a lived-vault note gains its type and the back-link');
   assert.equal(files[`${MY}/Walk.md`].text, '---\ntype: habit\ncadence: daily\nsince: 2026-08-01\n---\n\n# Walk\n\nSchedule and check-ins: [[Walk]]\n');
-  assert.deepEqual(files[`${MY}/Walk.md`].fm, { type: 'habit', since: '2026-08-01' });
+  assert.deepEqual(files[`${MY}/Walk.md`].fm, { type: 'habit', planner_habit: '[[Walk]]' }, 'since is gone: the date lives once, in the planner note');
   // the order per note: create, then process, then frontmatter, and only
   // the My Life note is processed
   assert.deepEqual(calls.process, [`${MY}/Morning pages.md`, `${MY}/Walk.md`]);
@@ -183,7 +197,9 @@ test('THE ASK: the import creates the planner note first, then edits the My Life
   // the summary
   assert.equal(T.importSummaryText(r), 'Planner: imported 2 habits from My Life.');
   assert.equal(T.importSummaryText({ done: 1, skipped: 2, failed: ['x: boom'] }), 'Planner: imported 1 habit from My Life, 2 skipped (linked already), 1 failed: x: boom.');
-  // the second run: both are linked now, nothing to plan, nothing written
+  // the second run: both are linked now, nothing to plan, nothing written;
+  // the My Life notes are still habit notes (type: habit), just linked ones
+  assert.equal(T.isHabitFrontmatter(files[`${MY}/Morning pages.md`].fm), true);
   assert.equal(p.habits.length, 2);
   assert.deepEqual(p.habits.map((h) => h.linkedBasename).sort(), ['Morning pages', 'Walk']);
   assert.deepEqual(p.importCandidates(), []);
@@ -222,6 +238,6 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   assert.ok(/const logBlock = habitLogBlockOf\(await this\.app\.vault\.read\(src\)\);/.test(imp), 'the block is read before the planner note is made');
   assert.ok(/const path = await this\.createHabit\(c, \{ logBlock, quiet: true, lenient: true \}\);/.test(imp), 'created first, lenient');
   assert.ok(/await this\.app\.vault\.process\(src, \(data\) => moveHabitLog\(data, slug\)\);/.test(imp), 'then the body, through vault.process');
-  assert.ok(/await this\.app\.fileManager\.processFrontMatter\(src, \(fm\) => \{ stripHabitScheduleFields\(fm\); \}\);/.test(imp), 'then the frontmatter');
+  assert.ok(/await this\.app\.fileManager\.processFrontMatter\(src, \(fm\) => \{ importSourceFrontmatter\(fm, slug\); \}\);/.test(imp), 'then the frontmatter, one call for the strip, the type and the back-link');
   assert.ok(imp.indexOf('createHabit(') < imp.indexOf('vault.process(') && imp.indexOf('vault.process(') < imp.indexOf('processFrontMatter('), 'in that order');
 });

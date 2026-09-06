@@ -438,9 +438,11 @@ the ones to take and, for each, the planner:
    row, byte for byte) out of the My Life note into the planner note's
    `## Log` section, and leaves one line in its place:
    `Schedule and check-ins: [[<planner note>]]`;
-3. removes `cadence`, `cadence_days` and `started_on` from the My Life
-   note's frontmatter (they live in the planner note now). Every other
-   field, the body and its links stay.
+3. in the My Life note's frontmatter, removes `cadence`, `cadence_days`
+   and the start date (`started_on` or `since`; it lives in the planner
+   note now, once), writes `type: habit` if the note had no type, and
+   writes `planner_habit: "[[<planner note>]]"`, the link back. Every
+   other field, the body and its links stay.
 
 A note already linked is skipped, so pressing the button again is a no-op.
 From then on check-ins land in the planner note, and the My Life note keeps

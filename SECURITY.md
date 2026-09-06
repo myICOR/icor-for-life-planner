@@ -118,8 +118,10 @@ delete, and edits in the frontmatter (`name`, `cadence`, `cadence_days`,
 the body (one log row per check-in). Outside the planner folder it writes
 exactly one thing, once per note and only when you press "Import from My
 Life": in a habit note of the My Life Habits folder (a setting, validated
-the same way) it replaces the `habit-log` table with one pointer line and
-removes `cadence`, `cadence_days` and `started_on` from the frontmatter.
+the same way) it replaces the `habit-log` table with one pointer line and,
+in the frontmatter, removes `cadence`, `cadence_days`, `started_on` and
+`since`, writes `type: habit` when the note had no type, and writes
+`planner_habit` (a wikilink to the planner note).
 Nothing else in that folder is ever written, and a note already linked to a
 planner note is not touched again.
 

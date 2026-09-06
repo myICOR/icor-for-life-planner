@@ -4681,9 +4681,10 @@ const HABIT_STATUSES = ['active', 'paused', 'archived'];
 const HABIT_MONTH_DAY_MAX = 28;
 const HABIT_SKIP_NAMES = /^(index|readme)$/i;
 // The schedule fields the tab writes on the planner note, and the fields
-// the import removes from the My Life note (the schedule plus the start).
+// the import removes from the My Life note: the schedule plus the start
+// date under either of its names, so a date lives in one note only.
 const HABIT_SCHEDULE_FIELDS = ['cadence', 'cadence_days', 'month_day'];
-const HABIT_IMPORT_REMOVED_FIELDS = ['cadence', 'cadence_days', 'started_on'];
+const HABIT_IMPORT_REMOVED_FIELDS = ['cadence', 'cadence_days', 'started_on', 'since'];
 const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // 'weekday' (a lived alias) reads as 'weekdays'; anything unknown, adhoc
@@ -5027,11 +5028,20 @@ function moveHabitLog(body, plannerSlug) {
   lines.splice(parsed.start, parsed.end - parsed.start, pointer + eol);
   return lines.join('\n');
 }
-// The My Life note's frontmatter after the import: the schedule fields and
-// the start date go (they live in the planner note now); every other field
-// stays. In place, for processFrontMatter.
+// The My Life note's frontmatter after the import, in two steps that share
+// one processFrontMatter call. The schedule fields and the start date go
+// (they live in the planner note now); every other field stays.
 function stripHabitScheduleFields(fm) {
   for (const k of HABIT_IMPORT_REMOVED_FIELDS) delete fm[k];
+  return fm;
+}
+// Then the note stays identifiable and linked: `type: habit` when it had
+// no type (a lived-vault note's only habit mark was the cadence that just
+// left), and `planner_habit`, the back-link to the planner note. In place.
+function importSourceFrontmatter(fm, plannerSlug) {
+  stripHabitScheduleFields(fm);
+  if (fm.type == null || String(fm.type).trim() === '') fm.type = 'habit';
+  fm.planner_habit = `[[${plannerSlug}]]`;
   return fm;
 }
 // The import modal's line under a candidate, and its button.
@@ -6464,7 +6474,8 @@ class IcorPlannerPlugin extends Plugin {
   // The import, for the chosen candidates. Per note, in this order: the
   // planner note is created with the log block copied into it; then the My
   // Life note gives up the block for the pointer line (vault.process) and
-  // its schedule fields (processFrontMatter). A failure between the two
+  // its schedule fields, gaining its type and the back-link in the same
+  // frontmatter write (processFrontMatter). A failure between the two
   // leaves the log in the source, never lost. A note already linked is
   // skipped, so a second run is a no-op. Returns { done, skipped, failed }.
   async importHabits(candidates) {
@@ -6479,7 +6490,7 @@ class IcorPlannerPlugin extends Plugin {
         const path = await this.createHabit(c, { logBlock, quiet: true, lenient: true });
         const slug = basenameOf(path);
         await this.app.vault.process(src, (data) => moveHabitLog(data, slug));
-        await this.app.fileManager.processFrontMatter(src, (fm) => { stripHabitScheduleFields(fm); });
+        await this.app.fileManager.processFrontMatter(src, (fm) => { importSourceFrontmatter(fm, slug); });
         linked.add(c.basename);
         result.done++;
       } catch (e) {
@@ -9497,7 +9508,7 @@ module.exports.__test = {
   basenameOf, wikilinkBasename, habitFromFrontmatter,
   daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,
   habitLogAfterCheck, habitRowModel, applyHabitCadence, validateHabitInput, habitFrontmatterOf, habitTemplate,
-  importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, stripHabitScheduleFields,
+  importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, stripHabitScheduleFields, importSourceFrontmatter,
   importCandidateText, importButtonText, importSummaryText, importFolderText, habitsCountText, trayTabName,
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
