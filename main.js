@@ -8111,13 +8111,23 @@ const TRAY_COPY = {
   leadAction: 'Open settings',
   unconfigured: () => 'Not connected.',
   connectAction: 'Connect',
+  // secretsInStore (0.9.0) is a whole-vault flag, set the first time ANY
+  // secret lands in Obsidian's per-device secret store. It rides data.json,
+  // so it syncs; the secret itself does not (Store secrets doc: local
+  // storage keyed to the vault, per device). A fresh device therefore sees
+  // secretsInStore true and its OWN sourceConfigured false at once -- the
+  // exact signature of "connected on another device, not this one" rather
+  // than "never connected anywhere", and it earns a different sentence and
+  // button (Flint's mobile audit, fix 4 / finding 7.2).
+  unconfiguredDevice: () => 'Not connected on this device.',
+  connectDeviceAction: 'Connect this device',
   unsynced: 'Waiting for the first sync.',
   empty: 'Nothing unscheduled.',
   manualEmpty: 'Nothing added yet.',
   errorFallback: 'Unavailable.',
 };
 
-function trayEmptyState(source, configured, status, count, total) {
+function trayEmptyState(source, configured, status, count, total, secretsElsewhere) {
   // Manual has no credential and no fetch. `count` is the unscheduled list;
   // `total` is every manual item that exists. The live pass 2026-08-30 caught
   // the two being conflated: with the only manual task dragged onto the board
@@ -8131,7 +8141,11 @@ function trayEmptyState(source, configured, status, count, total) {
     const everAdded = (total || 0) > 0;
     return { kind: 'empty', text: everAdded ? TRAY_COPY.empty : TRAY_COPY.manualEmpty };
   }
-  if (!configured) return { kind: 'unconfigured', text: TRAY_COPY.unconfigured(source) };
+  if (!configured) {
+    return secretsElsewhere
+      ? { kind: 'unconfigured-device', text: TRAY_COPY.unconfiguredDevice() }
+      : { kind: 'unconfigured', text: TRAY_COPY.unconfigured(source) };
+  }
   // A configured source reporting no-token means settings and the connector
   // disagree; trust the connector's message rather than inventing one.
   if (status && !status.ok) {
@@ -8780,14 +8794,14 @@ class PlannerTrayView extends ItemView {
       const total = key === MANUAL_SOURCE
         ? items.filter((i) => i.source === MANUAL_SOURCE).length
         : undefined;
-      const state = trayEmptyState(key, configured, st, list.length, total);
-      if (state && state.kind === 'unconfigured') {
+      const state = trayEmptyState(key, configured, st, list.length, total, resolved.secretsInStore === true);
+      if (state && (state.kind === 'unconfigured' || state.kind === 'unconfigured-device')) {
         const note = body.createDiv({ cls: 'iplan-tray-note is-unconfigured' });
         note.createSpan({ text: state.text });
         const connect = note.createEl('button', {
           cls: 'iplan-action',
           attr: { type: 'button', 'aria-label': `Connect ${meta.label}` },
-          text: TRAY_COPY.connectAction,
+          text: state.kind === 'unconfigured-device' ? TRAY_COPY.connectDeviceAction : TRAY_COPY.connectAction,
         });
         connect.addEventListener('click', () => this.plugin.openPluginSettings());
       } else if (state) {
@@ -8918,159 +8932,167 @@ class IcorPlannerSettingTab extends PluginSettingTab {
         .onChange(async (v) => { this.plugin.settings.clickupIncludeSubtasks = v; await this.plugin.saveSettings(); }));
 
     new Setting(containerEl).setName('Starred email (IMAP)').setHeading();
-    const setup = containerEl.createEl('details', { cls: 'iplan-setup' });
-    setup.createEl('summary', { text: 'Setup guide: app passwords per provider' });
-    const setupBody = setup.createEl('div', { cls: 'iplan-setup-body' });
-    setupBody.createEl('p', {
-      text: 'Any IMAP mailbox works: star or flag an email and it lands in the planner tray as a task. Reading is strictly read-only; the one write is unstarring on complete, and only while "Complete on source" is on. Most providers want an app password here, never your normal one:',
-    });
-    const setupList = setupBody.createEl('ul');
-    const li = (before, linkText, href, after) => {
-      const item = setupList.createEl('li');
-      item.appendText(before);
-      if (href) {
-        const a = item.createEl('a', { text: linkText, href });
-        a.addEventListener('click', (e) => { e.preventDefault(); window.open(href, '_external'); });
+    if (!Platform.isDesktopApp) {
+      // IMAP needs a raw TLS socket, which the mobile app does not have
+      // (imapConnect's own guard has always refused it there). Offering the
+      // form here would let someone fill it in and meet a silent failure at
+      // the first sync, instead of never seeing fields that cannot work.
+      new Setting(containerEl).setDesc('Email accounts connect on the desktop.');
+    } else {
+      const setup = containerEl.createEl('details', { cls: 'iplan-setup' });
+      setup.createEl('summary', { text: 'Setup guide: app passwords per provider' });
+      const setupBody = setup.createEl('div', { cls: 'iplan-setup-body' });
+      setupBody.createEl('p', {
+        text: 'Any IMAP mailbox works: star or flag an email and it lands in the planner tray as a task. Reading is strictly read-only; the one write is unstarring on complete, and only while "Complete on source" is on. Most providers want an app password here, never your normal one:',
+      });
+      const setupList = setupBody.createEl('ul');
+      const li = (before, linkText, href, after) => {
+        const item = setupList.createEl('li');
+        item.appendText(before);
+        if (href) {
+          const a = item.createEl('a', { text: linkText, href });
+          a.addEventListener('click', (e) => { e.preventDefault(); window.open(href, '_external'); });
+        }
+        if (after) item.appendText(after);
+      };
+      li('Gmail: turn on 2-step verification, then create one at ',
+        'myaccount.google.com/apppasswords', 'https://myaccount.google.com/apppasswords',
+        ' (host imap.gmail.com).');
+      li('iCloud: app-specific password at ',
+        'account.apple.com', 'https://account.apple.com/account/manage',
+        ' (host imap.mail.me.com).');
+      li('Fastmail: Settings, Privacy & Security, app passwords (host imap.fastmail.com).', null, null, null);
+      li('Proton Mail: install Proton Bridge, pick the Proton Bridge preset above the host, and use the mailbox password Bridge shows (host 127.0.0.1, port 1143, STARTTLS, its own certificate).', null, null, null);
+      li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here: use the Outlook section below instead.', null, null, null);
+      // Presets: one chip per known provider fills the host and the
+      // connection shape. A radio group for the keyboard and the screen reader
+      // (arrow keys move, aria-checked says which is on), rendered on the
+      // planner's own segmented control so it reads like the rest of the plugin.
+      const presetSetting = new Setting(containerEl)
+        .setName('Provider')
+        .setDesc('Fills the host and the connection settings for a known provider. Any other IMAP host works too: type it below.');
+      const presetGroup = presetSetting.controlEl.createDiv({ cls: 'iplan-seg iplan-settings-presets', attr: { role: 'radiogroup', 'aria-label': 'Email provider preset' } });
+      const activePreset = imapActivePreset(this.plugin.settings);
+      const presetButtons = [];
+      for (const preset of IMAP_PRESETS) {
+        const on = preset.id === activePreset;
+        const btn = presetGroup.createEl('button', {
+          cls: `iplan-seg-btn${on ? ' is-active' : ''}`, text: preset.label,
+          attr: { type: 'button', role: 'radio', 'aria-checked': on ? 'true' : 'false', tabindex: on || (!activePreset && preset === IMAP_PRESETS[0]) ? '0' : '-1', 'data-preset': preset.id },
+        });
+        btn.addEventListener('click', async () => {
+          Object.assign(this.plugin.settings, imapPresetFields(preset));
+          await this.plugin.saveSettings();
+          this.display();
+          const again = this.containerEl.querySelector(`[data-preset="${preset.id}"]`);
+          if (again) again.focus();
+        });
+        btn.addEventListener('keydown', (e) => {
+          if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+          e.preventDefault();
+          const i = presetButtons.indexOf(btn);
+          const nextBtn = presetButtons[(i + (e.key === 'ArrowRight' ? 1 : presetButtons.length - 1)) % presetButtons.length];
+          nextBtn.focus();
+        });
+        presetButtons.push(btn);
       }
-      if (after) item.appendText(after);
-    };
-    li('Gmail: turn on 2-step verification, then create one at ',
-      'myaccount.google.com/apppasswords', 'https://myaccount.google.com/apppasswords',
-      ' (host imap.gmail.com).');
-    li('iCloud: app-specific password at ',
-      'account.apple.com', 'https://account.apple.com/account/manage',
-      ' (host imap.mail.me.com).');
-    li('Fastmail: Settings, Privacy & Security, app passwords (host imap.fastmail.com).', null, null, null);
-    li('Proton Mail: install Proton Bridge, pick the Proton Bridge preset above the host, and use the mailbox password Bridge shows (host 127.0.0.1, port 1143, STARTTLS, its own certificate).', null, null, null);
-    li('GMX / web.de and most others: enable IMAP in the webmail settings first. Outlook / Microsoft 365 retired password IMAP and cannot connect here: use the Outlook section below instead.', null, null, null);
-    // Presets: one chip per known provider fills the host and the
-    // connection shape. A radio group for the keyboard and the screen reader
-    // (arrow keys move, aria-checked says which is on), rendered on the
-    // planner's own segmented control so it reads like the rest of the plugin.
-    const presetSetting = new Setting(containerEl)
-      .setName('Provider')
-      .setDesc('Fills the host and the connection settings for a known provider. Any other IMAP host works too: type it below.');
-    const presetGroup = presetSetting.controlEl.createDiv({ cls: 'iplan-seg iplan-settings-presets', attr: { role: 'radiogroup', 'aria-label': 'Email provider preset' } });
-    const activePreset = imapActivePreset(this.plugin.settings);
-    const presetButtons = [];
-    for (const preset of IMAP_PRESETS) {
-      const on = preset.id === activePreset;
-      const btn = presetGroup.createEl('button', {
-        cls: `iplan-seg-btn${on ? ' is-active' : ''}`, text: preset.label,
-        attr: { type: 'button', role: 'radio', 'aria-checked': on ? 'true' : 'false', tabindex: on || (!activePreset && preset === IMAP_PRESETS[0]) ? '0' : '-1', 'data-preset': preset.id },
-      });
-      btn.addEventListener('click', async () => {
-        Object.assign(this.plugin.settings, imapPresetFields(preset));
-        await this.plugin.saveSettings();
-        this.display();
-        const again = this.containerEl.querySelector(`[data-preset="${preset.id}"]`);
-        if (again) again.focus();
-      });
-      btn.addEventListener('keydown', (e) => {
-        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-        e.preventDefault();
-        const i = presetButtons.indexOf(btn);
-        const nextBtn = presetButtons[(i + (e.key === 'ArrowRight' ? 1 : presetButtons.length - 1)) % presetButtons.length];
-        nextBtn.focus();
-      });
-      presetButtons.push(btn);
-    }
-    // The host decides the provider, and the provider decides the one
-    // sentence that unblocks most first attempts. It re-renders as the host
-    // is typed, so the advice is never about a host the field no longer says.
-    const hostSetting = new Setting(containerEl).setName('IMAP host');
-    const renderHostHint = (host) => {
-      const p = imapProviderOf(host);
-      hostSetting.descEl.empty();
-      if (!p.hint) return;
-      hostSetting.descEl.appendText(p.hint);
-      if (p.appPasswordUrl) {
-        hostSetting.descEl.appendText(' ');
-        const a = hostSetting.descEl.createEl('a', { text: 'Open', href: p.appPasswordUrl });
-        a.addEventListener('click', (e) => { e.preventDefault(); window.open(p.appPasswordUrl, '_external'); });
-      }
-    };
-    hostSetting.addText((t) => t.setValue(this.plugin.settings.imapHost)
-      .onChange(async (v) => {
-        this.plugin.settings.imapHost = v.trim();
-        renderHostHint(v);
-        renderSelfSigned(v);
-        await this.plugin.saveSettings();
-      }));
-    renderHostHint(this.plugin.settings.imapHost);
-    new Setting(containerEl)
-      .setName('Port')
-      .setDesc('993 for TLS with most providers; 1143 for Proton Bridge.')
-      .addText((t) => t.setPlaceholder('993').setValue(String(this.plugin.settings.imapPort || 993))
+      // The host decides the provider, and the provider decides the one
+      // sentence that unblocks most first attempts. It re-renders as the host
+      // is typed, so the advice is never about a host the field no longer says.
+      const hostSetting = new Setting(containerEl).setName('IMAP host');
+      const renderHostHint = (host) => {
+        const p = imapProviderOf(host);
+        hostSetting.descEl.empty();
+        if (!p.hint) return;
+        hostSetting.descEl.appendText(p.hint);
+        if (p.appPasswordUrl) {
+          hostSetting.descEl.appendText(' ');
+          const a = hostSetting.descEl.createEl('a', { text: 'Open', href: p.appPasswordUrl });
+          a.addEventListener('click', (e) => { e.preventDefault(); window.open(p.appPasswordUrl, '_external'); });
+        }
+      };
+      hostSetting.addText((t) => t.setValue(this.plugin.settings.imapHost)
         .onChange(async (v) => {
-          const n = Number(v.trim());
-          if (Number.isInteger(n) && n > 0 && n < 65536) { this.plugin.settings.imapPort = n; await this.plugin.saveSettings(); }
-        }));
-    new Setting(containerEl)
-      .setName('Security')
-      .setDesc('TLS connects encrypted from the first byte (the default). STARTTLS opens a plain connection and upgrades it before the login; if the host refuses the upgrade, nothing is sent.')
-      .addDropdown((d) => d
-        .addOption('tls', 'TLS (default)')
-        .addOption('starttls', 'STARTTLS')
-        .setValue(this.plugin.settings.imapSecurity === 'starttls' ? 'starttls' : 'tls')
-        .onChange(async (v) => {
-          this.plugin.settings.imapSecurity = v === 'starttls' ? 'starttls' : 'tls';
+          this.plugin.settings.imapHost = v.trim();
+          renderHostHint(v);
+          renderSelfSigned(v);
           await this.plugin.saveSettings();
         }));
-    // The allowance is a toggle that only means something for a host on this
-    // machine, and the transport enforces the same rule regardless of what
-    // the toggle says. Off-loopback it is disabled with the reason stated.
-    const selfSignedSetting = new Setting(containerEl).setName('Accept a self-signed certificate');
-    let selfSignedToggle = null;
-    const renderSelfSigned = (host) => {
-      const loop = isLoopbackHost(host);
-      selfSignedSetting.setDesc(loop
-        ? 'The host is on this machine, so its own certificate (Proton Bridge makes one) can be accepted.'
-        : 'Only for a host on this machine (127.0.0.1, localhost). A remote host is always verified.');
-      if (selfSignedToggle) selfSignedToggle.setDisabled(!loop);
-    };
-    selfSignedSetting.addToggle((t) => {
-      selfSignedToggle = t;
-      t.setValue(!!this.plugin.settings.imapAllowSelfSigned)
-        .onChange(async (v) => { this.plugin.settings.imapAllowSelfSigned = v; await this.plugin.saveSettings(); });
-      renderSelfSigned(this.plugin.settings.imapHost);
-    });
-    new Setting(containerEl)
-      .setName('Email address')
-      .addText((t) => t.setValue(this.plugin.settings.imapUser)
-        .onChange(async (v) => { this.plugin.settings.imapUser = v.trim(); await this.plugin.saveSettings(); }));
-    secret(new Setting(containerEl)
-      .setName('App password')
-      .setDesc('Never your normal password. Paste the app password without spaces.'),
-      () => readSecret(this.plugin.settings, secrets, 'imapPassword'),
-      (v) => { writeSecret(this.plugin.settings, secrets, 'imapPassword', v.replace(/\s+/g, '')); }, 'app password');
-    // Test connection: the probe logs in and straight out, so a wrong host,
-    // port, certificate or password is named here, now, with the same
-    // sentence the tray would show after the next sync. The outcome lands in
-    // a live region so a screen reader hears it without hunting for it.
-    const probeSetting = new Setting(containerEl)
-      .setName('Test connection')
-      .setDesc('Logs in and straight out. Reads nothing, writes nothing.');
-    probeSetting.descEl.setAttribute('aria-live', 'polite');
-    const renderProbe = (r) => {
-      probeSetting.descEl.empty();
-      probeSetting.descEl.toggleClass('is-ok', !!r.ok);
-      probeSetting.descEl.toggleClass('is-failed', !r.ok);
-      probeSetting.descEl.appendText(r.message);
-      if (r.hint) { probeSetting.descEl.createEl('br'); probeSetting.descEl.appendText(r.hint); }
-      if (r.docUrl) {
-        probeSetting.descEl.appendText(' ');
-        const a = probeSetting.descEl.createEl('a', { text: 'Open', href: r.docUrl });
-        a.addEventListener('click', (e) => { e.preventDefault(); window.open(r.docUrl, '_external'); });
-      }
-    };
-    probeSetting.addButton((b) => b.setButtonText('Test').onClick(async () => {
-      b.setDisabled(true);
-      probeSetting.descEl.empty();
-      probeSetting.descEl.appendText('Connecting...');
-      try { renderProbe(await imapProbe(this.plugin.withSecrets())); }
-      finally { b.setDisabled(false); }
-    }));
+      renderHostHint(this.plugin.settings.imapHost);
+      new Setting(containerEl)
+        .setName('Port')
+        .setDesc('993 for TLS with most providers; 1143 for Proton Bridge.')
+        .addText((t) => t.setPlaceholder('993').setValue(String(this.plugin.settings.imapPort || 993))
+          .onChange(async (v) => {
+            const n = Number(v.trim());
+            if (Number.isInteger(n) && n > 0 && n < 65536) { this.plugin.settings.imapPort = n; await this.plugin.saveSettings(); }
+          }));
+      new Setting(containerEl)
+        .setName('Security')
+        .setDesc('TLS connects encrypted from the first byte (the default). STARTTLS opens a plain connection and upgrades it before the login; if the host refuses the upgrade, nothing is sent.')
+        .addDropdown((d) => d
+          .addOption('tls', 'TLS (default)')
+          .addOption('starttls', 'STARTTLS')
+          .setValue(this.plugin.settings.imapSecurity === 'starttls' ? 'starttls' : 'tls')
+          .onChange(async (v) => {
+            this.plugin.settings.imapSecurity = v === 'starttls' ? 'starttls' : 'tls';
+            await this.plugin.saveSettings();
+          }));
+      // The allowance is a toggle that only means something for a host on this
+      // machine, and the transport enforces the same rule regardless of what
+      // the toggle says. Off-loopback it is disabled with the reason stated.
+      const selfSignedSetting = new Setting(containerEl).setName('Accept a self-signed certificate');
+      let selfSignedToggle = null;
+      const renderSelfSigned = (host) => {
+        const loop = isLoopbackHost(host);
+        selfSignedSetting.setDesc(loop
+          ? 'The host is on this machine, so its own certificate (Proton Bridge makes one) can be accepted.'
+          : 'Only for a host on this machine (127.0.0.1, localhost). A remote host is always verified.');
+        if (selfSignedToggle) selfSignedToggle.setDisabled(!loop);
+      };
+      selfSignedSetting.addToggle((t) => {
+        selfSignedToggle = t;
+        t.setValue(!!this.plugin.settings.imapAllowSelfSigned)
+          .onChange(async (v) => { this.plugin.settings.imapAllowSelfSigned = v; await this.plugin.saveSettings(); });
+        renderSelfSigned(this.plugin.settings.imapHost);
+      });
+      new Setting(containerEl)
+        .setName('Email address')
+        .addText((t) => t.setValue(this.plugin.settings.imapUser)
+          .onChange(async (v) => { this.plugin.settings.imapUser = v.trim(); await this.plugin.saveSettings(); }));
+      secret(new Setting(containerEl)
+        .setName('App password')
+        .setDesc('Never your normal password. Paste the app password without spaces.'),
+        () => readSecret(this.plugin.settings, secrets, 'imapPassword'),
+        (v) => { writeSecret(this.plugin.settings, secrets, 'imapPassword', v.replace(/\s+/g, '')); }, 'app password');
+      // Test connection: the probe logs in and straight out, so a wrong host,
+      // port, certificate or password is named here, now, with the same
+      // sentence the tray would show after the next sync. The outcome lands in
+      // a live region so a screen reader hears it without hunting for it.
+      const probeSetting = new Setting(containerEl)
+        .setName('Test connection')
+        .setDesc('Logs in and straight out. Reads nothing, writes nothing.');
+      probeSetting.descEl.setAttribute('aria-live', 'polite');
+      const renderProbe = (r) => {
+        probeSetting.descEl.empty();
+        probeSetting.descEl.toggleClass('is-ok', !!r.ok);
+        probeSetting.descEl.toggleClass('is-failed', !r.ok);
+        probeSetting.descEl.appendText(r.message);
+        if (r.hint) { probeSetting.descEl.createEl('br'); probeSetting.descEl.appendText(r.hint); }
+        if (r.docUrl) {
+          probeSetting.descEl.appendText(' ');
+          const a = probeSetting.descEl.createEl('a', { text: 'Open', href: r.docUrl });
+          a.addEventListener('click', (e) => { e.preventDefault(); window.open(r.docUrl, '_external'); });
+        }
+      };
+      probeSetting.addButton((b) => b.setButtonText('Test').onClick(async () => {
+        b.setDisabled(true);
+        probeSetting.descEl.empty();
+        probeSetting.descEl.appendText('Connecting...');
+        try { renderProbe(await imapProbe(this.plugin.withSecrets())); }
+        finally { b.setDisabled(false); }
+      }));
+    }
 
     /* ---- Outlook (2026-09-06) ---- */
     new Setting(containerEl).setName('Outlook (Microsoft 365, outlook.com)').setHeading();

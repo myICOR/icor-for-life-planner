@@ -29,7 +29,7 @@ const stub = {
   requestUrl: async () => ({ status: 200, text: '' }),
   setIcon: () => { },
   normalizePath: (p) => p,
-  Platform: { isMobile: false, isDesktop: true },
+  Platform: { isMobile: false, isDesktop: true, isDesktopApp: true, isMobileApp: false },
 };
 
 const originalLoad = Module._load;

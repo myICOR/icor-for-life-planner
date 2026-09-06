@@ -139,3 +139,52 @@ test('the per-source note carries no source name either', () => {
     assert.equal(text, 'Not connected.');
   }
 });
+
+/* THE "CONNECT THIS DEVICE" PROMPT (Flint's mobile audit, fix 4 / finding
+ * 7.2). secretsInStore is a whole-vault flag: true the moment ANY secret has
+ * ever landed in Obsidian's per-device secret store. It rides data.json, so
+ * it syncs; the secret itself never does (Store secrets doc). A device that
+ * sees secretsInStore true and its OWN sourceConfigured false for a source
+ * is not looking at a never-configured vault -- it is the one device that
+ * has not authenticated yet, and the old flat "Not connected." said the
+ * same thing either way. */
+
+test('a source unconfigured on THIS device, with secrets known elsewhere, gets the device-specific prompt', () => {
+  for (const source of T.SYNCED_SOURCES) {
+    const st = T.trayEmptyState(source, false, undefined, 0, /* total */ undefined, /* secretsElsewhere */ true);
+    assert.equal(st.kind, 'unconfigured-device', `${source} must report the device-specific kind`);
+    assert.equal(st.text, T.TRAY_COPY.unconfiguredDevice());
+    assert.match(st.text, /this device/i);
+  }
+});
+
+test('a genuinely never-configured vault (no secrets anywhere) keeps the plain "Not connected."', () => {
+  for (const source of T.SYNCED_SOURCES) {
+    const st = T.trayEmptyState(source, false, undefined, 0, undefined, false);
+    assert.equal(st.kind, 'unconfigured');
+    assert.equal(st.text, T.TRAY_COPY.unconfigured(source));
+  }
+});
+
+test('omitting secretsElsewhere entirely is the same as false (backward compatible default)', () => {
+  const withArg = T.trayEmptyState('todoist', false, undefined, 0, undefined, false);
+  const withoutArg = T.trayEmptyState('todoist', false, undefined, 0);
+  assert.deepEqual(withoutArg, withArg);
+  assert.equal(withoutArg.kind, 'unconfigured');
+});
+
+test('secretsElsewhere is irrelevant once this device IS configured -- no device prompt on a healthy device', () => {
+  const st = T.trayEmptyState('todoist', true, okStatus, 0, undefined, true);
+  assert.notEqual(st.kind, 'unconfigured-device');
+  assert.equal(st.kind, 'empty');
+});
+
+test('manual never becomes a device prompt -- it has no credential to begin with', () => {
+  const st = T.trayEmptyState(T.MANUAL_SOURCE, true, undefined, 0, 0, true);
+  assert.notEqual(st.kind, 'unconfigured-device');
+});
+
+test('the device-prompt copy carries no em dash or en dash either', () => {
+  assert.ok(!/[–—]/.test(T.TRAY_COPY.unconfiguredDevice()), 'dash in unconfiguredDevice');
+  assert.ok(!/[–—]/.test(T.TRAY_COPY.connectDeviceAction), 'dash in connectDeviceAction');
+});

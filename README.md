@@ -500,7 +500,7 @@ drag-and-drop planning and the weekly goals all work on manual tasks alone.
 
 ## On mobile
 
-The board, the tray and the sync all run on phone and tablet. Two
+The board, the tray and the sync all run on phone and tablet. A few
 differences:
 
 - Planning is tap-first: long-press a card for the menu, then "Plan
@@ -508,7 +508,15 @@ differences:
 - The starred-email source needs the desktop app (IMAP requires a raw TLS
   socket). Todoist, ClickUp, Outlook and the calendar sync everywhere;
   email cards synced on desktop still show up on mobile through vault
-  sync.
+  sync. The IMAP settings section itself only appears on the desktop app;
+  on mobile it is replaced by one line saying so, rather than fields that
+  would fail at the first sync.
+- Secrets live in Obsidian's per-device secret store (see Secrets above)
+  and never travel with vault sync. A source connected on one device
+  shows "Not connected on this device." with a "Connect this device"
+  button on a fresh one, rather than the plain "Not connected." a
+  genuinely never-configured vault shows: the same fields, filled in
+  once more, finish the connection there too.
 
 ## ICOR for Life Obsidian Edition
 
