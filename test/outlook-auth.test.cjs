@@ -360,6 +360,14 @@ test('the four secret fields, the settings, the sign-in predicates, the status l
 test('source scan: the handler is registered at load, the browser is opened, no fetch, the notice is shown', () => {
   const c = code();
   assert.match(c, /this\.registerObsidianProtocolHandler\(OUTLOOK_PROTOCOL_ACTION, \(params\) => this\.outlookAuthCallback\(params\)\)/, 'the redirect lands in the callback');
+  // Exactly one registration, for the whole pre-query string: Obsidian
+  // dispatches icor-for-life-planner/auth as one action. A second handler
+  // on the bare manifest id never fires for this URI and is dead code
+  // that reads like a second way in.
+  assert.equal((c.match(/registerObsidianProtocolHandler\(/g) || []).length, 1, 'one protocol handler, no more');
+  assert.doesNotMatch(c, /registerObsidianProtocolHandler\(this\.manifest\.id/, 'the bare manifest id is not an action');
+  assert.equal(T.OUTLOOK_PROTOCOL_ACTION, 'icor-for-life-planner/auth');
+  assert.equal(`obsidian://${T.OUTLOOK_PROTOCOL_ACTION}`, T.OUTLOOK_REDIRECT_URI, 'the action is the redirect URI minus the scheme');
   assert.match(c, /window\.open\(url, '_external'\)/, 'the sign-in opens the system browser');
   const start = c.indexOf('const OUTLOOK_REDIRECT_URI');
   const end = c.indexOf('function imapSplitResponses');

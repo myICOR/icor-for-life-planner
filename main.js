@@ -1475,7 +1475,8 @@ async function clickupPushFields(token, id, pushes) {
 
 const OUTLOOK_REDIRECT_URI = 'obsidian://icor-for-life-planner/auth';
 // The action string for registerObsidianProtocolHandler: the redirect URI
-// with the scheme stripped.
+// with the scheme stripped. Obsidian hands the whole pre-query string to
+// one handler, so the action is the full path, never the host alone.
 const OUTLOOK_PROTOCOL_ACTION = 'icor-for-life-planner/auth';
 const OUTLOOK_LOGIN_HOST = 'https://login.microsoftonline.com';
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
@@ -4728,13 +4729,10 @@ class IcorPlannerPlugin extends Plugin {
 
     // The Microsoft sign-in comes back through obsidian://icor-for-life-planner/auth
     // (the redirect URI registered in the member's Entra app), on desktop
-    // and mobile alike. The action is registered in both spellings Obsidian
-    // could parse it as: the whole path, and the host alone with the path
-    // in the params. The callback checks the state nonce either way.
+    // and mobile alike. Obsidian dispatches the whole pre-query string,
+    // icor-for-life-planner/auth, as one action, so that is the one
+    // registration; a bare manifest.id would never fire for this URI.
     this.registerObsidianProtocolHandler(OUTLOOK_PROTOCOL_ACTION, (params) => this.outlookAuthCallback(params));
-    this.registerObsidianProtocolHandler(this.manifest.id, (params) => {
-      if (params && (params.code || params.error)) this.outlookAuthCallback(params);
-    });
 
     // The planner folder itself is the entry point (styled like the other
     // rooms by icor-rooms.css). A capture-phase listener turns its click into
