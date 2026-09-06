@@ -5,5 +5,6 @@
   "scripts": {
     "pretest": "node -e \"const fs=require('fs');let f=[];try{f=fs.readdirSync('test').filter(n=>n.endsWith('.test.cjs'))}catch(e){};if(f.length<6){console.error('SUITE INCOMPLETE: found '+f.length+' test files, expected at least 6. An empty run is not a pass.');process.exit(1)}\"",
     "test": "node --test \"test/*.test.cjs\""
-  }
+  },
+  "license": "LicenseRef-ICOR-Source-Available-1.0"
 }
