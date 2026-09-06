@@ -27,6 +27,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const T = require('./harness.cjs');
 
 const code = () => fs.readFileSync(T.__mainPath, 'utf8')
@@ -66,7 +67,7 @@ function loaded() {
   };
 }
 
-const keychain = () => { const storage = new FakeSecretStorage(); return { storage, vault: new T.SecretVault(storage) }; };
+const store = () => { const storage = new FakeSecretStorage(); return { storage, vault: new T.SecretVault(storage) }; };
 
 test('feature detection: the two methods the layer calls, and the mode they yield', () => {
   assert.equal(T.secretStorageUsable(undefined), false);
@@ -77,8 +78,8 @@ test('feature detection: the two methods the layer calls, and the mode they yiel
   assert.equal(new T.SecretVault(undefined).mode, 'data-json');
   assert.equal(new T.SecretVault(undefined).available(), false);
   assert.equal(new T.SecretVault({}).mode, 'data-json', 'an app without secretStorage falls back');
-  const { vault } = keychain();
-  assert.equal(vault.mode, 'keychain');
+  const { vault } = store();
+  assert.equal(vault.mode, 'store');
   assert.equal(vault.available(), true);
   // Off the store nothing is read or written and nothing throws.
   const none = new T.SecretVault(null);
@@ -100,13 +101,13 @@ test('every key is prefixed and inside the alphabet the API accepts', () => {
   for (const raw of ['Cal_1 X', 'cal:1', '  ', 'ÄÖ', 'a--b', '-lead-']) assert.match(T.calendarSecretKey(raw), ok, JSON.stringify(raw));
   assert.equal(T.secretKey('Cal_1 X'), 'icor-for-life-planner-cal-1-x');
   // The fake store enforces the rule, so a key outside it would have thrown here.
-  const { storage, vault } = keychain();
+  const { storage, vault } = store();
   assert.equal(vault.set(T.calendarSecretKey('Cal:1'), 'v'), true);
   assert.deepEqual(storage.listSecrets(), ['icor-for-life-planner-calendar-cal-1']);
 });
 
 test('the migration moves each secret once, blanks its field, drops icsUrl, sets the flag', () => {
-  const { storage, vault } = keychain();
+  const { storage, vault } = store();
   const s = loaded();
   const r = T.migrateSecrets(s, vault);
   assert.equal(r.changed, true);
@@ -117,7 +118,7 @@ test('the migration moves each secret once, blanks its field, drops icsUrl, sets
   assert.equal(s.imapUser, 'a@b.c', 'the address is not a secret and stays');
   assert.equal(s.imapHost, 'imap.gmail.com');
   assert.equal('icsUrl' in s, false, 'the stale single-URL key is gone');
-  assert.equal(s.secretsInKeychain, true);
+  assert.equal(s.secretsInStore, true);
   assert.deepEqual(s.calendars.map((f) => [f.id, f.url]), [['cal-work', ''], ['cal-2', ''], ['cal-off', '']]);
   assert.equal(storage.getSecret('icor-for-life-planner-todoist-token'), 'tok-todoist-1', 'trimmed on the way in');
   assert.equal(storage.getSecret('icor-for-life-planner-clickup-token'), 'pk_clickup_2');
@@ -142,13 +143,13 @@ test('in data-json mode the migration touches nothing but the stale icsUrl', () 
   assert.equal('icsUrl' in s, false);
   assert.equal(s.todoistToken, ' tok-todoist-1 ', 'the field is left exactly as it was');
   assert.equal(s.calendars[0].url, GOOGLE);
-  assert.equal(s.secretsInKeychain, undefined, 'the flag is never set without a store');
+  assert.equal(s.secretsInStore, undefined, 'the flag is never set without a store');
   assert.deepEqual(T.migrateSecrets(s, vault), { changed: false, moved: [] }, 'a second run is a no-op');
 });
 
 test('a store that refuses a write leaves that secret where it was', () => {
   const storage = new FakeSecretStorage();
-  storage.setSecret = (id) => { if (/clickup/.test(id)) throw new Error('keychain locked'); storage.m.set(id, 'x'); };
+  storage.setSecret = (id) => { if (/clickup/.test(id)) throw new Error('store locked'); storage.m.set(id, 'x'); };
   const vault = new T.SecretVault(storage);
   const s = loaded();
   const r = T.migrateSecrets(s, vault);
@@ -161,7 +162,7 @@ test('a store that refuses a write leaves that secret where it was', () => {
 });
 
 test('withSecrets fills every field and every feed address; the copy is shallow and never the original', () => {
-  const { vault } = keychain();
+  const { vault } = store();
   const s = loaded();
   T.migrateSecrets(s, vault);
   const r = T.withSecrets(s, vault);
@@ -175,7 +176,7 @@ test('withSecrets fills every field and every feed address; the copy is shallow 
   assert.equal(s.todoistToken, '', 'the original stays blank');
   assert.equal(s.calendars[0].url, '', 'the original feed stays blank');
   // The pure consumers see a configured setup through the copy, not the original.
-  assert.equal(T.sourceConfigured(s, 'todoist'), false, 'the raw settings look unconfigured in keychain mode');
+  assert.equal(T.sourceConfigured(s, 'todoist'), false, 'the raw settings look unconfigured in store mode');
   assert.equal(T.sourceConfigured(r, 'todoist'), true);
   assert.equal(T.sourceConfigured(r, 'clickup'), true);
   assert.equal(T.sourceConfigured(r, 'email'), true);
@@ -194,12 +195,12 @@ test('withSecrets fills every field and every feed address; the copy is shallow 
 });
 
 test('the field accessors read and write through the store; a cleared value is deleted', () => {
-  const { storage, vault } = keychain();
-  const s = { todoistToken: '', secretsInKeychain: false };
+  const { storage, vault } = store();
+  const s = { todoistToken: '', secretsInStore: false };
   assert.equal(T.readSecret(s, vault, 'todoistToken'), '');
   assert.equal(T.writeSecret(s, vault, 'todoistToken', '  tok  '), true);
   assert.equal(s.todoistToken, '', 'the field stays blank');
-  assert.equal(s.secretsInKeychain, true, 'the flag flips on the first store write');
+  assert.equal(s.secretsInStore, true, 'the flag flips on the first store write');
   assert.equal(storage.getSecret('icor-for-life-planner-todoist-token'), 'tok');
   assert.equal(T.readSecret(s, vault, 'todoistToken'), 'tok');
   assert.equal(T.writeSecret(s, vault, 'todoistToken', ''), true);
@@ -211,11 +212,11 @@ test('the field accessors read and write through the store; a cleared value is d
   assert.equal(T.writeSecret(d, none, 'todoistToken', 'tok'), false);
   assert.equal(d.todoistToken, 'tok');
   assert.equal(T.readSecret(d, none, 'todoistToken'), 'tok');
-  assert.equal(d.secretsInKeychain, undefined);
+  assert.equal(d.secretsInStore, undefined);
 });
 
 test('the feed accessors read and write through the store; removing a feed forgets its address', () => {
-  const { storage, vault } = keychain();
+  const { storage, vault } = store();
   const feed = { id: 'cal-work', name: 'Work', url: '', color: 1, enabled: true, kind: 'ics' };
   assert.equal(T.feedUrl(feed, vault), '');
   assert.equal(T.setFeedUrl(feed, ` ${GOOGLE} `, vault), true);
@@ -240,7 +241,7 @@ test('the feed accessors read and write through the store; removing a feed forge
 });
 
 test('adoptSettings: what onload does with the bytes, in order, and whether it must write back', () => {
-  const { storage, vault } = keychain();
+  const { storage, vault } = store();
   // A data.json from before 0.8.0: one icsUrl, no calendars. The calendar
   // migration runs first, then the address moves out and icsUrl is gone.
   const old = T.adoptSettings({ icsUrl: GOOGLE, todoistToken: 'tok' }, vault);
@@ -249,7 +250,7 @@ test('adoptSettings: what onload does with the bytes, in order, and whether it m
   assert.deepEqual(old.settings.calendars.map((f) => [f.id, f.name, f.url]), [['cal-1', 'Google Calendar', '']]);
   assert.equal('icsUrl' in old.settings, false);
   assert.equal(old.settings.todoistToken, '');
-  assert.equal(old.settings.secretsInKeychain, true);
+  assert.equal(old.settings.secretsInStore, true);
   assert.equal(old.settings.plannerFolder, T.DEFAULT_SETTINGS.plannerFolder, 'the defaults are laid under');
   assert.equal(storage.getSecret('icor-for-life-planner-calendar-cal-1'), GOOGLE);
   // The second launch: nothing to move, nothing to write.
@@ -271,24 +272,45 @@ test('adoptSettings: what onload does with the bytes, in order, and whether it m
   assert.equal(plain.changed, true);
   assert.equal(plain.settings.calendars[0].url, GOOGLE);
   assert.equal('icsUrl' in plain.settings, false);
-  assert.equal(plain.settings.secretsInKeychain, false);
+  assert.equal(plain.settings.secretsInStore, false);
 });
 
 test('the settings tab says where the secrets are, in one line per mode', () => {
-  assert.equal(T.secretsNoteText('data-json', false), 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in the system keychain).');
-  assert.match(T.secretsNoteText('keychain', true), /system keychain/);
-  assert.doesNotMatch(T.secretsNoteText('keychain', true), /data\.json \(/);
+  assert.equal(T.secretsNoteText('data-json', false), 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s secret storage, outside the vault).');
+  assert.equal(T.secretsNoteText('store', true), 'Secrets are stored in Obsidian\'s secret storage (outside the vault and outside data.json, so they are never synced or committed with your notes).');
+  assert.doesNotMatch(T.secretsNoteText('store', true), /data\.json \(/);
   // An older Obsidian opening a vault a newer one migrated: say why the fields are empty.
   const moved = T.secretsNoteText('data-json', true);
   assert.match(moved, /^Secrets are stored in this plugin's data\.json/);
   assert.match(moved, /paste them again here or update Obsidian/);
-  for (const t of [T.secretsNoteText('data-json', false), moved, T.secretsNoteText('keychain', false)]) {
+  for (const t of [T.secretsNoteText('data-json', false), moved, T.secretsNoteText('store', false)]) {
     assert.doesNotMatch(t, /[\u2013\u2014]/, 'no dashes of either length');
   }
 });
 
+test('THE GATE: no shipped text calls the secret storage a keychain', () => {
+  // Obsidian's docs: the data is "stored in local storage, keyed to the
+  // specific vault". It is outside the vault and outside data.json, which
+  // is the property that matters; it is not a system keychain, and a
+  // member who read that would draw the wrong conclusions about what
+  // protects it. Substring scan, case-insensitive, no carve-outs: the mode
+  // name and the settings flag were renamed so nothing needs one.
+  const root = process.env.PLANNER_ROOT ? path.resolve(process.env.PLANNER_ROOT) : path.join(__dirname, '..');
+  const shipped = [
+    ['main.js', fs.readFileSync(T.__mainPath, 'utf8')],
+    ...['README.md', 'SECURITY.md', 'docs/outlook-setup-guide.md'].map((f) => [f, fs.readFileSync(path.join(root, f), 'utf8')]),
+  ];
+  const hits = [];
+  for (const [name, text] of shipped) {
+    text.split('\n').forEach((line, i) => { if (/keychain/i.test(line)) hits.push(`${name}:${i + 1}: ${line.trim().slice(0, 80)}`); });
+  }
+  assert.deepEqual(hits, [], `the word is back:\n${hits.join('\n')}`);
+  // And the accurate sentence is what the member reads.
+  for (const [name, text] of shipped.slice(1, 3)) assert.match(text, /outside the vault and outside `data\.json`/, `${name} says where the secrets are`);
+});
+
 test('secret-free after migration: the settings on disk and the cache note carry no secret', () => {
-  const { vault } = keychain();
+  const { vault } = store();
   const s = loaded();
   T.migrateSecrets(s, vault);
   const disk = JSON.stringify(Object.assign({}, T.DEFAULT_SETTINGS, s));
@@ -360,6 +382,6 @@ test('the settings tab: the secret fields read and write through the layer, and 
     assert.match(c, new RegExp(`readSecret\\(this\\.plugin\\.settings, secrets, '${field}'\\)`), `${field} read`);
     assert.match(c, new RegExp(`writeSecret\\(this\\.plugin\\.settings, secrets, '${field}', `), `${field} write`);
   }
-  assert.match(c, /setDesc\(secretsNoteText\(secrets\.mode, this\.plugin\.settings\.secretsInKeychain === true\)\)/);
-  assert.equal(T.DEFAULT_SETTINGS.secretsInKeychain, false, 'the flag is declared, off, and not a secret');
+  assert.match(c, /setDesc\(secretsNoteText\(secrets\.mode, this\.plugin\.settings\.secretsInStore === true\)\)/);
+  assert.equal(T.DEFAULT_SETTINGS.secretsInStore, false, 'the flag is declared, off, and not a secret');
 });

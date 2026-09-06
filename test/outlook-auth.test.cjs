@@ -37,7 +37,7 @@ class FakeSecretStorage {
   getSecret(id) { return this.m.has(id) ? this.m.get(id) : null; }
   listSecrets() { return [...this.m.keys()]; }
 }
-const keychain = () => { const storage = new FakeSecretStorage(); return { storage, vault: new T.SecretVault(storage) }; };
+const store = () => { const storage = new FakeSecretStorage(); return { storage, vault: new T.SecretVault(storage) }; };
 
 // A scripted requestUrl: `steps` answer calls in order; every call is kept.
 function wire(steps) {
@@ -206,11 +206,11 @@ test('a 429 with Retry-After: 3 is retried exactly once after 3 seconds, then su
 });
 
 test('the refresh posts the refresh_token grant; a rotated token overwrites the stored one, an absent one leaves it', async () => {
-  const { storage, vault } = keychain();
+  const { storage, vault } = store();
   const settings = Object.assign({}, T.DEFAULT_SETTINGS, SIGNED);
   T.migrateSecrets(settings, vault);
   assert.equal(storage.getSecret('icor-for-life-planner-outlook-refresh-token'), 'rt-old');
-  assert.equal(settings.outlookRefreshToken, '', 'the field is blank in keychain mode');
+  assert.equal(settings.outlookRefreshToken, '', 'the field is blank in store mode');
   const s = T.withSecrets(settings, vault);
   assert.equal(s.outlookRefreshToken, 'rt-old', 'the resolved copy carries it');
   // The hidden links: on the copy, not in its JSON, not in its keys.
@@ -270,7 +270,7 @@ test('without a store the tokens live in the settings, and a rotation reaches di
   T.clearOutlookTokens({ live: settings, vault: none });
   for (const f of ['outlookRefreshToken', 'outlookAccessToken', 'outlookExpiresAt', 'outlookAccount']) assert.equal(settings[f], '', f);
   assert.equal(persisted, 2);
-  const { storage, vault } = keychain();
+  const { storage, vault } = store();
   const ks = Object.assign({}, T.DEFAULT_SETTINGS, SIGNED, { outlookAccount: 'me@example.com' });
   T.migrateSecrets(ks, vault);
   assert.equal(storage.getSecret('icor-for-life-planner-outlook-account'), 'me@example.com');

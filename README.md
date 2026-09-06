@@ -48,7 +48,8 @@ for defects. It gets fixed fast.
   about ten minutes, once: the step-by-step guide is
   [docs/outlook-setup-guide.md](docs/outlook-setup-guide.md). Nothing
   passes through myICOR: the client id is yours, the tokens are yours, and
-  they live in your system keychain (or your vault on an older Obsidian).
+  they live in Obsidian's secret storage, outside the vault and outside
+  `data.json` (or in your vault on an older Obsidian).
   Works on desktop and mobile; the sign-in comes back through an
   `obsidian://` link, with a device code as the fallback.
 - A "Planner" entry in the file tree (between INBOX and WiP) opens the
@@ -168,7 +169,7 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `outlookRefreshToken`, `outlookAccessToken`, `outlookExpiresAt`, `outlookAccount` | **secret.** The Microsoft sign-in: the refresh token, the short-lived access token with its expiry, and the account name shown in settings. Empty here on Obsidian 1.11.4 or newer, where they live in the secret store; all four cleared by Sign out | empty |
 | `outlookScopes` | the permissions the last sign-in granted, space-separated; `Mail.ReadWrite` appears once "Complete on source" has been switched on and consented to | empty |
 | `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the **secret** iCal address (empty here on Obsidian 1.11.4 or newer, where it lives in the secret store under the feed's `id`), `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics` (a pasted address) or `graph` (the Outlook calendar, added on sign-in, id `outlook-graph`; it has no address, so `url` stays empty and it is ready when Outlook is signed in). An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and the key is then deleted | empty |
-| `secretsInKeychain` | `true` once any secret has been written to Obsidian's secret store. Not a secret; it lets an older Obsidian explain its empty fields | `false` |
+| `secretsInStore` | `true` once any secret has been written to Obsidian's secret storage. Not a secret; it lets an older Obsidian explain its empty fields | `false` |
 | `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`, `<folder>/Routines`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
 | `routinesEnabled` | show routine blocks on the board and in the agenda; off hides them, the notes stay | `true` |
 | `routineDefaults` | the times a new routine starts with, per type: `{ morning: { start, end }, afternoon: { start, end }, evening: { start, end } }`, each `HH:MM`; each routine keeps its own times in its note | `06:30` to `07:30`, `13:00` to `13:30`, `21:00` to `21:45` |
@@ -192,15 +193,18 @@ sign-in (its refresh token, the short-lived access token with its expiry,
 and the account name). Where they live depends on the Obsidian you run:
 
 - **Obsidian 1.11.4 or newer (desktop and mobile):** in Obsidian's secret
-  store, which is backed by the system keychain, under keys prefixed
-  `icor-for-life-planner-`. The fields in `data.json` are empty. On the
-  first launch after updating, any secret still in `data.json` is moved
-  over once and its field blanked; nothing to do. The settings tab says
-  "Secrets are stored in the system keychain through Obsidian".
+  storage (outside the vault and outside `data.json`, so it is never
+  synced or committed with your notes), under keys prefixed
+  `icor-for-life-planner-`. Obsidian's own docs describe it as "stored
+  in local storage, keyed to the specific vault"; it is not a system
+  keyring. The fields in `data.json` are empty. On the first launch after
+  updating, any secret still in `data.json` is moved over once and its
+  field blanked; nothing to do. The settings tab says "Secrets are stored
+  in Obsidian's secret storage".
 - **Older Obsidian:** in this plugin's `data.json`, as before. The
   settings tab says so in one line. If a newer Obsidian on another
-  machine has already moved this vault's secrets into its keychain, the
-  fields here are empty; paste them again or update Obsidian.
+  machine has already moved this vault's secrets into its secret storage,
+  the fields here are empty; paste them again or update Obsidian.
 
 The secret store is feature-detected at load, so the plugin's minimum
 Obsidian version is unchanged. Nothing the plugin writes into the vault
@@ -413,8 +417,9 @@ the cache, its events render pale and pulsing on the board.
 ## Install
 
 Requires Obsidian 1.4.0 or newer. On 1.11.4 or newer your tokens,
-password and feed addresses are kept in the system keychain instead of
-`data.json` (see Secrets).
+password and feed addresses are kept in Obsidian's secret storage
+(outside the vault and outside `data.json`, so they are never synced or
+committed with your notes) instead of `data.json` (see Secrets).
 
 1. Copy `main.js`, `manifest.json` and `styles.css` from the latest
    release into `.obsidian/plugins/icor-for-life-planner/` in your vault.

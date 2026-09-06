@@ -257,10 +257,10 @@ const DEFAULT_SETTINGS = {
   // colour is an index into the four lenses styles.css declares; the user
   // picks a swatch, never a hex, so no colour value lives in data.json.
   calendars: [],
-  // Set the first time a secret is written to Obsidian's secret store
+  // Set the first time a secret is written to Obsidian's secret storage
   // (0.9.0). Never a secret itself; it lets an older Obsidian opening this
   // vault say why its fields are empty (secretsNoteText).
-  secretsInKeychain: false,
+  secretsInStore: false,
   syncMinutes: 10,
   showWeekend: false,
   splitTime: '13:00',
@@ -325,17 +325,20 @@ const DEFAULT_SETTINGS = {
  *     id in the store, and the SettingSecretControl added in 1.13.2 persists
  *     a key reference any plugin could name. Hence the prefix on every key,
  *     and `secretKey` sanitising whatever it is handed into that alphabet.
- *   - The typings do not say what backs the store. The platform review
- *     names the system keychain, desktop and mobile alike. The plugin does
- *     not depend on that: it feature-detects the two methods it uses and
- *     falls back to data.json, so minAppVersion stays where it was.
+ *   - Where the data goes, per Obsidian's docs: "stored in local storage,
+ *     keyed to the specific vault". Outside the vault folder and outside
+ *     data.json, desktop and mobile alike, so it is never synced or
+ *     committed with the notes. It is not a system keyring and the plugin
+ *     never calls it one. Nor does it depend on the backing: it feature-detects
+ *     the two methods it uses and falls back to data.json, so minAppVersion
+ *     stays where it was.
  *   - `SecretComponent` (a masked input bound to the store) is 1.11.1+ and
  *     is not used here: the settings tab keeps its own password inputs so
  *     the same rows work in both modes.
  *
- * The shape. `SecretVault` wraps the store (mode 'keychain') or nothing
+ * The shape. `SecretVault` wraps the store (mode 'store') or nothing
  * (mode 'data-json'). The settings object on disk carries a secret ONLY in
- * data-json mode. In keychain mode `migrateSecrets` moves each one out on
+ * data-json mode. In store mode `migrateSecrets` moves each one out on
  * load, blanks its field, and every consumer that needs a credential
  * receives `withSecrets(settings)`: a shallow copy with the fields and the
  * feed addresses filled back in. The connectors, the fetchers and
@@ -378,7 +381,7 @@ function secretStorageUsable(storage) {
 
 class SecretVault {
   constructor(storage) { this.storage = secretStorageUsable(storage) ? storage : null; }
-  get mode() { return this.storage ? 'keychain' : 'data-json'; }
+  get mode() { return this.storage ? 'store' : 'data-json'; }
   available() { return !!this.storage; }
   // '' when absent, unreadable, or cleared; never null, never a throw.
   get(key) {
@@ -433,7 +436,7 @@ function writeSecret(settings, vault, field, value) {
   const v = trimmed(value);
   if (vault && vault.available() && vault.set(fieldSecretKey(field), v)) {
     settings[field] = '';
-    if (v) settings.secretsInKeychain = true;
+    if (v) settings.secretsInStore = true;
     return true;
   }
   settings[field] = v;
@@ -472,7 +475,7 @@ function migrateSecrets(settings, vault) {
       changed = true;
     });
   }
-  if (moved.length && s.secretsInKeychain !== true) { s.secretsInKeychain = true; changed = true; }
+  if (moved.length && s.secretsInStore !== true) { s.secretsInStore = true; changed = true; }
   return { changed, moved };
 }
 
@@ -512,11 +515,11 @@ function adoptSettings(loaded, vault) {
 }
 
 // The settings tab's one line on where the secrets are.
-function secretsNoteText(mode, secretsInKeychain) {
-  if (mode === 'keychain') return 'Secrets are stored in the system keychain through Obsidian, not in this plugin\'s data.json.';
-  const base = 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in the system keychain).';
-  if (secretsInKeychain) {
-    return `${base} A newer Obsidian moved this vault's secrets into its keychain; this version cannot read them, so paste them again here or update Obsidian.`;
+function secretsNoteText(mode, secretsInStore) {
+  if (mode === 'store') return 'Secrets are stored in Obsidian\'s secret storage (outside the vault and outside data.json, so they are never synced or committed with your notes).';
+  const base = 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s secret storage, outside the vault).';
+  if (secretsInStore) {
+    return `${base} A newer Obsidian moved this vault's secrets into its secret storage; this version cannot read them, so paste them again here or update Obsidian.`;
   }
   return base;
 }
@@ -4807,7 +4810,7 @@ class IcorPlannerPlugin extends Plugin {
   // The one write of the settings to disk. Belt and braces: a secret that
   // reached the in-memory object by any path (a hand edit, a data.json
   // synced in from a machine without a store) is moved out first, so in
-  // keychain mode data.json never carries one.
+  // store mode data.json never carries one.
   async persistSettings() {
     migrateSecrets(this.settings, this.secrets);
     await this.saveData(this.settings);
@@ -7811,7 +7814,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Secrets').setHeading();
     new Setting(containerEl)
       .setName('Where they live')
-      .setDesc(secretsNoteText(secrets.mode, this.plugin.settings.secretsInKeychain === true))
+      .setDesc(secretsNoteText(secrets.mode, this.plugin.settings.secretsInStore === true))
       .setClass('iplan-settings-secrets');
 
     // The planner folder. Typing validates live (announced); Apply commits,

@@ -77,8 +77,11 @@ The figures below describe the shipped `main.js` on `main` (the 0.8.0 line).
 
 Where they live depends on the Obsidian running the plugin. On Obsidian
 1.11.4 or newer (desktop and mobile) they are in Obsidian's secret store,
-`app.secretStorage`, backed by the system keychain, under ids prefixed
-`icor-for-life-planner-`; the matching fields in `data.json` are empty, and
+`app.secretStorage` (outside the vault and outside `data.json`, so it is
+never synced or committed with your notes; Obsidian's docs describe it as
+"stored in local storage, keyed to the specific vault", not a system
+keyring), under ids prefixed `icor-for-life-planner-`; the matching fields
+in `data.json` are empty, and
 any secret found in `data.json` on load is moved over once and blanked. On
 an older Obsidian they are in the plugin's `data.json` inside the vault, at
 `.obsidian/plugins/icor-for-life-planner/data.json`, as in every release
@@ -146,8 +149,9 @@ These are not vulnerabilities and we will close them as such:
   service, and the only storage those versions offer a plugin is `data.json` in
   your vault. If your vault is synced somewhere, those credentials go with it,
   which is a property of your sync setup rather than a flaw in this plugin. On
-  1.11.4 or newer the secrets are in the system keychain and never in the
-  vault; a secret found in `data.json` there IS in scope. Exfiltration *away*
+  1.11.4 or newer the secrets are in Obsidian's secret storage, outside the
+  vault and never in `data.json`; a secret found in `data.json` there IS in
+  scope. Exfiltration *away*
   from your vault is in scope everywhere; storage *in* it, on an older
   Obsidian, is not.
 - Anyone with filesystem access to your vault being able to read `data.json`. If

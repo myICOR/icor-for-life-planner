@@ -83,4 +83,4 @@ One of the permissions hasn't been consented to yet. Try connecting again and ap
 This is normal. Microsoft's tokens expire after a period of inactivity or after a set time. Just click **Sign in** again in the Planner's settings; you'll sign in once more and it picks up where it left off.
 
 **Can I disconnect later?**
-Yes. Click **Sign out** under Outlook in the Planner's settings, which removes the tokens from your vault (or from your system keychain on Obsidian 1.11.4 or newer). To also revoke access on Microsoft's side, visit `myaccount.microsoft.com` (or `account.live.com/consent/Manage` for a personal account) and remove the app from your list of connected apps. The settings tab links to both.
+Yes. Click **Sign out** under Outlook in the Planner's settings, which removes the tokens from your vault (or from Obsidian's secret storage on Obsidian 1.11.4 or newer). To also revoke access on Microsoft's side, visit `myaccount.microsoft.com` (or `account.live.com/consent/Manage` for a personal account) and remove the app from your list of connected apps. The settings tab links to both.
