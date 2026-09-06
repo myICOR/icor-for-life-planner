@@ -98,11 +98,13 @@ for defects. It gets fixed fast.
   Events.md`, so the board renders instantly on relaunch (pale and
   pulsing until the fresh fetch lands) and your schedule is readable
   vault state.
-- A badge below the left ribbon shows your next event with a live
-  countdown (desktop only, toggleable). When the event carries a meeting
-  link (Zoom, Google Meet, Teams, Webex, Whereby, Jitsi), clicking the
-  badge opens the meeting; otherwise it opens the board. The same link
-  appears as a JOIN MEETING button in the event detail.
+- A strip above the sidebar logo shows your next event with a live
+  countdown, across the full width of the left sidebar (desktop and
+  mobile, toggleable). It also counts down to a routine that is due. When
+  the event carries a meeting link (Zoom, Google Meet, Teams, Webex,
+  Whereby, Jitsi), clicking the strip opens the meeting; otherwise it
+  opens the board. The same link appears as a JOIN MEETING button in the
+  event detail. Nothing left on today's clock, no strip.
 - Two-way sync, each direction under its own switch: with "Complete on
   source" on, checking a card closes the task in Todoist / ClickUp and
   unstars the email (unchecking reopens / re-stars). With "Push edits to
@@ -181,7 +183,7 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `subtaskChecklist` | the "n of m subtasks" row and its list on a parent card; off leaves the counter out, subtask cards keep their parent line | `true` |
 
 The board preferences (sync interval, weekend, split, lunch, workday,
-badge, the two-way toggles) sit beside them under their own names.
+strip, the two-way toggles) sit beside them under their own names.
 
 ## Secrets
 

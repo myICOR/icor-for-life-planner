@@ -276,7 +276,8 @@ const DEFAULT_SETTINGS = {
   // Todoist and ClickUp. Baseline-guarded: only fields the USER changed since
   // the last sync are pushed, so a fresh install never mass-writes.
   pushEdits: true,
-  // v0.5.0: the next-event badge under the left ribbon (desktop only).
+  // The next-event strip above the sidebar logo (0.5.0 put it in the
+  // ribbon; 0.9.1 moved it out, see setupNextBadge). Desktop and mobile.
   showNextBadge: true,
   // Where a recurring task's card lands when its due date moves on to the
   // next occurrence: 'move' puts it on the new due day (keeping its half),
@@ -3476,48 +3477,130 @@ function parseCalendarCacheContent(text) {
 }
 
 /* ========================================================================== *
- * Next-event badge helpers (v0.5.0)
+ * Next-event strip helpers (0.5.0 as a ribbon badge, 0.9.1 as the strip)
  * ========================================================================== */
 
-// From expanded per-day events: a RUNNING timed event wins (badge says NOW),
-// else the next timed event whose start is in the future. All-day events and
-// continuation rows are skipped. Returns the event or null.
-function nextUpcomingEvent(events, now) {
-  const t = now.getTime();
-  let running = null;
-  let next = null;
-  for (const ev of events || []) {
-    if (ev.allDay || !ev.start || !ev.end || ev.continues) continue;
-    const s = new Date(ev.start).getTime();
-    const e = new Date(ev.end).getTime();
-    if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
-    if (s <= t && t < e) {
-      if (!running || s < new Date(running.start).getTime()) running = ev;
-    } else if (s > t) {
-      if (!next || s < new Date(next.start).getTime()) next = ev;
-    }
-  }
-  return running || next;
-}
+// Inside this window the countdown carries the marker: state ink, on the
+// number only. Under NEXT_SECONDS_MS the label switches to M:SS and the tick
+// to one second.
+const NEXT_URGENT_MS = 15 * 60000;
+const NEXT_SECONDS_MS = 5 * 60000;
 
-// Countdown label for the badge. Under 5 minutes it switches to M:SS (the
-// caller also switches the tick to 1s there); running events read NOW.
-function fmtBadgeCountdown(ev, now) {
-  const s = new Date(ev.start).getTime();
-  const t = now.getTime();
-  if (s <= t) return 'NOW';
-  const leftMs = s - t;
-  if (leftMs <= 5 * 60000) {
+// The countdown two ways: the label the strip paints (mono, short) and the
+// spoken form the screen reader gets. startMs and nowMs are epoch millis.
+function fmtNextCountdown(startMs, nowMs) {
+  const leftMs = startMs - nowMs;
+  if (leftMs <= 0) return { label: 'now', spoken: 'running now' };
+  if (leftMs <= NEXT_SECONDS_MS) {
     const totalSec = Math.max(0, Math.round(leftMs / 1000));
-    return `IN ${Math.floor(totalSec / 60)}:${pad2(totalSec % 60)}`;
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return { label: `in ${m}:${pad2(s)}`, spoken: m > 0 ? `in ${m} ${m === 1 ? 'minute' : 'minutes'}` : `in ${s} seconds` };
   }
   const mins = Math.round(leftMs / 60000);
   const d = Math.floor(mins / 1440);
   const h = Math.floor((mins % 1440) / 60);
   const m = mins % 60;
-  if (d > 0) return `IN ${d}D ${h}H`;
-  if (h > 0) return `IN ${h}H ${pad2(m)}M`;
-  return `IN ${m}M`;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  if (d > 0) return { label: h > 0 ? `in ${d}d ${h}h` : `in ${d}d`, spoken: `in ${plural(d, 'day')}${h > 0 ? ` ${plural(h, 'hour')}` : ''}` };
+  if (h > 0) return { label: m > 0 ? `in ${h}h ${m}m` : `in ${h}h`, spoken: `in ${plural(h, 'hour')}${m > 0 ? ` ${plural(m, 'minute')}` : ''}` };
+  return { label: `in ${m} min`, spoken: `in ${plural(m, 'minute')}` };
+}
+
+// Routine instances as timed entries for the model: a routine is the one
+// planner thing besides a calendar event that owns a clock time (tasks carry
+// a date only). Skipped and finished instances are not upcoming.
+function routineTimedEntries(occs) {
+  const out = [];
+  for (const occ of occs || []) {
+    if (!occ || !occ.day || occ.skipped) continue;
+    if (occ.total > 0 && occ.done === occ.total) continue;
+    const [y, mo, d] = String(occ.day).split('-').map(Number);
+    const start = new Date(y, mo - 1, d, 0, occ.startMin, 0, 0);
+    const end = new Date(y, mo - 1, d, 0, Math.max(occ.endMin, occ.startMin + 1), 0, 0);
+    out.push({ title: occ.routine && occ.routine.name ? occ.routine.name : 'Routine', start: start.toISOString(), end: end.toISOString(), joinUrl: null });
+  }
+  return out;
+}
+
+// The next thing on today's clock, as the strip shows it. Pure.
+//   events  expanded per-day calendar events (icsEventsForWeek); all-day
+//           rows and continuation rows are skipped, the meeting link comes
+//           from detectConferenceUrl
+//   items   timed entries { title, start, end, joinUrl } from anything else
+//           with a clock time (routineTimedEntries)
+//   now     a Date
+// A RUNNING entry wins (label "now"). Otherwise the earliest start that is
+// still ahead TODAY. Anything starting on another day is ignored, so the
+// strip is absent rather than reading "in 3d 2h" all week.
+// Returns null when nothing qualifies, else
+//   { label, spoken, title, joinUrl, urgent, running, imminent, key }
+// where urgent is the 15 minute marker window, imminent the 5 minute M:SS
+// window, and key identifies the entry so the live region speaks only when
+// the entry changes, never on a tick.
+function nextBadgeModel(events, items, now) {
+  const t = now.getTime();
+  const today = localDayStr(now);
+  let running = null;
+  let next = null;
+  const consider = (title, startIso, endIso, joinUrl) => {
+    const s = new Date(startIso).getTime();
+    const e = new Date(endIso).getTime();
+    if (!Number.isFinite(s) || !Number.isFinite(e)) return;
+    const entry = { title: String(title || ''), start: s, end: e, joinUrl: joinUrl || null };
+    if (s <= t && t < e) {
+      if (!running || s < running.start) running = entry;
+    } else if (s > t && localDayStr(new Date(s)) === today) {
+      if (!next || s < next.start) next = entry;
+    }
+  };
+  for (const ev of events || []) {
+    if (!ev || ev.allDay || !ev.start || !ev.end || ev.continues) continue;
+    consider(ev.title, ev.start, ev.end, detectConferenceUrl(ev));
+  }
+  for (const it of items || []) {
+    if (!it || !it.start || !it.end) continue;
+    consider(it.title, it.start, it.end, it.joinUrl);
+  }
+  const pick = running || next;
+  if (!pick) return null;
+  const msLeft = pick.start - t;
+  const { label, spoken } = fmtNextCountdown(pick.start, t);
+  return {
+    label, spoken, title: pick.title, joinUrl: pick.joinUrl,
+    urgent: msLeft > 0 && msLeft <= NEXT_URGENT_MS,
+    imminent: msLeft > 0 && msLeft <= NEXT_SECONDS_MS,
+    running: msLeft <= 0,
+    key: `${pick.start}|${pick.title}`,
+  };
+}
+
+// Where the strip mounts, as { place, parent, before } or null.
+//
+// THE LOGO. The theme paints the banner as the file explorer's
+// .nav-header::before, and the Connect plugin may swap in a real
+// a.micor-banner inside that same .nav-header. A pseudo-element is always
+// the first thing painted in its box, so nothing inserted INTO .nav-header
+// can sit above it: "above the logo" means before .nav-header itself, as
+// the first child of the explorer's leaf content. That holds for both
+// shapes of the banner and for a vault with neither (the strip then simply
+// tops the file tree). The leaf content exists on desktop and on the phone
+// drawer alike, which is why the strip no longer refuses mobile.
+//
+// WITHOUT A FILE EXPLORER (core plugin off), the top of the left split's
+// tab group, above the tab headers, so the strip still shows.
+const NEXT_STRIP_LOGO_HOST = '.workspace-leaf-content[data-type="file-explorer"]';
+const NEXT_STRIP_SPLIT_HOST = '.workspace-split.mod-left-split .workspace-tabs';
+function nextStripMountPoint(root) {
+  const q = (el, sel) => (el && typeof el.querySelector === 'function') ? el.querySelector(sel) : null;
+  const explorer = q(root, NEXT_STRIP_LOGO_HOST);
+  if (explorer) {
+    const header = q(explorer, '.nav-header');
+    return { place: 'logo', parent: explorer, before: header || explorer.firstElementChild || null };
+  }
+  const tabs = q(root, NEXT_STRIP_SPLIT_HOST);
+  if (tabs) return { place: 'split', parent: tabs, before: tabs.firstElementChild || null };
+  return null;
 }
 
 /* ========================================================================== *
@@ -4964,10 +5047,10 @@ class IcorPlannerPlugin extends Plugin {
     } catch { /* the cache is a convenience - never fail a sync on it */ }
   }
 
-  /* ---- next-event badge (v0.5.0, desktop only) --------------------------- */
+  /* ---- next-event strip (0.5.0 ribbon badge, 0.9.1 strip) --------------- */
 
-  // Expanded events for the badge window: this ISO week plus the next, so the
-  // "next" pick can see ahead across a weekend regardless of the board's week.
+  // Expanded events for the strip: this ISO week plus the next, so a
+  // running event that began before midnight is still seen.
   badgeEvents() {
     if (!this.calendarDefs) return [];
     const w0 = mondayOf(todayStr());
@@ -4976,51 +5059,106 @@ class IcorPlannerPlugin extends Plugin {
       .concat(icsEventsForWeek(this.calendarDefs, addDays(w0, 7), split));
   }
 
-  // Inject the badge into the LEFT ribbon, right after the action stack the
-  // INKLINE theme styles (the theme positions .iplan-next-badge further).
+  // Build the strip once and mount it where nextStripMountPoint says. The
+  // 0.5.0 badge hung off the ribbon's action stack, which the theme hides
+  // and which was too narrow to read; the strip spans the sidebar column
+  // above the logo instead. It re-mounts on layout-change and, through an
+  // observer scoped to the left split, when the file explorer appears
+  // after us (a plugin loading before the workspace, a leaf reopened).
   setupNextBadge() {
-    if (Platform.isMobile) return;                       // desktop only
     if (!this.settings.showNextBadge) { this.removeNextBadge(); return; }
-    if (this._badgeEl && this._badgeEl.isConnected) { this.updateNextBadge(); return; }
-    const dock = document.querySelector('.workspace-ribbon.mod-left .side-dock-actions');
-    if (!dock) return;                                   // layout not there yet
-    const el = document.createElement('div');
-    el.className = 'iplan-next-badge';
-    el.hidden = true;
-    el.setAttribute('role', 'button');
-    el.setAttribute('tabindex', '0');
-    const icon = document.createElement('span');
-    icon.className = 'iplan-next-badge-icon';
-    setIcon(icon, 'video');
-    const count = document.createElement('span');
-    count.className = 'iplan-next-badge-count';
-    const title = document.createElement('span');
-    title.className = 'iplan-next-badge-title';
-    el.appendChild(icon);
-    el.appendChild(count);
-    el.appendChild(title);
-    const activate = () => {
-      if (this._badgeConfUrl) window.open(this._badgeConfUrl, '_external');
-      else this.openBoard();
-    };
-    el.addEventListener('click', activate);
-    el.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
-    });
-    dock.insertAdjacentElement('afterend', el);
-    this._badgeEl = el;
-    this._badgeParts = { icon, count, title };
+    if (!this._badgeEl) {
+      const el = document.createElement('div');
+      el.className = 'iplan-next-strip';
+      el.hidden = true;
+      markInkPlugin(el, this.manifest.id);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'iplan-next-strip-button';
+      const count = document.createElement('span');
+      count.className = 'iplan-next-strip-count';
+      count.setAttribute('aria-hidden', 'true');
+      const title = document.createElement('span');
+      title.className = 'iplan-next-strip-title';
+      title.setAttribute('aria-hidden', 'true');
+      const join = document.createElement('span');
+      join.className = 'iplan-next-strip-join';
+      join.setAttribute('aria-hidden', 'true');
+      join.textContent = 'Join';
+      join.hidden = true;
+      btn.appendChild(count);
+      btn.appendChild(title);
+      btn.appendChild(join);
+      // The reader hears the strip once per entry, never per tick: the
+      // button's aria-label carries the full sentence and is silent when it
+      // changes; this region speaks only when updateNextBadge sees a new key.
+      const live = document.createElement('span');
+      live.className = 'iplan-next-strip-live iplan-sr-only';
+      live.setAttribute('role', 'status');
+      live.setAttribute('aria-live', 'polite');
+      el.appendChild(btn);
+      el.appendChild(live);
+      btn.addEventListener('click', () => {
+        if (this._badgeConfUrl) window.open(this._badgeConfUrl, '_external');
+        else this.openBoard();
+      });
+      this._badgeEl = el;
+      this._badgeParts = { btn, count, title, join, live };
+      this._badgeKey = null;
+      if (!this._badgeLayoutHooked) {
+        this._badgeLayoutHooked = true;
+        this.registerEvent(this.app.workspace.on('layout-change', () => this.mountNextStrip()));
+      }
+      this.observeNextStripHost();
+    }
+    this.mountNextStrip();
     this.updateNextBadge();
+  }
+
+  // Put the strip at the preferred place, or move it there from the
+  // fallback once the file explorer shows up. A no-op when it already sits
+  // where it belongs, so the observer's own mutations never loop.
+  mountNextStrip() {
+    const el = this._badgeEl;
+    if (!el) return;
+    const at = nextStripMountPoint(document);
+    if (!at) return;
+    // When the strip is already the first child, the point names the strip
+    // itself as "before"; read past it, or the move would send it to the end.
+    const before = at.before === el ? el.nextElementSibling : at.before;
+    const sitsRight = el.isConnected && el.parentElement === at.parent && el.dataset.place === at.place
+      && el.nextElementSibling === before;
+    if (sitsRight) return;
+    el.dataset.place = at.place;
+    at.parent.insertBefore(el, before);
+  }
+
+  observeNextStripHost() {
+    if (this._badgeObserver || typeof MutationObserver !== 'function') return;
+    const host = document.querySelector('.workspace-split.mod-left-split')
+      || document.querySelector('.workspace-drawer.mod-left');
+    if (!host) return;
+    this._badgeObserver = new MutationObserver(() => {
+      if (this._badgeMountQueued) return;
+      this._badgeMountQueued = true;
+      window.requestAnimationFrame(() => {
+        this._badgeMountQueued = false;
+        this.mountNextStrip();
+      });
+    });
+    this._badgeObserver.observe(host, { childList: true, subtree: true });
   }
 
   removeNextBadge() {
     if (this._badgeTimer != null) { window.clearTimeout(this._badgeTimer); this._badgeTimer = null; }
+    if (this._badgeObserver) { this._badgeObserver.disconnect(); this._badgeObserver = null; }
     if (this._badgeEl) { this._badgeEl.remove(); this._badgeEl = null; this._badgeParts = null; }
+    this._badgeKey = null;
     this._badgeConfUrl = null;
   }
 
-  // Single re-arming timer: 30s cadence normally, 1s once <= 5 minutes remain
-  // (the label switches to M:SS there). Cleared on unload via removeNextBadge.
+  // Single re-arming timer: 30s cadence normally, 1s once the label reads
+  // M:SS. Cleared on unload via removeNextBadge.
   _armBadgeTick(ms) {
     if (this._badgeTimer != null) window.clearTimeout(this._badgeTimer);
     this._badgeTimer = window.setTimeout(() => {
@@ -5030,40 +5168,32 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   updateNextBadge() {
-    if (Platform.isMobile) return;
     if (!this.settings.showNextBadge) { this.removeNextBadge(); return; }
-    if (!this._badgeEl || !this._badgeEl.isConnected) {
-      // Layout may not have carried the ribbon yet at first call.
-      if (this._badgeEl) this.removeNextBadge();
-      this.setupNextBadge();
-      if (!this._badgeEl) return;
-    }
+    if (!this._badgeEl) { this.setupNextBadge(); return; }
+    if (!this._badgeEl.isConnected) this.mountNextStrip();
     const now = new Date();
-    const ev = nextUpcomingEvent(this.badgeEvents(), now);
+    const model = nextBadgeModel(this.badgeEvents(), routineTimedEntries(this.routinesFor(localDayStr(now))), now);
     const el = this._badgeEl;
     const parts = this._badgeParts;
-    if (!ev) {
+    if (!model) {
       el.hidden = true;
       this._badgeConfUrl = null;
+      if (this._badgeKey !== null) { this._badgeKey = null; parts.live.textContent = ''; }
       this._armBadgeTick(30000);
       return;
     }
-    const label = fmtBadgeCountdown(ev, now);
-    const conf = detectConferenceUrl(ev);
-    this._badgeConfUrl = conf;
+    this._badgeConfUrl = model.joinUrl;
     el.hidden = false;
-    parts.count.textContent = label;
-    parts.title.textContent = ev.title;
-    parts.icon.style.display = conf ? '' : 'none';
-    const msLeft = new Date(ev.start).getTime() - now.getTime();
-    const imminent = msLeft > 0 && msLeft <= 5 * 60000;
-    el.classList.toggle('is-imminent', imminent);
-    el.classList.toggle('is-now', label === 'NOW');
-    el.setAttribute('aria-label',
-      `${ev.title}, ${label === 'NOW' ? 'running now' : label.toLowerCase()}. ` +
-      (conf ? 'Opens the meeting link.' : 'Opens the planner board.'));
-    el.title = `${ev.title} · ${label}${conf ? '\nClick to join the meeting' : ''}`;
-    this._armBadgeTick(imminent ? 1000 : 30000);
+    parts.count.textContent = model.label;
+    parts.title.textContent = model.title;
+    parts.join.hidden = !model.joinUrl;
+    el.classList.toggle('is-urgent', model.urgent);
+    el.classList.toggle('is-now', model.running);
+    const sentence = `Next: ${model.title}, ${model.spoken}`;
+    parts.btn.setAttribute('aria-label', `${sentence}, ${model.joinUrl ? 'join meeting' : 'open the board'}`);
+    parts.btn.title = `${model.title} \u00b7 ${model.label}${model.joinUrl ? '\nClick to join the meeting' : ''}`;
+    if (model.key !== this._badgeKey) { this._badgeKey = model.key; parts.live.textContent = sentence; }
+    this._armBadgeTick(model.imminent ? 1000 : 30000);
   }
 
   /* ---- views ------------------------------------------------------------- */
@@ -8280,8 +8410,8 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
     new Setting(containerEl)
-      .setName('Upcoming event badge')
-      .setDesc('Shows your next calendar event with a live countdown below the ribbon on the left (desktop only). When the event carries a meeting link (Zoom, Google Meet, Teams, Webex, Whereby, Jitsi), clicking the badge opens the meeting; otherwise it opens the board.')
+      .setName('Next event strip')
+      .setDesc('A strip across the top of the left sidebar, above the logo, shows what is next on today\'s clock with a live countdown. When the event carries a meeting link (Zoom, Google Meet, Teams, Webex, Whereby, Jitsi), clicking the strip opens the meeting; otherwise it opens the board.')
       .addToggle((t) => t.setValue(this.plugin.settings.showNextBadge)
         .onChange(async (v) => {
           this.plugin.settings.showNextBadge = v;
@@ -8488,7 +8618,8 @@ module.exports.__test = {
   dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus, calendarFeedStatusText,
   serializeCalendarDefs, reviveCalendarDefs,
   buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
-  detectConferenceUrl, nextUpcomingEvent, fmtBadgeCountdown,
+  detectConferenceUrl, nextBadgeModel, fmtNextCountdown, routineTimedEntries, nextStripMountPoint,
+  NEXT_URGENT_MS, NEXT_SECONDS_MS, NEXT_STRIP_LOGO_HOST, NEXT_STRIP_SPLIT_HOST,
   CONFERENCE_URL_PATTERNS,
   plannerPaths, normalizePlannerFolder, detectPlannerFolder, plannerFolderChangePlan, gitignoreLineFor, collectItems,
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,

@@ -6,8 +6,10 @@
 
 /* ------------------------------------------------------------ tokens ---- */
 /* .iplan-settings: the settings tab carries the same aliases so its segmented
- * controls and the calendar swatches resolve the tokens they name. */
-.iplan-root, .iplan-tray-root, .iplan-settings {
+ * controls and the calendar swatches resolve the tokens they name.
+ * .iplan-next-strip: the strip lives in the sidebar, outside every root
+ * above, so it is listed here to read the same aliases. */
+.iplan-next-strip, .iplan-root, .iplan-tray-root, .iplan-settings {
   --iplan-marker: var(--ink-marker, #ff5a2d);
   --iplan-paper: var(--ink-paper, var(--text-normal));
   --iplan-dim: var(--ink-paper-dim, var(--text-muted));
@@ -809,64 +811,87 @@ a.iplan-event-modal-row-value:hover { color: var(--ink-marker, #ff5a2d); }
   background: color-mix(in srgb, var(--ink-marker, #ff5a2d) 12%, transparent);
 }
 
-/* ------------------------------------------- next-event ribbon badge ---- */
-/* Sits in the LEFT ribbon below the action stack. The INKLINE theme may
- * reposition/refine via the .iplan-next-badge hook; these are safe defaults
- * for the stock ribbon (narrow vertical strip). */
-.iplan-next-badge {
+/* ------------------------------------------------ next-event strip ---- */
+/* One row across the whole sidebar column, mounted before the file
+ * explorer's .nav-header so it sits above the banner the theme paints there
+ * (or, without a file explorer, at the top of the left split). Hidden
+ * outright when nothing is left on today's clock: an empty strip would be
+ * a statement about the day. The button inside is reset to nothing and
+ * rebuilt here, so neither the host's button rules nor the theme's reach
+ * it (the strip declares data-ink-plugin like every other surface). */
+.iplan-next-strip {
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+  background: var(--iplan-surface);
+  border-bottom: 1px solid var(--iplan-hairline);
+}
+.iplan-next-strip[hidden] { display: none; }
+.iplan-next-strip button.iplan-next-strip-button {
+  all: unset;
+  box-sizing: border-box;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 2px;
-  margin-top: 10px;
-  padding: 6px 3px;
-  max-width: 100%;
-  border: 1px solid var(--ink-hairline, var(--background-modifier-border));
-  border-radius: 8px;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 12px;
   cursor: pointer;
-  text-align: center;
-  overflow: hidden;
-  transition: border-color 120ms var(--ink-ease-draw, ease), color 120ms var(--ink-ease-draw, ease);
+  color: var(--iplan-paper);
+  transition: background-color 120ms var(--iplan-ease);
 }
-.iplan-next-badge:hover {
-  border-color: var(--ink-marker, #ff5a2d);
+.iplan-next-strip button.iplan-next-strip-button:hover { background: var(--iplan-wash); }
+.iplan-next-strip button.iplan-next-strip-button:focus-visible {
+  outline: 2px solid var(--iplan-marker);
+  outline-offset: -2px;
 }
-.iplan-next-badge:focus-visible {
-  outline: 2px solid var(--ink-marker, #ff5a2d);
-  outline-offset: 1px;
-}
-.iplan-next-badge-icon {
-  display: inline-flex;
-  color: var(--ink-paper-dim, var(--text-muted));
-}
-.iplan-next-badge-icon svg { width: 13px; height: 13px; }
-.iplan-next-badge-count {
-  font-family: var(--ink-font-mono, ui-monospace, monospace);
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
+/* the countdown: mono kicker voice, tabular so a ticking M:SS does not shimmy */
+.iplan-next-strip-count {
+  flex: 0 0 auto;
+  font-family: var(--iplan-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink-marker, #ff5a2d);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  color: var(--iplan-dim);
 }
-.iplan-next-badge-title {
-  font-family: var(--ink-font-mono, ui-monospace, monospace);
-  font-size: 8px;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: var(--ink-paper-dim, var(--text-muted));
-  max-width: 100%;
+/* the title: the body face, one line, ellipsis; the button's aria-label
+ * carries the whole of it for the reader */
+.iplan-next-strip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--iplan-paper);
 }
-.iplan-next-badge:hover .iplan-next-badge-title { color: var(--ink-paper, var(--text-normal)); }
-/* under 5 minutes: subtle marker attention (border carries it, no motion) */
-.iplan-next-badge.is-imminent {
-  border-color: var(--ink-marker, #ff5a2d);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink-marker, #ff5a2d) 35%, transparent);
+/* the join affordance: an action, not a state, so it rests in dim ink and
+ * only wakes with the row; the marker stays reserved for the countdown */
+.iplan-next-strip-join {
+  flex: 0 0 auto;
+  font-family: var(--iplan-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border: 1px solid var(--iplan-hairline);
+  border-radius: var(--ink-radius-control, 4px);
+  color: var(--iplan-dim);
 }
-.iplan-next-badge.is-now .iplan-next-badge-count { color: var(--ink-success-dot, #7d9a7f); }
+.iplan-next-strip-join[hidden] { display: none; }
+.iplan-next-strip button.iplan-next-strip-button:hover .iplan-next-strip-join {
+  color: var(--iplan-paper);
+  border-color: var(--iplan-line-rest);
+}
+/* state ink: the marker on the countdown, only inside fifteen minutes;
+ * a running entry reads "now" in the done green */
+.iplan-next-strip.is-urgent .iplan-next-strip-count { color: var(--iplan-marker); font-weight: 700; }
+.iplan-next-strip.is-now .iplan-next-strip-count { color: var(--iplan-success); }
 
 /* --------------------------------------------- today countdown bar ---- */
 .iplan-countdown {
