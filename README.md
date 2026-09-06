@@ -22,8 +22,9 @@ for defects. It gets fixed fast.
   one on the board. The planner is useful on a fresh vault before you have
   connected anything.
 - Syncs open tasks from Todoist and ClickUp, starred emails from any IMAP
-  mailbox, and events from as many calendars as you paste, one iCal
-  address each (Google, iCloud, Proton, Outlook, or any other feed).
+  mailbox, flagged emails from Outlook, and events from as many calendars
+  as you paste, one iCal address each (Google, iCloud, Proton, Outlook, or
+  any other feed), plus your Outlook calendar once you are signed in.
 - Several calendars at once: each one has a name and one of four edge
   colours on its chips, the event card names it, an event present in two
   calendars shows once, and one calendar failing to load leaves the
@@ -35,9 +36,21 @@ for defects. It gets fixed fast.
   preset (host 127.0.0.1, port 1143, STARTTLS, the Bridge's own
   certificate accepted because the host is this machine) and use the
   mailbox password shown inside the Bridge app, with Bridge running.
-  Outlook / Microsoft 365 retired password IMAP and cannot connect yet.
-  A Test connection button logs in and straight out, reads nothing, and
-  names what went wrong within one attempt.
+  Outlook / Microsoft 365 retired password IMAP; it connects through its
+  own section instead (next bullet). A Test connection button logs in and
+  straight out, reads nothing, and names what went wrong within one
+  attempt.
+- Outlook / Microsoft 365 / outlook.com: sign in with your own Microsoft
+  app registration and your flagged emails land in the tray as tasks, your
+  Outlook calendar joins the board with a colour of its own, and checking
+  a card can mark the email complete (behind "Complete on source"). A
+  Microsoft account is required, and you register the app yourself in it,
+  about ten minutes, once: the step-by-step guide is
+  [docs/outlook-setup-guide.md](docs/outlook-setup-guide.md). Nothing
+  passes through myICOR: the client id is yours, the tokens are yours, and
+  they live in your system keychain (or your vault on an older Obsidian).
+  Works on desktop and mobile; the sign-in comes back through an
+  `obsidian://` link, with a device code as the fallback.
 - A "Planner" entry in the file tree (between INBOX and WiP) opens the
   weekly board, and brings the tray up in the right sidebar with it. That
   happens once per session: if you close the tray or collapse the sidebar,
@@ -128,6 +141,11 @@ services (reads always; writes only through the two toggles above):
   star flag, and only when "Complete on source" is on. Test connection
   opens the same connection, logs in and logs out.
 - the iCal URLs you paste (one per calendar), for your events
+- `login.microsoftonline.com` (the Microsoft sign-in and the token refresh,
+  through your own app registration: PKCE, no client secret) and
+  `graph.microsoft.com` (your flagged messages, your calendar events, and
+  the one write: a message's flag status, only when "Complete on source"
+  is on and only after the sign-in granted `Mail.ReadWrite`)
 
 No telemetry, no other endpoints. Without keys the plugin makes no network
 requests at all.
@@ -145,7 +163,11 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `imapPort` | the IMAP port | `993` |
 | `imapSecurity` | `tls` (encrypted from the first byte) or `starttls` (plain connect, upgraded before login, never a plain login) | `tls` |
 | `imapAllowSelfSigned` | accept the host's own certificate; honoured only when the host is loopback, enforced in the transport code, not just in the settings tab | `false` |
-| `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the **secret** iCal address (empty here on Obsidian 1.11.4 or newer, where it lives in the secret store under the feed's `id`), `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics`. An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and the key is then deleted | empty |
+| `outlookClientId` | the Application (client) ID of your own Entra app; a public-client id, not a secret | empty |
+| `outlookTenant` | the sign-in's account segment: `common`, `organizations` or `consumers` | `common` |
+| `outlookRefreshToken`, `outlookAccessToken`, `outlookExpiresAt`, `outlookAccount` | **secret.** The Microsoft sign-in: the refresh token, the short-lived access token with its expiry, and the account name shown in settings. Empty here on Obsidian 1.11.4 or newer, where they live in the secret store; all four cleared by Sign out | empty |
+| `outlookScopes` | the permissions the last sign-in granted, space-separated; `Mail.ReadWrite` appears once "Complete on source" has been switched on and consented to | empty |
+| `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the **secret** iCal address (empty here on Obsidian 1.11.4 or newer, where it lives in the secret store under the feed's `id`), `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics` (a pasted address) or `graph` (the Outlook calendar, added on sign-in, id `outlook-graph`; it has no address, so `url` stays empty and it is ready when Outlook is signed in). An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and the key is then deleted | empty |
 | `secretsInKeychain` | `true` once any secret has been written to Obsidian's secret store. Not a secret; it lets an older Obsidian explain its empty fields | `false` |
 | `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`, `<folder>/Routines`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
 | `routinesEnabled` | show routine blocks on the board and in the agenda; off hides them, the notes stay | `true` |
@@ -165,9 +187,9 @@ badge, the two-way toggles) sit beside them under their own names.
 Five things the plugin holds are secrets: the Todoist token, the ClickUp
 token, the mailbox app password, every calendar feed address (a Google
 secret address or a published Apple, Proton or Outlook link is a bearer
-credential: anyone holding it can read the calendar), and, when the
-Outlook connector lands, its refresh token. Where they live depends on
-the Obsidian you run:
+credential: anyone holding it can read the calendar), and the Outlook
+sign-in (its refresh token, the short-lived access token with its expiry,
+and the account name). Where they live depends on the Obsidian you run:
 
 - **Obsidian 1.11.4 or newer (desktop and mobile):** in Obsidian's secret
   store, which is backed by the system keychain, under keys prefixed
@@ -219,9 +241,13 @@ due day, keeping its morning / afternoon half (the default), or back in
 the tray. A plan already made for a day on or after the new due stands
 either way.
 
-`source` is `todoist`, `clickup`, `email` or `manual`. A manual item is a
-task you typed instead of one that arrived from an account, and it is a
-full planner item: it drags, it plans, it checks off, it can be a weekly
+`source` is `todoist`, `clickup`, `email`, `outlook` or `manual`. An
+`outlook` item is a flagged email: `due` is always empty (mail carries no
+due date), `priority` follows the message's importance (high 1, normal 3,
+low 4), `list_id` is the id of the mail folder it sits in, `source_status`
+is the flag state, and `url` opens the message on the web. A manual item
+is a task you typed instead of one that arrived from an account, and it is
+a full planner item: it drags, it plans, it checks off, it can be a weekly
 goal. Two things are true of it that are not true of a synced item, and
 both are deliberate:
 
@@ -375,7 +401,9 @@ updated_at, feeds: [{ id, name, color, updated_at, defs }] }`, one entry
 per calendar, each with its own `updated_at` (a calendar kept from an
 earlier sync because its last fetch failed keeps its older time). A cache
 written by an earlier release (a bare array) still loads and belongs to
-the first calendar. It is safe to read for AI / schedule context and
+the first calendar. The Outlook calendar's events arrive from Microsoft
+already unrolled, one row per occurrence, and are cached like any other
+feed's (each row flagged `expanded` so it is never unrolled twice). It is safe to read for AI / schedule context and
 **secret-free by contract**: a calendar is named by its id, name and
 colour index only, never its feed URL or private key. Names and colours
 always come from the settings, not from this note. Do not edit it; the
@@ -409,8 +437,9 @@ differences:
 - Planning is tap-first: long-press a card for the menu, then "Plan
   on..." picks the day and half. (Drag and drop stays the desktop way.)
 - The starred-email source needs the desktop app (IMAP requires a raw TLS
-  socket). Todoist, ClickUp and the calendar sync everywhere; email cards
-  synced on desktop still show up on mobile through vault sync.
+  socket). Todoist, ClickUp, Outlook and the calendar sync everywhere;
+  email cards synced on desktop still show up on mobile through vault
+  sync.
 
 ## ICOR for Life Obsidian Edition
 

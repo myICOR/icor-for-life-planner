@@ -1,7 +1,7 @@
 # Security Policy
 
-ICOR for Life - Planner is an Obsidian plugin that syncs Todoist, ClickUp, starred email and
-calendar feeds into your vault. It holds credentials for those services and it can
+ICOR for Life - Planner is an Obsidian plugin that syncs Todoist, ClickUp, starred email,
+Outlook and calendar feeds into your vault. It holds credentials for those services and it can
 write back to them. That makes it the most sensitive plugin in the ICOR for Life
 suite after ICOR for Life - Chat, and we would rather hear about a problem early than read
 about it later.
@@ -26,7 +26,7 @@ A useful report contains:
 - Your Obsidian version and operating system.
 - What an attacker can do, and what they need in order to do it.
 - Steps to reproduce, ideally against a throwaway vault.
-- **Never send us a real API token, iCal URL, or password.** Describe the
+- **Never send us a real API token, iCal URL, Microsoft token, or password.** Describe the
   credential ("the ClickUp token in `data.json`"), do not paste its value. If a
   credential of yours was exposed, rotate it at the provider first, then report.
 
@@ -68,7 +68,12 @@ The figures below describe the shipped `main.js` on `main` (the 0.8.0 line).
   are stored beside it and are not secrets)
 - one or more calendar feed URLs (`calendars[].url`); each is a bearer
   credential: anyone holding it can read that calendar
-- a slot reserved for an Outlook refresh token (not stored yet)
+- the Outlook sign-in: a refresh token, a short-lived access token with its
+  expiry, and the account name shown in settings (store keys
+  `outlook-refresh-token`, `outlook-access-token`, `outlook-expires-at`,
+  `outlook-account`, all four cleared by Sign out). The Application (client)
+  ID of the member's own Entra app sits beside them in settings and is not a
+  secret (a public-client id; there is no client secret anywhere)
 
 Where they live depends on the Obsidian running the plugin. On Obsidian
 1.11.4 or newer (desktop and mobile) they are in Obsidian's secret store,
@@ -83,16 +88,23 @@ single `icsUrl` key of releases before 0.8.0 is deleted on load.
 `data.json` is git-ignored in this repository and is never transmitted anywhere by
 the plugin other than to the services the credential belongs to.
 
-**Where it connects.** `api.todoist.com`, `api.clickup.com`, every
+**Where it connects.** `api.todoist.com`, `api.clickup.com`,
+`login.microsoftonline.com` (the Microsoft sign-in and token refresh with
+the member's own client id, PKCE, no client secret; the redirect is the
+`obsidian://icor-for-life-planner/auth` protocol handler, the device code
+flow the fallback, and there is no loopback listener), `graph.microsoft.com`
+(flagged messages, calendar events, and the flag write), every
 calendar feed host you configure (https only; `webcal://` is rewritten to
 https), and the IMAP host you configure (TLS, or STARTTLS upgraded before
 any login; a self-signed certificate is accepted only for a host on this
 machine, enforced in the transport code). There is no telemetry, no
 analytics, and no myICOR-operated endpoint in this plugin.
 
-**What it writes.** The plugin can write back to Todoist, ClickUp and the
-mailbox (the star flag only). Write-back is off by default and sits behind
-two explicit user-facing toggles. The one mailbox argument that comes from
+**What it writes.** The plugin can write back to Todoist, ClickUp, the
+mailbox (the star flag only) and Outlook (a message's flag status only,
+and only after a sign-in granted `Mail.ReadWrite`, which is requested the
+moment the toggle is switched on and never before). Write-back is off by
+default and sits behind two explicit user-facing toggles. The one mailbox argument that comes from
 the vault, a note's `external_id`, is refused before a socket opens unless it
 is a plain IMAP UID. In the vault it writes the planner folder (a setting;
 changing it moves the folder through Obsidian's own rename), and, for
@@ -146,7 +158,7 @@ These are not vulnerabilities and we will close them as such:
 - Interactions with third-party plugins, or breakage caused by another plugin
   changing shared state. Please report those as normal issues so we can look at
   compatibility, but they are not handled as security reports.
-- Vulnerabilities in Todoist, ClickUp, or Google. Report those to the vendor.
+- Vulnerabilities in Todoist, ClickUp, Microsoft, or Google. Report those to the vendor.
 - Missing hardening that has no demonstrated impact: absent security headers on a
   non-existent server, "the token is not encrypted at rest", dependency versions
   with no reachable exploit path, or the output of an automated scanner with no
