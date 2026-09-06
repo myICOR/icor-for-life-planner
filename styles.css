@@ -1404,3 +1404,113 @@ ul.iplan-settings-list li { margin: 3px 0; }
   white-space: nowrap;
   align-self: center;
 }
+
+/* ============================================================ 0.10.0 ===
+ * Habits managed in the HABITS tab (0.10.0). Every value below is an
+ * --iplan-* alias from the token block; no colour literal is written here.
+ * ====================================================================== */
+
+/* The section head carries the two actions on its right. */
+.iplan-habits-tools { display: inline-flex; gap: 8px; margin-left: auto; }
+/* The row head: the name fills, the chips and the menu button keep their
+ * width. The menu button is the shared nav button, so one hover grammar. */
+.iplan-habit-row-head .iplan-chip { flex: none; }
+.iplan-tray-root button.iplan-habit-menu-btn { flex: none; }
+/* The schedule line: the cadence field, then the toggles or the day field
+ * filling the rest. */
+.iplan-habit-sched { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.iplan-habit-sched .iplan-weekdays { flex: 1; }
+/* The cadence field and the day-of-month field: the underline grammar of
+ * the add-task input, in the mono voice of the chips. Focus changes TWO
+ * channels, hue on the border plus a stroke that was not there at rest;
+ * `all: unset` already leaves the ring at its initial none, so the one
+ * sanctioned switch-off (the add-task input) stays the only one.
+ * REQUIRES data-ink-plugin on .iplan-tray-root (the plugin-surface
+ * contract), same as the add-task input. */
+.iplan-tray-root select.iplan-habit-select,
+.iplan-tray-root input.iplan-habit-monthday-input {
+  all: unset;
+  box-sizing: border-box;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--iplan-line-rest);
+  border-radius: 0;
+  padding: 3px 2px;
+  font-family: var(--iplan-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--iplan-dim);
+  caret-color: var(--iplan-marker);
+  cursor: pointer;
+  transition: border-color 140ms var(--iplan-ease), box-shadow 140ms var(--iplan-ease), color 140ms var(--iplan-ease);
+}
+.iplan-tray-root select.iplan-habit-select { flex: none; width: 92px; }
+.iplan-tray-root input.iplan-habit-monthday-input { width: 44px; text-align: center; cursor: text; }
+.iplan-tray-root select.iplan-habit-select:hover,
+.iplan-tray-root input.iplan-habit-monthday-input:hover { color: var(--iplan-paper); }
+.iplan-tray-root select.iplan-habit-select:focus-visible,
+.iplan-tray-root input.iplan-habit-monthday-input:focus-visible {
+  border-bottom-color: var(--iplan-marker);
+  box-shadow: 0 1px 0 0 var(--iplan-marker);
+  color: var(--iplan-paper);
+}
+.iplan-habit-monthday { display: inline-flex; align-items: center; gap: 6px; }
+.iplan-habit-monthday-label {
+  font-family: var(--iplan-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--iplan-faint);
+}
+/* A quiet row (paused, archived): the dim ink as a token step, never an
+ * opacity dial. */
+.iplan-habit-row.is-quiet select.iplan-habit-select { color: var(--iplan-dim); }
+/* The in-place delete confirm: a sentence in the error ink and two
+ * actions. No dialog. */
+.iplan-habit-confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 4px 2px 2px;
+}
+.iplan-habit-confirm-text {
+  flex: 1 1 100%;
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+  color: var(--iplan-overdue);
+}
+/* The archived section: its head is a button (the keyboard opens it) in
+ * the section-head voice, the count on the right. */
+.iplan-tray-root button.iplan-habits-archived-head {
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--iplan-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  font-size: 10px;
+  color: var(--iplan-dim);
+  padding: 4px 2px;
+  border-radius: 4px;
+}
+.iplan-tray-root button.iplan-habits-archived-head:hover { color: var(--iplan-paper); }
+.iplan-tray-root button.iplan-habits-archived-head:focus-visible { box-shadow: 0 0 0 1px var(--iplan-marker); }
+/* The modals: a row the chosen cadence does not read is not shown. */
+.iplan-habit-modal .setting-item.is-hidden { display: none; }
+
+/* ----------------------------------------------- coarse pointer (d) ---- */
+@media (any-pointer: coarse) {
+  .iplan-tray-root select.iplan-habit-select,
+  .iplan-tray-root input.iplan-habit-monthday-input,
+  .iplan-tray-root button.iplan-habit-menu-btn,
+  .iplan-tray-root button.iplan-habits-archived-head { min-height: 44px; }
+  .iplan-tray-root input.iplan-habit-monthday-input { font-size: 16px; }
+}

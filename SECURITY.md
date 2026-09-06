@@ -110,10 +110,18 @@ moment the toggle is switched on and never before). Write-back is off by
 default and sits behind two explicit user-facing toggles. The one mailbox argument that comes from
 the vault, a note's `external_id`, is refused before a socket opens unless it
 is a plain IMAP UID. In the vault it writes the planner folder (a setting;
-changing it moves the folder through Obsidian's own rename), and, for
-habits, one log row into the body of a note in the habits folder (a setting,
-validated the same way), never that note's frontmatter except `cadence` and
-`cadence_days` from the HABITS tab.
+changing it moves the folder through Obsidian's own rename), which since
+0.10.0 includes `<planner folder>/Habits/`: the habit notes it creates,
+renames (through Obsidian's own rename), moves to Obsidian's trash on
+delete, and edits in the frontmatter (`name`, `cadence`, `cadence_days`,
+`month_day`, `status`, each through Obsidian's frontmatter editor) and in
+the body (one log row per check-in). Outside the planner folder it writes
+exactly one thing, once per note and only when you press "Import from My
+Life": in a habit note of the My Life Habits folder (a setting, validated
+the same way) it replaces the `habit-log` table with one pointer line and
+removes `cadence`, `cadence_days` and `started_on` from the frontmatter.
+Nothing else in that folder is ever written, and a note already linked to a
+planner note is not touched again.
 
 **In scope, and we want to hear about it:**
 
@@ -130,7 +138,8 @@ validated the same way), never that note's frontmatter except `cadence` and
   the configured folder.
 - TLS verification being skipped or downgraded on any outbound request.
 - Any read or write of vault files outside the two folders the plugin is
-  configured to use (the planner folder and the habits folder).
+  configured to use (the planner folder, and the My Life Habits folder for
+  the one-time import edits named above).
 - A vault note's content reaching a remote service as anything other than
   the field it stands for: an id that becomes a command, a title that becomes
   a query.

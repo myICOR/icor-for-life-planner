@@ -58,8 +58,8 @@ for defects. It gets fixed fast.
   the tray or collapse the sidebar, opening the board again leaves it
   alone. The planner folder itself opens like any folder.
 - The tray has four tabs. TASKS holds the unscheduled items grouped by
-  source, with your weekly goals pinned on top. HABITS plans the week's
-  habits: one row per habit, seven weekday toggles. AGENDA answers "what is
+  source, with your weekly goals pinned on top. HABITS is where you create
+  your habits, set their cadence and manage them. AGENDA answers "what is
   planned today", in order. GOALS is the weekly-goals list on its own.
   TASKS and HABITS show while the board is the active page; AGENDA and
   GOALS follow you everywhere else.
@@ -71,14 +71,18 @@ for defects. It gets fixed fast.
   `02 Planner/Routines/`; its block sits in the lane at its time, its steps
   check off one by one with the count on the card, and every day's result
   is a row in the note, readable by you and by the AI team.
-- Habits: the habit notes in your vault's Habits room
-  (`04 Inner World/My Life/Habits` by default) appear as an all-day HABITS
-  block under each day they are scheduled for, on the board and in the
-  AGENDA tab. Checking one writes a row into the habit note's log table,
-  the same row the AI team writes when it asks you in chat, so the two are
-  one record; a streak count comes from that table and is never stored.
-  The HABITS tab moves a habit from one weekday to another by writing
-  `cadence` and `cadence_days` into its note.
+- Habits: one yes or no per day, kept by the planner as one note per
+  habit in `02 Planner/Habits/`. The HABITS tab is where you create,
+  rename, pause, archive and delete them and set the cadence: daily,
+  weekdays, weekly on the days you toggle, or monthly on a day of the
+  month. Each habit appears as an all-day HABITS block under every day it
+  is scheduled for, on the board and in the AGENDA tab; checking one
+  writes a row into the habit note's log table, the same row the AI team
+  writes when it asks you in chat, so the two are one record, and a streak
+  count comes from that table and is never stored. A habit you already
+  keep in your vault's My Life Habits room is imported once (Import from
+  My Life): the planner note takes the schedule and the log, the My Life
+  note keeps its meaning and a pointer, and the two link to each other.
 - Subtasks: a Todoist or ClickUp subtask is a card that names its parent
   above its own title, and the parent card reads "n of m subtasks" with a
   chevron that opens the list; checking a row there is the same check as
@@ -173,12 +177,12 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `outlookScopes` | the permissions the last sign-in granted, space-separated; `Mail.ReadWrite` appears once "Complete on source" has been switched on and consented to | empty |
 | `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the **secret** iCal address (empty here on Obsidian 1.11.4 or newer, where it lives in the secret store under the feed's `id`), `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics` (a pasted address) or `graph` (the Outlook calendar, added on sign-in, id `outlook-graph`; it has no address, so `url` stays empty and it is ready when Outlook is signed in). An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and the key is then deleted | empty |
 | `secretsInStore` | `true` once any secret has been written to Obsidian's secret storage. Not a secret; it lets an older Obsidian explain its empty fields | `false` |
-| `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`, `<folder>/Routines`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
+| `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`, `<folder>/Routines`, `<folder>/Habits`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
 | `routinesEnabled` | show routine blocks on the board and in the agenda; off hides them, the notes stay | `true` |
 | `routineDefaults` | the times a new routine starts with, per type: `{ morning: { start, end }, afternoon: { start, end }, evening: { start, end } }`, each `HH:MM`; each routine keeps its own times in its note | `06:30` to `07:30`, `13:00` to `13:30`, `21:00` to `21:45` |
 | `routineWeekdaysDefault` | the weekdays a new routine starts with, lowercase three-letter codes | `[mon, tue, wed, thu, fri]` |
 | `habitsEnabled` | show the HABITS block under each day and the HABITS tab; off hides both, the notes stay | `true` |
-| `habitsFolder` | the vault's Habits room, one note per habit, read flat (no subfolders); validated like the planner folder (never empty, never under `.obsidian`) | `04 Inner World/My Life/Habits` |
+| `habitsImportFolder` | your vault's My Life Habits room, read only for Import from My Life and the link picker, never for the board; validated like the planner folder (never empty, never under `.obsidian`). Called `habitsFolder` up to 0.9.2 and carried over on load | `04 Inner World/My Life/Habits` |
 | `habitStreaks` | show `STREAK n` on a habit row, computed from the note's log at render, never written | `true` |
 | `clickupIncludeSubtasks` | also fetch ClickUp subtasks assigned to you (`subtasks=true` on the task query); off so an existing board does not fill up on upgrade | `false` |
 | `subtaskChecklist` | the "n of m subtasks" row and its list on a parent card; off leaves the counter out, subtask cards keep their parent line | `true` |
@@ -336,63 +340,112 @@ same shape (a `Y` with no step numbers counts as every step done), and
 the board shows it on the next render. Nothing here is ever sent to
 Todoist, ClickUp, the mailbox or a calendar.
 
-## Habits (`04 Inner World/My Life/Habits/`)
+## Habits (`02 Planner/Habits/`)
 
-A habit is one yes or no per day. It is defined in your vault's Habits
-room, not in the planner: one markdown note per habit, the folder being
-the identity. The planner reads that room and writes into it, and both
-halves are narrow on purpose.
+A habit is one yes or no per day. Since 0.10.0 the planner owns it: one
+markdown note per habit in `02 Planner/Habits/`, written by "New habit" in
+the HABITS tab (or the command of the same name), managed there, and read
+from there for the board. Your vault's My Life Habits room
+(`04 Inner World/My Life/Habits/` by default) is not read for the board any
+more: it is where a habit's meaning lives, and the planner note links to it.
 
-**What it reads.** Any note in the folder whose frontmatter says
-`type: habit` or carries a `cadence`. `INDEX.md`, `README.md` and names
-starting with `_` are skipped, and subfolders are not read. The fields:
+**The note.** `type: planner-habit` is the identity. `INDEX.md`,
+`README.md` and names starting with `_` are skipped, and subfolders are not
+read. The shape:
+
+```markdown
+---
+type: planner-habit
+name: "Morning pages"
+cadence: weekly
+status: active
+cadence_days: [mon, wed, fri]
+started_on: 2026-08-27
+linked_note: "[[Morning pages]]"
+created_at: 2026-09-06T10:00:00.000Z
+---
+
+# Morning pages
+
+## Log
+<!-- habit-log: schema=streak -->
+| Date | Y/N | Note |
+| --- | --- | --- |
+```
 
 | field | meaning |
 | --- | --- |
 | `name` | the label on the row; the file name when absent |
-| `cadence` | `daily`, `weekdays`, `weekly`, `monthly` or `adhoc` (`weekday` is read as `weekdays`) |
-| `cadence_days` | the weekdays, lowercase three-letter codes `mon` to `sun`; read for `weekly` and `adhoc` |
-| `status` | `active` shows; `paused` and `abandoned` do not |
-| `started_on` (or `since`) | when the habit began |
+| `cadence` | `daily`, `weekdays`, `weekly` or `monthly` (`weekday` is read as `weekdays`; anything else is read as `weekly`) |
+| `cadence_days` | for `weekly`: the weekdays, lowercase three-letter codes `mon` to `sun` |
+| `month_day` | for `monthly`: the day of the month, 1 to 28 (29, 30 and 31 are read as 28, the last day every month has); the 1st when absent |
+| `status` | `active` shows on the board; `paused` and `archived` do not, and stay in the tab |
+| `started_on` | when the habit began, `YYYY-MM-DD` |
+| `linked_note` | a wikilink to the My Life habit note, when there is one |
+| `created_at` | when the note was made |
 
-`daily` lands on every day, `weekdays` on Monday to Friday, `weekly` and
-`adhoc` on the days in `cadence_days`, `monthly` on none (it is not a
-weekday habit; the HABITS tab lists it greyed).
+**The HABITS tab** (beside the board) is the management surface. "New
+habit" asks for the name, the cadence, the weekdays or the day of the
+month, the start date (today unless you change it) and, when the My Life
+Habits room has notes, which one to link to. Each row shows the name
+(click to open the note), the status, a cadence dropdown, the seven
+weekday toggles (live for a weekly habit; for daily and weekdays they show
+the implied days and take no edit) or a day-of-month field for a monthly
+habit, and a menu (the "..." button, right-click, or long-press) with
+Rename, Pause or Resume, Archive, Open habit note, Open linked note and
+Delete. Archived habits sit in a collapsed section at the bottom with
+Restore. Delete asks once more in place, then moves the note to Obsidian's
+trash, never a hard delete. Rename renames the note through Obsidian, so
+links to it follow.
 
-**What it writes.** Two things, and nothing else in the note.
+**What it writes.** Everything above writes the habit note's frontmatter
+through Obsidian's own frontmatter editor, the field the action is for and
+nothing else: the cadence dropdown writes `cadence` and removes the field
+the new cadence does not read (`cadence_days` or `month_day`), the toggles
+write `cadence_days`, the day field `month_day`, the menu `status` and
+`name`. Every write is refused for a path outside `02 Planner/Habits/`.
 
-1. The check-in, into the note **body**, as one row in the log table under
-   the `habit-log` sentinel. Checking a row writes `Y` for that date;
-   unchecking writes `_` (pending) when the row carries no text, `N` when
-   it does, so a note you typed on the row survives. A note with no log
-   yet gains this section on the first check, exactly:
-
-```markdown
-## Daily log
-<!-- habit-log: schema=streak -->
-| Date | Y/N | Note |
-| --- | --- | --- |
-| 2026-09-09 | Y |  |
-```
-
-   Newest on top; a table that is oldest on top keeps its order. A row an
-   agent wrote in chat (`Y`, a check mark, `G` for done; `N`, `R` or a dash
-   for not done) shows on the board on the next render, and a row the board
-   wrote is not asked about again. A table whose sentinel says
-   `schema=process` has a third column for the trigger; the planner leaves
-   it empty and shows no streak for that habit. The check-in never touches
-   frontmatter.
-
-2. From the HABITS tab only, `cadence` and `cadence_days` in the
-   frontmatter: all seven days becomes `cadence: daily` with the field
-   removed, exactly Monday to Friday becomes `weekdays` with the field
-   removed, anything else becomes `weekly` with the list.
+The check-in goes into the note **body**, as one row in the log table
+under the `habit-log` sentinel. Checking a row writes `Y` for that date;
+unchecking writes `_` (pending) when the row carries no text, `N` when it
+does, so a note you typed on the row survives. Newest on top; a table that
+is oldest on top keeps its order. A row an agent wrote in chat (`Y`, a
+check mark, `G` for done; `N`, `R` or a dash for not done) shows on the
+board on the next render, and a row the board wrote is not asked about
+again. A table whose sentinel says `schema=process` has a third column for
+the trigger; the planner leaves it empty and shows no streak for that
+habit. The check-in never touches frontmatter.
 
 A day still ahead shows its habits with the rows disabled; past days stay
 checkable. `STREAK n` on a row is the run of consecutive scheduled days
 with a done mark ending today or yesterday, skipping days the habit is not
-scheduled for (a weekday habit's Friday and Monday join), computed from the
-table at render and never written anywhere.
+scheduled for (a weekday habit's Friday and Monday join; a monthly habit's
+months join), computed from the table at render and never written.
+
+**Import from My Life.** If you kept habits in your vault's My Life Habits
+room before 0.10.0, nothing is moved by itself. The HABITS tab (and the
+settings) show "Import from My Life" while that room holds habit notes no
+planner note links to yet: notes with `type: habit` or a `cadence`. Tick
+the ones to take and, for each, the planner:
+
+1. creates `02 Planner/Habits/<name>.md` with the name (from `name` or the
+   file name), the cadence mapped (`daily`, `weekdays` or its `weekday`
+   alias, `weekly` with `cadence_days`, `monthly` with `month_day`;
+   anything else, `adhoc` included, becomes `weekly` with no days for you
+   to set), `started_on` from `started_on` or `since`, the status
+   (`abandoned` becomes `archived`) and `linked_note: "[[<file name>]]"`;
+2. moves the log table (the `habit-log` sentinel line through the last
+   row, byte for byte) out of the My Life note into the planner note's
+   `## Log` section, and leaves one line in its place:
+   `Schedule and check-ins: [[<planner note>]]`;
+3. removes `cadence`, `cadence_days` and `started_on` from the My Life
+   note's frontmatter (they live in the planner note now). Every other
+   field, the body and its links stay.
+
+A note already linked is skipped, so pressing the button again is a no-op.
+From then on check-ins land in the planner note, and the My Life note keeps
+the meaning: the why, the links to your Key Elements, whatever you and the
+AI team wrote there. The row's menu opens it.
 
 ## The calendar cache (`02 Planner/Calendar Events.md`)
 

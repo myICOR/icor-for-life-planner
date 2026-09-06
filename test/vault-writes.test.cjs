@@ -74,30 +74,35 @@ test('THE ASK: a synced note name passes the id through safeBasename, and a plai
   assert.doesNotMatch(a, /[\\/:*?"<>|#^[\]{}]/);
 });
 
-test('THE ASK: the habit writes refuse a path outside the habits folder before any file is looked up', async () => {
+test('THE ASK: the habit writes refuse a path outside the planner Habits folder before any file is looked up', async () => {
+  // Since 0.10.0 the habit notes live under <planner folder>/Habits/; the
+  // full write surface is gated in habits-manage.test.cjs, the two writes
+  // that existed before are kept here so this gate's history reads on.
   const { app, calls } = recordingApp();
   let lookups = 0;
   const inner = app.vault.getAbstractFileByPath;
   app.vault.getAbstractFileByPath = (path) => { lookups += 1; return inner(path); };
-  const p = instance({ habitsFolder: T.DEFAULT_SETTINGS.habitsFolder }, app);
-  const outside = ['02 Planner/Habits/Walk.md', '04 Inner World/My Life/Habits2/Walk.md', '04 Inner World/My Life/Habits', '', null];
+  const p = instance({ plannerFolder: '02 Planner' }, app);
+  const outside = ['04 Inner World/My Life/Habits/Walk.md', '02 Planner/Habits2/Walk.md', '02 Planner/Habits', '02 Planner/Todoist/Walk.md', '', null];
   for (const path of outside) {
-    await assert.rejects(p.toggleHabit(path, '2026-09-04', true), /outside the configured folder/, String(path));
-    await assert.rejects(p.setHabitDays(path, ['mon']), /outside the configured folder/, String(path));
+    await assert.rejects(p.toggleHabit(path, '2026-09-04', true), /outside the planner Habits folder/, String(path));
+    await assert.rejects(p.setHabitDays(path, ['mon']), /outside the planner Habits folder/, String(path));
   }
   assert.equal(lookups, 0, 'a refused path is never looked up');
   assert.deepEqual(calls.process, []);
   assert.deepEqual(calls.frontmatter, []);
-  // inside the folder both writes go through, once each
-  const inside = `${T.DEFAULT_SETTINGS.habitsFolder}/Walk.md`;
+  // inside the folder both writes go through, once each (the days need a
+  // weekly habit, which the recording frontmatter says it is)
+  app.fileManager.processFrontMatter = async (file, fn) => { calls.frontmatter.push(file); fn({ cadence: 'weekly' }); };
+  const inside = '02 Planner/Habits/Walk.md';
   await p.toggleHabit(inside, '2026-09-04', true);
   await p.setHabitDays(inside, ['mon', 'wed']);
   assert.equal(calls.process.length, 1);
   assert.equal(calls.frontmatter.length, 1);
-  // a renamed habits folder moves the boundary with it
-  const moved = instance({ habitsFolder: 'Habits' }, app);
-  await assert.rejects(moved.toggleHabit(inside, '2026-09-04', true), /outside the configured folder/);
-  await moved.toggleHabit('Habits/Walk.md', '2026-09-04', true);
+  // a renamed planner folder moves the boundary with it
+  const moved = instance({ plannerFolder: 'Week' }, app);
+  await assert.rejects(moved.toggleHabit(inside, '2026-09-04', true), /outside the planner Habits folder/);
+  await moved.toggleHabit('Week/Habits/Walk.md', '2026-09-04', true);
   assert.equal(calls.process.length, 2);
 });
 
@@ -128,7 +133,7 @@ test('THE ASK: the routine writes refuse a path outside the Routines folder befo
   assert.equal(calls.process.length, 2);
 });
 
-test('each of the four write methods checks its folder as its first statement', () => {
+test('each write method checks its folder as its first statement', () => {
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const first = (name) => {
     const i = main.indexOf(name);
@@ -136,8 +141,11 @@ test('each of the four write methods checks its folder as its first statement', 
     const body = main.slice(main.indexOf('{', i) + 1);
     return body.split('\n').map((l) => l.trim()).filter(Boolean)[0];
   };
-  assert.equal(first('async toggleHabit('), "if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the configured folder');");
-  assert.equal(first('async setHabitDays('), "if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the configured folder');");
+  // The habit writes share one door (habitFile), whose first statement is
+  // the boundary; each write's first statement is the door.
+  assert.equal(first('async toggleHabit('), 'const file = this.habitFile(path);');
+  assert.equal(first('async setHabitDays('), 'const file = this.habitFile(path);');
+  assert.equal(first('habitFile(path) {'), "if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the planner Habits folder');");
   assert.equal(first('async processRoutine('), "if (!this.paths().isRoutine(path)) throw new Error('routine note outside the planner folder');");
   assert.equal(first('async setRoutineActive('), "if (!this.paths().isRoutine(path)) throw new Error('routine note outside the planner folder');");
 });

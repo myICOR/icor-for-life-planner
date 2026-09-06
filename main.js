@@ -298,12 +298,14 @@ const DEFAULT_SETTINGS = {
   // subtaskChecklist draws the "n of m subtasks" row on a parent card.
   clickupIncludeSubtasks: false,
   subtaskChecklist: true,
-  // Habits (2026-09-04): the vault's Habits room, read for the all-day block
-  // under each day and written for the check-in row in the note body. The
-  // folder is the scaffold's; a moved room is one setting away, validated
-  // the same way as the planner folder.
+  // Habits (2026-09-04; planner-owned since 0.10.0): one note per habit
+  // under <planner folder>/Habits/, read for the all-day block under each
+  // day and written for the check-in row and the schedule. The My Life
+  // Habits room is read only to import from and to link to; up to 0.9.2
+  // the setting was called habitsFolder and named the room the planner
+  // read, and it is carried over on load (migrateHabitSettings).
   habitsEnabled: true,
-  habitsFolder: '04 Inner World/My Life/Habits',
+  habitsImportFolder: '04 Inner World/My Life/Habits',
   habitStreaks: true,
 };
 
@@ -507,9 +509,23 @@ function withSecrets(settings, vault) {
 // defaults are laid under it, so the default `calendars: []` never masks
 // the old single-URL shape; then the secret migration; then the defaults.
 // `changed` says whether data.json must be written back once.
+// 0.10.0: the habits moved into the planner folder and the old setting,
+// the My Life room the planner used to read, became the import folder.
+// The value is carried over once and the old key dropped; a data.json that
+// already has the new key keeps it. Same object back when there is nothing
+// to do, so `changed` stays honest.
+function migrateHabitSettings(raw) {
+  const s = raw && typeof raw === 'object' ? raw : {};
+  if (!Object.prototype.hasOwnProperty.call(s, 'habitsFolder')) return s;
+  const out = Object.assign({}, s);
+  if (out.habitsImportFolder == null && typeof out.habitsFolder === 'string') out.habitsImportFolder = out.habitsFolder;
+  delete out.habitsFolder;
+  return out;
+}
+
 function adoptSettings(loaded, vault) {
   const raw = loaded && typeof loaded === 'object' ? loaded : {};
-  const migrated = migrateCalendarSettings(raw);
+  const migrated = migrateHabitSettings(migrateCalendarSettings(raw));
   const secrets = migrateSecrets(migrated, vault);
   const settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
   return { settings, changed: migrated !== raw || secrets.changed, moved: secrets.moved };
@@ -552,16 +568,21 @@ function normalizeVaultFolder(raw, what) {
   return { ok: true, folder: f, error: null };
 }
 function normalizePlannerFolder(raw) { return normalizeVaultFolder(raw, 'planner'); }
-function normalizeHabitsFolder(raw) { return normalizeVaultFolder(raw, 'habits'); }
-// The habits room, off the setting; an invalid or missing value is the default.
-function habitsFolderOf(settings) {
-  const n = normalizeHabitsFolder(settings && settings.habitsFolder);
-  return n.ok ? n.folder : DEFAULT_SETTINGS.habitsFolder;
+function normalizeHabitsFolder(raw) { return normalizeVaultFolder(raw, 'My Life Habits'); }
+// The My Life Habits room, off the setting: read for the import and the
+// link picker only, never for the board. An invalid or missing value is
+// the default.
+function habitsImportFolderOf(settings) {
+  const n = normalizeHabitsFolder(settings && settings.habitsImportFolder);
+  return n.ok ? n.folder : DEFAULT_SETTINGS.habitsImportFolder;
 }
-// A folder boundary, not a prefix, same as plannerPaths().isInside.
-function habitPathInside(settings, path) {
-  return typeof path === 'string' && path.startsWith(`${habitsFolderOf(settings)}/`);
+// The import's one write outside the planner folder is confined to that
+// room: a folder boundary, not a prefix, same as plannerPaths().isInside.
+function importPathInside(settings, path) {
+  return typeof path === 'string' && path.startsWith(`${habitsImportFolderOf(settings)}/`);
 }
+// A planner habit note: under <planner folder>/Habits/, a boundary not a prefix.
+function habitPathInside(settings, path) { return plannerPaths(settings).isHabit(path); }
 
 // Every path the plugin reads or writes, derived from the one setting. Pure.
 // An invalid or missing setting falls back to the default, so an older
@@ -582,6 +603,9 @@ function plannerPaths(settings) {
     // Routine notes (2026-09-04): one per routine, under the room.
     routines: `${root}/Routines`,
     isRoutine: (path) => typeof path === 'string' && path.startsWith(`${root}/Routines/`),
+    // Habit notes (0.10.0): one per habit, under the room.
+    habits: `${root}/Habits`,
+    isHabit: (path) => typeof path === 'string' && path.startsWith(`${root}/Habits/`),
   };
 }
 
@@ -4624,42 +4648,71 @@ function routineTemplate(name, type, weekdays, defaults, opts) {
 }
 
 /* ========================================================================== *
- * Habits (2026-09-04)
+ * Habits (2026-09-04; planner-owned since 0.10.0)
  *
- * A habit is one yes or no per day, defined in the vault's Habits room by
- * the person (and their coach), and it is the record the AI team asks about
- * at boot and close. The planner reads that room and puts an all-day block
- * under each day a habit is scheduled for; checking a row writes the same
- * table row an agent writes in chat, so the two paths are one record.
+ * A habit is one yes or no per day. The planner owns it: one note per
+ * habit under <planner folder>/Habits/ with `type: planner-habit`, created,
+ * renamed, paused, archived and deleted from the HABITS tab, its cadence
+ * switched there (daily, weekdays, weekly on chosen days, monthly on a day
+ * of the month). The My Life Habits room is not read for the board any
+ * more: a note there is imported once (its schedule fields and its log
+ * table move into the planner note, a pointer line stays in its place) and
+ * the planner note keeps `linked_note` pointing back, so the meaning of the
+ * habit stays where the person and the AI team write about it.
  *
- * Two note shapes are read and one is written. The scaffold's example is
- * `type: habit` plus `cadence`; the lived vault's notes carry `name`,
- * `cadence`, `cadence_days`, `status` and `started_on` and no type at all,
- * the folder being the identity. Identity here is therefore folder
- * membership plus either mark. The check-in is a body table under the
- * habit-log sentinel (schema=streak: date, marker, note; schema=process:
- * date, marker, trigger), newest on top, streaks computed and never
- * stored. A check-in never writes frontmatter; the HABITS tab writes
- * `cadence` and `cadence_days` and nothing else.
+ * The check-in is a body table under the habit-log sentinel (schema=streak:
+ * date, marker, note; schema=process: date, marker, trigger), newest on
+ * top, streaks computed and never stored. A check-in never writes
+ * frontmatter. Every frontmatter write of the tab goes through
+ * processFrontMatter, touches the field it is for and nothing else, and is
+ * refused for a path outside <planner folder>/Habits/ before any file is
+ * looked up.
  * ========================================================================== */
 
+const HABIT_TYPE = 'planner-habit';
 const HABIT_LOG_SENTINEL = 'habit-log';
-const HABIT_LOG_SECTION = { heading: '## Daily log', schema: 'streak', header: ['Date', 'Y/N', 'Note'] };
-const HABIT_CADENCES = ['daily', 'weekdays', 'weekly', 'monthly', 'adhoc'];
-const HABIT_STATUSES = ['active', 'paused', 'abandoned'];
+const HABIT_LOG_SECTION = { heading: '## Log', schema: 'streak', header: ['Date', 'Y/N', 'Note'] };
+const HABIT_CADENCES = ['daily', 'weekdays', 'weekly', 'monthly'];
+const HABIT_CADENCE_NAMES = { daily: 'Daily', weekdays: 'Weekdays', weekly: 'Weekly', monthly: 'Monthly' };
+const HABIT_STATUSES = ['active', 'paused', 'archived'];
+// A monthly habit lands on one day of the month. 28 is the last day every
+// month has, so 29, 30 and 31 are read as 28 rather than skipping February
+// and the short months without a word.
+const HABIT_MONTH_DAY_MAX = 28;
 const HABIT_SKIP_NAMES = /^(index|readme)$/i;
+// The schedule fields the tab writes on the planner note, and the fields
+// the import removes from the My Life note (the schedule plus the start).
+const HABIT_SCHEDULE_FIELDS = ['cadence', 'cadence_days', 'month_day'];
+const HABIT_IMPORT_REMOVED_FIELDS = ['cadence', 'cadence_days', 'started_on'];
+const ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// 'weekday' (one live note) reads as 'weekdays'; anything unknown is adhoc.
+// 'weekday' (a lived alias) reads as 'weekdays'; anything unknown, adhoc
+// included, is weekly (with no days it lands nowhere, and the dropdown in
+// the tab shows what to fix).
 function normalizeCadence(raw) {
   const c = String(raw == null ? '' : raw).trim().toLowerCase();
   if (c === 'weekday') return 'weekdays';
-  return HABIT_CADENCES.includes(c) ? c : 'adhoc';
+  return HABIT_CADENCES.includes(c) ? c : 'weekly';
 }
+// 'abandoned' (the My Life shape) reads as archived; anything unknown is active.
 function habitStatusOf(raw) {
   const s = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (s === 'abandoned') return 'archived';
   return HABIT_STATUSES.includes(s) ? s : 'active';
 }
-// Folder membership plus either mark: the scaffold's type, or a cadence.
+// The day of the month a monthly habit lands on: 1 to 28, a larger day
+// clamped to 28, anything else null (read as the 1st).
+function monthDayOf(raw) {
+  const n = Number.parseInt(String(raw == null ? '' : raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return Math.min(n, HABIT_MONTH_DAY_MAX);
+}
+// A planner habit note: the type says so, nothing else does.
+function isPlannerHabitFrontmatter(fm) {
+  return !!fm && typeof fm === 'object' && String(fm.type == null ? '' : fm.type).trim() === HABIT_TYPE;
+}
+// A My Life habit note, the import's source: the scaffold's `type: habit`
+// or a cadence, the folder being the identity. Never read for the board.
 function isHabitFrontmatter(fm) {
   return !!fm && typeof fm === 'object'
     && (String(fm.type == null ? '' : fm.type).trim().toLowerCase() === 'habit' || fm.cadence != null);
@@ -4669,32 +4722,48 @@ function habitBasenameOk(basename) {
   const b = String(basename == null ? '' : basename);
   return !!b && !b.startsWith('_') && !HABIT_SKIP_NAMES.test(b);
 }
+function basenameOf(path) {
+  return path ? String(path).split('/').pop().replace(/\.md$/i, '') : '';
+}
+// The note a wikilink names, as a basename: [[a/b|c]] and [[b#h]] are b. A
+// bare name passes through. Null for nothing.
+function wikilinkBasename(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  const m = /^\[\[([^\]]+)\]\]$/.exec(s);
+  const inner = (m ? m[1] : s).split('|')[0].split('#')[0];
+  return basenameOf(inner.trim()) || null;
+}
 
-// The habit a note describes, or null. `fm` is the metadata cache's
-// frontmatter, `path` the note path, `body` the note text (frontmatter
-// allowed; the log is read from it).
+// The habit a planner note describes, or null. `fm` is the metadata
+// cache's frontmatter, `path` the note path, `body` the note text
+// (frontmatter allowed; the log is read from it).
 function habitFromFrontmatter(fm, path, body) {
-  if (!isHabitFrontmatter(fm)) return null;
-  const basename = path ? String(path).split('/').pop().replace(/\.md$/i, '') : '';
+  if (!isPlannerHabitFrontmatter(fm)) return null;
+  const basename = basenameOf(path);
   if (!habitBasenameOk(basename)) return null;
   const log = parseLogTable(stripFrontmatter(body), HABIT_LOG_SENTINEL);
-  const since = fm.started_on || fm.since || null;
+  const cadence = normalizeCadence(fm.cadence);
+  const startedOn = fm.started_on == null ? '' : String(fm.started_on).slice(0, 10);
+  const linked = fm.linked_note == null ? '' : String(fm.linked_note).trim();
   return {
     path: path || null,
     slug: basename,
     name: fm.name != null && String(fm.name).trim() ? String(fm.name).trim() : basename,
-    cadence: normalizeCadence(fm.cadence),
-    cadenceDays: fm.cadence_days == null ? null : normalizeWeekdays(fm.cadence_days),
+    cadence,
+    cadenceDays: cadence === 'weekly' ? normalizeWeekdays(fm.cadence_days) : null,
+    monthDay: cadence === 'monthly' ? monthDayOf(fm.month_day) : null,
     status: habitStatusOf(fm.status),
-    since: since ? String(since).slice(0, 10) : null,
+    startedOn: ISO_DAY_RE.test(startedOn) ? startedOn : null,
+    linkedNote: linked || null,
+    linkedBasename: linked ? wikilinkBasename(linked) : null,
     logSchema: log.found ? (log.schema || 'streak') : null,
     log,
   };
 }
 
-// The weekdays a cadence lands on. daily: all seven; weekdays: mon to fri;
-// weekly or adhoc: the listed days (none without a list); monthly: none (not
-// a weekday habit; listed greyed in the HABITS tab, never on the board).
+// The weekdays a cadence lands on, for the toggle row: daily all seven,
+// weekdays Monday to Friday, weekly the listed days, monthly none (it is a
+// day of the month, not a weekday).
 function daysFromCadence(cadence, cadenceDays) {
   const c = normalizeCadence(cadence);
   if (c === 'daily') return WEEKDAY_CODES.slice();
@@ -4703,31 +4772,39 @@ function daysFromCadence(cadence, cadenceDays) {
   return normalizeWeekdays(cadenceDays);
 }
 function habitDays(habit) { return daysFromCadence(habit.cadence, habit.cadenceDays); }
-// The inverse, for the HABITS tab: all seven is daily and the field goes;
-// exactly mon to fri is weekdays and the field goes; anything else is
-// weekly with the list (an empty list included: the person cleared it).
-// `cadenceDays: null` means delete the field.
-function cadenceFromDays(days) {
-  const d = normalizeWeekdays(days);
-  if (d.length === 7) return { cadence: 'daily', cadenceDays: null };
-  if (d.length === 5 && d.every((c, i) => c === WEEKDAY_CODES[i])) return { cadence: 'weekdays', cadenceDays: null };
-  return { cadence: 'weekly', cadenceDays: d };
+function dayOfMonth(day) { return Number.parseInt(String(day).slice(8, 10), 10); }
+// Whether an ACTIVE habit is scheduled on a day: monthly matches the day of
+// the month (the 1st when none is set), the rest match the weekday. A
+// paused or archived habit never lands anywhere.
+function habitLandsOn(habit, day) {
+  if (!habit || habit.status !== 'active') return false;
+  if (habit.cadence === 'monthly') return dayOfMonth(day) === (habit.monthDay || 1);
+  return habitDays(habit).includes(dayCode(day));
 }
+// The schedule as a predicate over a day, for the streak.
+function habitScheduleOf(habit) { return (day) => habitLandsOn(habit, day); }
 
 // Consecutive scheduled days with a done marker, ending today or yesterday
 // (today pending does not break it: the day is not over). Unscheduled days
 // are skipped, so a weekday habit's Friday and Monday join across the
-// weekend. Computed at render, never written.
-function streakOf(log, days, today) {
-  const scheduled = normalizeWeekdays(days);
-  if (!scheduled.length || !log || !Array.isArray(log.rows)) return 0;
+// weekend and a monthly habit's months join. `schedule` is a list of
+// weekday codes or a predicate over a day. Computed at render, never
+// written.
+function streakOf(log, schedule, today) {
+  let on = schedule;
+  if (typeof schedule !== 'function') {
+    const codes = normalizeWeekdays(schedule);
+    if (!codes.length) return 0;
+    on = (d) => codes.includes(dayCode(d));
+  }
+  if (!log || !Array.isArray(log.rows)) return 0;
   const markers = new Map();
   for (const r of log.rows) if (r.date) markers.set(r.date, r.marker);
   const end = String(today);
   let d = end;
   let n = 0;
   for (let guard = 0; guard < 3660; guard++) {
-    if (scheduled.includes(dayCode(d))) {
+    if (on(d)) {
       const state = markerState(markers.has(d) ? markers.get(d) : '');
       if (state === 'done') n++;
       else if (!(d === end && state === 'pending')) break;
@@ -4745,21 +4822,18 @@ function habitRowState(day, today, marker) {
   return { checked: state === 'done', missed: state === 'missed', disabled: String(day) > String(today) };
 }
 
-// The day's habit instances: every active habit scheduled for that weekday,
-// by name, each with its row state and (streak schema only, when asked) its
+// The day's habit instances: every active habit scheduled for that day, by
+// name, each with its row state and (streak schema only, when asked) its
 // streak as of that day.
 function habitOccurrences(habits, day, today, opts) {
   const o = opts || {};
-  const code = dayCode(day);
   const out = [];
   for (const h of habits || []) {
-    if (!h || h.status !== 'active') continue;
-    const days = habitDays(h);
-    if (!days.includes(code)) continue;
+    if (!habitLandsOn(h, day)) continue;
     const row = logRowFor(h.log, day);
     const marker = row ? row.marker : '';
     const asOf = String(day) > String(today) ? today : day;
-    const streak = o.streaks !== false && h.logSchema === 'streak' ? streakOf(h.log, days, asOf) : null;
+    const streak = o.streaks !== false && h.logSchema === 'streak' ? streakOf(h.log, habitScheduleOf(h), asOf) : null;
     out.push({ habit: h, day, marker, ...habitRowState(day, today, marker), streak });
   }
   return out.sort((a, b) => a.habit.name.localeCompare(b.habit.name));
@@ -4768,8 +4842,8 @@ function habitOccurrences(habits, day, today, opts) {
 // The next body after a check or an uncheck. Runs inside vault.process, on
 // the bytes on disk. A check upserts Y (the note text a person wrote on the
 // row survives; a process-schema trigger column is left for the check-in
-// to fill); a note with no log yet gains "## Daily log", the sentinel and
-// the header. An uncheck writes _ (pending: the day is not over and the
+// to fill); a note with no log yet gains "## Log", the sentinel and the
+// header. An uncheck writes _ (pending: the day is not over and the
 // session-close ask stays alive) when the row carries no text, N when it
 // does. No row to uncheck: nothing to do.
 function habitLogAfterCheck(data, day, next) {
@@ -4780,25 +4854,221 @@ function habitLogAfterCheck(data, day, next) {
   return upsertLogRow(data, HABIT_LOG_SENTINEL, { date: day, marker: noted ? 'N' : '_' });
 }
 
-// The HABITS tab: which rows take a weekday edit, and the word that says why not.
-function habitTabState(habit) {
-  if (habit.status === 'paused') return { editable: false, reason: 'PAUSED' };
-  if (habit.status === 'abandoned') return { editable: false, reason: 'ABANDONED' };
-  if (habit.cadence === 'monthly') return { editable: false, reason: 'MONTHLY' };
-  return { editable: true, reason: null };
+/* ---- the HABITS tab: its model, its writes and the new-habit note, pure -- */
+
+// One row of the tab: the toggles show the implied days for daily and
+// weekdays (inert), the chosen days for weekly (live), and give way to a
+// day-of-month field for monthly. A paused or archived row is quiet.
+function habitRowModel(habit) {
+  return {
+    weekdays: habitDays(habit),
+    weekdaysEditable: habit.cadence === 'weekly',
+    monthDay: habit.cadence === 'monthly' ? (habit.monthDay || 1) : null,
+    quiet: habit.status !== 'active',
+    statusLabel: String(habit.status).toUpperCase(),
+  };
 }
-function habitCadenceLabel(habit) {
-  return habit.cadence === 'adhoc' ? 'AD HOC' : String(habit.cadence).toUpperCase();
+
+// The frontmatter after a cadence switch, applied in place (inside
+// processFrontMatter in the plugin, on a plain object in the tests): the
+// cadence, the field the new cadence reads kept or seeded, the field it
+// does not read removed. Nothing else is touched.
+function applyHabitCadence(fm, cadence) {
+  const c = normalizeCadence(cadence);
+  fm.cadence = c;
+  if (c === 'weekly') {
+    fm.cadence_days = normalizeWeekdays(fm.cadence_days);
+    delete fm.month_day;
+  } else if (c === 'monthly') {
+    fm.month_day = monthDayOf(fm.month_day) || 1;
+    delete fm.cadence_days;
+  } else {
+    delete fm.cadence_days;
+    delete fm.month_day;
+  }
+  return fm;
 }
+
+// The New habit dialog's checks, pure so the sentences are testable. The
+// import runs them lenient: a My Life adhoc habit arrives as weekly with no
+// days, which the dialog would not let a person create.
+function validateHabitInput(input, opts) {
+  const i = input || {};
+  const o = opts || {};
+  if (!String(i.name == null ? '' : i.name).trim()) return { ok: false, error: 'Give the habit a name.' };
+  const c = String(i.cadence == null ? '' : i.cadence).trim().toLowerCase();
+  if (!HABIT_CADENCES.includes(c)) return { ok: false, error: 'Pick a cadence: daily, weekdays, weekly or monthly.' };
+  if (c === 'weekly' && !o.lenient && !normalizeWeekdays(i.cadenceDays).length) return { ok: false, error: 'Pick at least one weekday.' };
+  if (c === 'monthly') {
+    const n = Number.parseInt(String(i.monthDay == null ? '' : i.monthDay).trim(), 10);
+    if (!Number.isFinite(n) || n < 1 || n > HABIT_MONTH_DAY_MAX) return { ok: false, error: `The day of the month is 1 to ${HABIT_MONTH_DAY_MAX}.` };
+  }
+  const s = String(i.startedOn == null ? '' : i.startedOn).trim();
+  if (s && !ISO_DAY_RE.test(s)) return { ok: false, error: 'The start date is YYYY-MM-DD.' };
+  return { ok: true, error: null };
+}
+
+// The frontmatter a new habit note starts with, every contract field
+// present and explicit, in the order it is written. `opts.nowIso` pins
+// created_at (and the start date when none is given).
+function habitFrontmatterOf(input, opts) {
+  const i = input || {};
+  const o = opts || {};
+  const nowIso = o.nowIso || new Date().toISOString();
+  const cadence = normalizeCadence(i.cadence);
+  const started = String(i.startedOn == null ? '' : i.startedOn).trim().slice(0, 10);
+  const linked = i.linkedNote == null ? null : wikilinkBasename(i.linkedNote);
+  const fm = {
+    type: HABIT_TYPE,
+    name: String(i.name == null ? '' : i.name).trim() || 'Habit',
+    cadence,
+    status: habitStatusOf(i.status),
+  };
+  if (cadence === 'weekly') fm.cadence_days = normalizeWeekdays(i.cadenceDays);
+  if (cadence === 'monthly') fm.month_day = monthDayOf(i.monthDay) || 1;
+  fm.started_on = ISO_DAY_RE.test(started) ? started : nowIso.slice(0, 10);
+  if (linked) fm.linked_note = `[[${linked}]]`;
+  fm.created_at = nowIso;
+  return fm;
+}
+
+// The note a new habit starts as: the frontmatter above, the title, and the
+// log section, empty (the sentinel and the header) or, on import, the
+// block moved over from the My Life note byte for byte (`opts.logBlock`).
+function habitTemplate(input, opts) {
+  const o = opts || {};
+  const fm = habitFrontmatterOf(input, o);
+  const lines = ['---'];
+  for (const [k, v] of Object.entries(fm)) {
+    if (Array.isArray(v)) lines.push(`${k}: [${v.join(', ')}]`);
+    else if (k === 'name' || k === 'linked_note') lines.push(`${k}: ${JSON.stringify(v)}`);
+    else lines.push(`${k}: ${v}`);
+  }
+  lines.push('---', '', `# ${fm.name}`, '', HABIT_LOG_SECTION.heading);
+  const block = o.logBlock != null && String(o.logBlock).trim() ? String(o.logBlock).replace(/\r?\n$/, '') : null;
+  if (block) lines.push(block);
+  else {
+    lines.push(
+      `<!-- ${HABIT_LOG_SENTINEL}: schema=${HABIT_LOG_SECTION.schema} -->`,
+      formatLogRow(HABIT_LOG_SECTION.header),
+      formatLogRow(HABIT_LOG_SECTION.header.map(() => '---')),
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+/* ---- the import from My Life, pure --------------------------------------- */
+
+// What a My Life note becomes: the name from `name` or the file name; the
+// cadence mapped (daily, weekdays or its weekday alias, weekly with the
+// days, monthly with its day; unknown or adhoc is weekly with no days); the
+// start from `started_on` or `since`; the status carried (abandoned is
+// archived); the link back to the note by its basename.
+function importMapping(fm, basename) {
+  const f = fm || {};
+  const raw = String(f.cadence == null ? '' : f.cadence).trim().toLowerCase();
+  const cadence = normalizeCadence(raw);
+  const known = raw === 'weekday' || HABIT_CADENCES.includes(raw);
+  const since = f.started_on || f.since || null;
+  const started = since == null ? '' : String(since).slice(0, 10);
+  return {
+    name: f.name != null && String(f.name).trim() ? String(f.name).trim() : basename,
+    cadence,
+    cadenceDays: cadence === 'weekly' && known ? normalizeWeekdays(f.cadence_days) : [],
+    monthDay: cadence === 'monthly' ? (monthDayOf(f.month_day) || 1) : null,
+    startedOn: ISO_DAY_RE.test(started) ? started : null,
+    status: habitStatusOf(f.status),
+    linkedNote: `[[${basename}]]`,
+  };
+}
+// The import's rows: the My Life notes that are habits (by the My Life
+// shape), are not room furniture, and have no planner note linking to them
+// yet. `notes` are { path, basename, fm }; `plannerHabits` the parsed
+// planner notes. Sorted by name.
+function importPlan(notes, plannerHabits) {
+  const linked = new Set((plannerHabits || []).map((h) => h && h.linkedBasename).filter(Boolean));
+  const out = [];
+  for (const n of notes || []) {
+    if (!n || !isHabitFrontmatter(n.fm) || isPlannerHabitFrontmatter(n.fm)) continue;
+    const basename = n.basename || basenameOf(n.path);
+    if (!habitBasenameOk(basename) || linked.has(basename)) continue;
+    out.push({ path: n.path, basename, ...importMapping(n.fm, basename) });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+// The one line the My Life note keeps where its log table was.
+function habitPointerLine(plannerSlug) { return `Schedule and check-ins: [[${plannerSlug}]]`; }
+// The sentinel block of a note: the sentinel line through the last table
+// row, byte for byte (line endings included), or null without one.
+function habitLogBlockOf(body) {
+  const text = String(body == null ? '' : body);
+  const parsed = parseLogTable(text, HABIT_LOG_SENTINEL);
+  if (!parsed.found) return null;
+  return splitLogLines(text).slice(parsed.start, parsed.end).join('\n');
+}
+// The My Life note after the import: the sentinel block replaced by the
+// pointer line; a note with no block gets the pointer at its end; a note
+// that already carries the pointer and no block is left as it is. Every
+// other byte stays.
+function moveHabitLog(body, plannerSlug) {
+  const text = String(body == null ? '' : body);
+  const pointer = habitPointerLine(plannerSlug);
+  const parsed = parseLogTable(text, HABIT_LOG_SENTINEL);
+  if (!parsed.found) {
+    if (text.includes(pointer)) return text;
+    const eol = text.includes('\r\n') ? '\r\n' : '\n';
+    let base = text;
+    if (base.length && !base.endsWith('\n')) base += eol;
+    return `${base}${base.length ? eol : ''}${pointer}${eol}`;
+  }
+  const lines = splitLogLines(text);
+  const eol = lines[parsed.start].endsWith('\r') ? '\r' : '';
+  lines.splice(parsed.start, parsed.end - parsed.start, pointer + eol);
+  return lines.join('\n');
+}
+// The My Life note's frontmatter after the import: the schedule fields and
+// the start date go (they live in the planner note now); every other field
+// stays. In place, for processFrontMatter.
+function stripHabitScheduleFields(fm) {
+  for (const k of HABIT_IMPORT_REMOVED_FIELDS) delete fm[k];
+  return fm;
+}
+// The import modal's line under a candidate, and its button.
+function importCandidateText(c) {
+  const parts = [HABIT_CADENCE_NAMES[c.cadence] || 'Weekly'];
+  if (c.cadence === 'weekly') parts[0] += c.cadenceDays && c.cadenceDays.length ? ` on ${c.cadenceDays.map((d) => WEEKDAY_NAMES[d].slice(0, 3)).join(', ')}` : ', no weekdays yet';
+  if (c.cadence === 'monthly') parts[0] += ` on day ${c.monthDay || 1}`;
+  if (c.status && c.status !== 'active') parts.push(c.status);
+  if (c.startedOn) parts.push(`since ${c.startedOn}`);
+  parts.push(`from ${c.basename}.md`);
+  return `${parts.join('; ')}.`;
+}
+function importButtonText(n) { return `Import ${n}`; }
+// The Notice after an import.
+function importSummaryText(r) {
+  const done = r.done || 0;
+  const parts = [`Planner: imported ${done} habit${done === 1 ? '' : 's'} from My Life`];
+  if (r.skipped) parts.push(`${r.skipped} skipped (linked already)`);
+  if (r.failed && r.failed.length) parts.push(`${r.failed.length} failed: ${r.failed.join('; ')}`);
+  return `${parts.join(', ')}.`;
+}
+// The settings tab's line under the import folder.
+function importFolderText(folder, n) {
+  const tail = n ? `${n} habit note${n === 1 ? '' : 's'} not imported yet.` : 'Every habit note here is imported or linked.';
+  return `Read for the import and the link picker only; the planner never writes here except during an import. ${tail}`;
+}
+
 // The settings count line.
 function habitsCountText(habits, folder) {
   const list = habits || [];
-  if (!list.length) return `No habits found in ${folder}.`;
-  const active = list.filter((h) => h.status === 'active').length;
-  const paused = list.filter((h) => h.status === 'paused').length;
-  const parts = [`${active} active habit${active === 1 ? '' : 's'} found`];
-  if (paused) parts.push(`${paused} paused`);
-  return `${parts.join(', ')}.`;
+  if (!list.length) return `No habits in ${folder} yet.`;
+  const count = (s) => list.filter((h) => h.status === s).length;
+  const active = count('active');
+  const parts = [`${active} active habit${active === 1 ? '' : 's'}`];
+  if (count('paused')) parts.push(`${count('paused')} paused`);
+  if (count('archived')) parts.push(`${count('archived')} archived`);
+  return `${parts.join(', ')} in ${folder}.`;
 }
 
 /* ========================================================================== *
@@ -4849,6 +5119,7 @@ class IcorPlannerPlugin extends Plugin {
     this.addCommand({ id: 'sync-now', name: 'Sync planner sources now', callback: () => this.syncNow(true) });
     this.addCommand({ id: 'add-manual-task', name: 'Add a task', callback: () => this.focusAddTask() });
     this.addCommand({ id: 'new-routine', name: 'New routine', callback: () => this.openNewRoutine() });
+    this.addCommand({ id: 'new-habit', name: 'New habit', callback: () => this.openNewHabit() });
 
     this.addSettingTab(new IcorPlannerSettingTab(this.app, this));
 
@@ -4898,16 +5169,16 @@ class IcorPlannerPlugin extends Plugin {
     // writes, user edits, or the AI team moving an item by editing
     // frontmatter). The boundary is read at event time (this.paths()).
     const inside = (file) => !!(file && this.paths().isInside(file.path));
-    // The habits room is watched for re-render only: a habit note is never
-    // a planner item, so it never reaches the push check.
-    const habit = (path) => habitPathInside(this.settings, path);
-    const watched = (file, path) => !!(file && (inside(file) || habit(path == null ? file.path : path)));
-    // A change under Routines/ or in the habits room re-reads that cache
-    // BEFORE the views re-render, because steps and logs live in the note
-    // body, which the metadata cache does not carry.
+    // The habit notes live under the room since 0.10.0, so the one boundary
+    // covers them. A habit note is never a planner item, so the push check
+    // that fires for any note in the room finds nothing to push for it.
+    const watched = (file) => inside(file);
+    // A change under Routines/ or Habits/ re-reads that cache BEFORE the
+    // views re-render, because steps and logs live in the note body, which
+    // the metadata cache does not carry.
     const settle = (path) => {
       if (this.paths().isRoutine(path)) return this.refreshRoutines();
-      if (habit(path)) return this.refreshHabits();
+      if (this.paths().isHabit(path)) return this.refreshHabits();
       return Promise.resolve();
     };
     const notify = (file) => { if (watched(file)) settle(file.path).then(() => this.emitModelChanged()); };
@@ -4918,7 +5189,7 @@ class IcorPlannerPlugin extends Plugin {
     }));
     this.registerEvent(this.app.vault.on('delete', notify));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
-      if (watched(file) || this.paths().isInside(oldPath) || habit(oldPath)) {
+      if (watched(file) || this.paths().isInside(oldPath)) {
         Promise.all([settle(file.path), settle(oldPath)]).then(() => this.emitModelChanged());
       }
     }));
@@ -5333,6 +5604,8 @@ class IcorPlannerPlugin extends Plugin {
     // Routines too: a vault with none renders no routine cards, and the
     // folder is where the New routine command puts the first one.
     await mk(p.routines);
+    // And Habits (0.10.0): where New habit and the import put the notes.
+    await mk(p.habits);
   }
 
   async syncNow(manual) {
@@ -6017,12 +6290,20 @@ class IcorPlannerPlugin extends Plugin {
     return path;
   }
 
-  /* ---- habits (2026-09-04): the Habits room, read and written in the body -- */
+  /* ---- habits (0.10.0): the planner's own notes, under <root>/Habits/ ---- */
 
-  habitsFolder() { return habitsFolderOf(this.settings); }
+  habitsFolder() { return this.paths().habits; }
+  habitsImportFolder() { return habitsImportFolderOf(this.settings); }
+  openNewHabit() { new NewHabitModal(this.app, this).open(); }
+  openImportHabits(candidates) {
+    const list = candidates || this.importCandidates();
+    if (!list.length) { new Notice('Planner: nothing to import; every habit note in My Life is linked already.'); return; }
+    new ImportHabitsModal(this.app, this, list).open();
+  }
 
-  // The habit notes, parsed. The room is flat (one note per habit, never a
-  // folder), so subfolders are not walked. Cached by mtime like routines.
+  // The planner habit notes, parsed. The folder is flat (one note per
+  // habit, never a folder), so subfolders are not walked. Cached by mtime
+  // like routines.
   async refreshHabits() {
     const out = [];
     try {
@@ -6034,7 +6315,7 @@ class IcorPlannerPlugin extends Plugin {
       for (const file of files) {
         const cache = this.app.metadataCache.getFileCache(file);
         const fm = cache && cache.frontmatter;
-        if (!isHabitFrontmatter(fm) || !habitBasenameOk(file.basename)) continue;
+        if (!isPlannerHabitFrontmatter(fm) || !habitBasenameOk(file.basename)) continue;
         seen.add(file.path);
         const mtime = file.stat ? file.stat.mtime : 0;
         const hit = this._habitCache.get(file.path);
@@ -6058,28 +6339,156 @@ class IcorPlannerPlugin extends Plugin {
     return habitOccurrences(this.habits || [], day, today || todayStr(), { streaks: this.settings.habitStreaks !== false });
   }
 
-  // The check-in: one row in the habit note body, through vault.process.
-  // Never a frontmatter write. Both habit writes assert the habits folder
-  // themselves; a path outside it is refused before any file is looked up.
-  async toggleHabit(path, day, next) {
-    if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the configured folder');
+  // Every habit write starts here: the boundary first, the lookup second.
+  // A path outside <root>/Habits/ is refused before any file is looked up.
+  habitFile(path) {
+    if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the planner Habits folder');
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) throw new Error('the habit note is gone');
-    await this.app.vault.process(file, (data) => habitLogAfterCheck(data, day, next));
+    return file;
   }
 
-  // The HABITS tab's one frontmatter write: cadence and cadence_days, from
-  // the toggled weekdays, nothing else touched.
+  // The check-in: one row in the note body, through vault.process. Never a
+  // frontmatter write.
+  async toggleHabit(path, day, next) {
+    const file = this.habitFile(path);
+    await this.app.vault.process(file, (data) => habitLogAfterCheck(data, day, next));
+  }
+  // The weekday toggles: cadence_days, on a weekly habit only.
   async setHabitDays(path, days) {
-    if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the configured folder');
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) throw new Error('the habit note is gone');
-    const c = cadenceFromDays(days);
+    const file = this.habitFile(path);
     await this.app.fileManager.processFrontMatter(file, (fm) => {
-      fm.cadence = c.cadence;
-      if (c.cadenceDays === null) delete fm.cadence_days;
-      else fm.cadence_days = c.cadenceDays;
+      if (normalizeCadence(fm.cadence) !== 'weekly') throw new Error('only a weekly habit takes weekdays');
+      fm.cadence_days = normalizeWeekdays(days);
     });
+  }
+  // The cadence dropdown: the cadence and the fields it reads, nothing else
+  // (applyHabitCadence).
+  async setHabitCadence(path, cadence) {
+    const file = this.habitFile(path);
+    await this.app.fileManager.processFrontMatter(file, (fm) => { applyHabitCadence(fm, cadence); });
+  }
+  // The day-of-month field: month_day, on a monthly habit only, 1 to 28.
+  async setHabitMonthDay(path, day) {
+    const file = this.habitFile(path);
+    const n = monthDayOf(day);
+    if (n === null) throw new Error(`the day of the month is 1 to ${HABIT_MONTH_DAY_MAX}`);
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      if (normalizeCadence(fm.cadence) !== 'monthly') throw new Error('only a monthly habit takes a day of the month');
+      fm.month_day = n;
+    });
+  }
+  // Pause, resume, archive, restore: status and nothing else.
+  async setHabitStatus(path, status) {
+    const file = this.habitFile(path);
+    const s = String(status == null ? '' : status).trim().toLowerCase();
+    if (!HABIT_STATUSES.includes(s)) throw new Error(`unknown habit status "${status}"`);
+    await this.app.fileManager.processFrontMatter(file, (fm) => { fm.status = s; });
+  }
+  // Rename: the name in the frontmatter, and the file when its safe name
+  // changes, through fileManager.renameFile so every link to it follows.
+  // Returns the path the note has afterwards.
+  async renameHabit(path, name) {
+    const file = this.habitFile(path);
+    const clean = String(name == null ? '' : name).trim();
+    if (!clean) throw new Error('Give the habit a name.');
+    await this.app.fileManager.processFrontMatter(file, (fm) => { fm.name = clean; });
+    const base = safeBasename(clean);
+    if (base === file.basename) return path;
+    const next = this.freeHabitPath(base);
+    await this.app.fileManager.renameFile(file, next);
+    return next;
+  }
+  // Delete: Obsidian's trash (the vault's .trash folder or the system bin,
+  // as the person set it), never a hard delete.
+  async deleteHabit(path) {
+    const file = this.habitFile(path);
+    await this.app.fileManager.trashFile(file);
+  }
+  // The first free path for a habit basename under the folder.
+  freeHabitPath(base) {
+    const folder = this.habitsFolder();
+    let path = normalizePath(`${folder}/${base}.md`);
+    for (let n = 2; this.app.vault.getAbstractFileByPath(path) && n < 50; n++) {
+      path = normalizePath(`${folder}/${base}-${n}.md`);
+    }
+    return path;
+  }
+  // Creates the note and returns its path. The parsed habit is put into the
+  // cache right away from the text just written, like a routine, so the tab
+  // shows it before the metadata cache has indexed the file. `opts.logBlock`
+  // is the import's moved table; `opts.quiet` skips the Notice.
+  async createHabit(input, opts) {
+    const o = opts || {};
+    const v = validateHabitInput(input, { lenient: !!o.lenient });
+    if (!v.ok) throw new Error(v.error);
+    await this.ensureFolders();
+    const path = this.freeHabitPath(safeBasename(input.name));
+    const nowIso = new Date().toISOString();
+    const text = habitTemplate(input, { nowIso, logBlock: o.logBlock });
+    const file = await this.app.vault.create(path, text);
+    const habit = habitFromFrontmatter(habitFrontmatterOf(input, { nowIso }), path, text);
+    if (habit && file instanceof TFile) {
+      habit.file = file;
+      this._habitCache.set(path, { mtime: file.stat ? file.stat.mtime : 0, habit });
+      this.habits = (this.habits || []).filter((h) => h.path !== path).concat([habit]);
+    }
+    this.emitModelChanged();
+    if (!o.quiet) new Notice(`Planner: created the habit "${habit ? habit.name : input.name}".`);
+    return path;
+  }
+
+  // The notes the import could take: a flat read of the My Life Habits
+  // folder, frontmatter from the cache, no body read (that happens at
+  // import time, for the chosen notes only).
+  importCandidates() {
+    const folder = this.app.vault.getAbstractFileByPath(this.habitsImportFolder());
+    const files = folder instanceof TFolder
+      ? (folder.children || []).filter((c) => c instanceof TFile && c.extension === 'md')
+      : [];
+    const notes = files.map((f) => {
+      const cache = this.app.metadataCache.getFileCache(f);
+      return { path: f.path, basename: f.basename, fm: cache && cache.frontmatter };
+    });
+    return importPlan(notes, this.habits || []);
+  }
+  // The notes the New habit dialog can link to: every note in the My Life
+  // Habits folder that is not room furniture, by basename.
+  linkableNotes() {
+    const folder = this.app.vault.getAbstractFileByPath(this.habitsImportFolder());
+    const files = folder instanceof TFolder
+      ? (folder.children || []).filter((c) => c instanceof TFile && c.extension === 'md' && habitBasenameOk(c.basename))
+      : [];
+    return files.map((f) => f.basename).sort((a, b) => a.localeCompare(b));
+  }
+  // The import, for the chosen candidates. Per note, in this order: the
+  // planner note is created with the log block copied into it; then the My
+  // Life note gives up the block for the pointer line (vault.process) and
+  // its schedule fields (processFrontMatter). A failure between the two
+  // leaves the log in the source, never lost. A note already linked is
+  // skipped, so a second run is a no-op. Returns { done, skipped, failed }.
+  async importHabits(candidates) {
+    const linked = new Set((this.habits || []).map((h) => h.linkedBasename).filter(Boolean));
+    const result = { done: 0, skipped: 0, failed: [] };
+    for (const c of candidates || []) {
+      if (!c || linked.has(c.basename) || !importPathInside(this.settings, c.path)) { result.skipped++; continue; }
+      try {
+        const src = this.app.vault.getAbstractFileByPath(c.path);
+        if (!(src instanceof TFile)) { result.skipped++; continue; }
+        const logBlock = habitLogBlockOf(await this.app.vault.read(src));
+        const path = await this.createHabit(c, { logBlock, quiet: true, lenient: true });
+        const slug = basenameOf(path);
+        await this.app.vault.process(src, (data) => moveHabitLog(data, slug));
+        await this.app.fileManager.processFrontMatter(src, (fm) => { stripHabitScheduleFields(fm); });
+        linked.add(c.basename);
+        result.done++;
+      } catch (e) {
+        result.failed.push(`${c.basename}: ${(e && e.message) || e}`);
+      }
+    }
+    new Notice(importSummaryText(result));
+    this.emitModelChanged();
+    return result;
   }
 
   /* ---- manual items: the write path with no API key in front of it ------- */
@@ -7014,6 +7423,220 @@ class NewRoutineModal extends Modal {
 }
 
 /* ========================================================================== *
+ * Habit modals (0.10.0): new, rename, import. Validation speaks in a live
+ * region; no browser dialog anywhere.
+ * ========================================================================== */
+
+// Name, cadence, the weekdays (weekly) or the day of the month (monthly),
+// the start date (today), and the My Life note to link to when the folder
+// has any. The rows a cadence does not read are hidden, not disabled.
+class NewHabitModal extends Modal {
+  constructor(app, plugin, onCreated) {
+    super(app);
+    this.plugin = plugin;
+    this.onCreated = typeof onCreated === 'function' ? onCreated : null;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass('iplan-habit-modal');
+    contentEl.addClass('iplan-settings');
+    markInkPlugin(contentEl, this.plugin.manifest.id);
+    const state = {
+      name: '', cadence: 'daily', cadenceDays: ['mon', 'wed', 'fri'], monthDay: '1',
+      startedOn: todayStr(), linkedNote: '',
+    };
+    const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' NEW HABIT' });
+    contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: 'One yes or no per day.' });
+    let nameInput = null;
+    new Setting(contentEl).setName('Name').addText((t) => {
+      nameInput = t.inputEl;
+      t.setPlaceholder('Morning pages').onChange((v) => { state.name = v; });
+      t.inputEl.setAttribute('aria-label', 'Habit name');
+    });
+    let daysRow = null;
+    let monthRow = null;
+    const showFor = (c) => {
+      if (daysRow) daysRow.settingEl.classList.toggle('is-hidden', c !== 'weekly');
+      if (monthRow) monthRow.settingEl.classList.toggle('is-hidden', c !== 'monthly');
+    };
+    new Setting(contentEl)
+      .setName('Cadence')
+      .setDesc('Every day, Monday to Friday, the weekdays you pick, or one day of the month.')
+      .addDropdown((d) => {
+        for (const c of HABIT_CADENCES) d.addOption(c, HABIT_CADENCE_NAMES[c]);
+        d.setValue(state.cadence).onChange((v) => { state.cadence = normalizeCadence(v); showFor(state.cadence); });
+        d.selectEl.setAttribute('aria-label', 'Cadence');
+      });
+    daysRow = new Setting(contentEl).setName('Weekdays');
+    weekdayToggleRow(daysRow.controlEl, () => state.cadenceDays, (codes) => { state.cadenceDays = codes; }, 'Weekdays');
+    monthRow = new Setting(contentEl)
+      .setName('Day of the month')
+      .setDesc(`1 to ${HABIT_MONTH_DAY_MAX}.`)
+      .addText((t) => {
+        t.setValue(state.monthDay).onChange((v) => { state.monthDay = v; });
+        t.inputEl.type = 'number';
+        t.inputEl.min = '1';
+        t.inputEl.max = String(HABIT_MONTH_DAY_MAX);
+        t.inputEl.setAttribute('aria-label', 'Day of the month');
+      });
+    new Setting(contentEl)
+      .setName('Start date')
+      .setDesc('Today unless you change it.')
+      .addText((t) => {
+        t.setValue(state.startedOn).onChange((v) => { state.startedOn = v; });
+        t.inputEl.type = 'date';
+        t.inputEl.setAttribute('aria-label', 'Start date');
+      });
+    const linkable = this.plugin.linkableNotes();
+    if (linkable.length) {
+      new Setting(contentEl)
+        .setName('Link to a My Life habit note')
+        .setDesc(`A note in ${this.plugin.habitsImportFolder()}. The planner note points at it and the row's menu opens it.`)
+        .addDropdown((d) => {
+          d.addOption('', 'None');
+          for (const b of linkable) d.addOption(b, b);
+          d.setValue('').onChange((v) => { state.linkedNote = v; });
+          d.selectEl.setAttribute('aria-label', 'Linked My Life habit note');
+        });
+    }
+    const error = contentEl.createDiv({ cls: 'iplan-routine-modal-error', attr: { 'aria-live': 'polite' } });
+    const actions = new Setting(contentEl);
+    actions.addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
+    actions.addButton((b) => b.setButtonText('Create').setCta().onClick(() => this.submit(state, error, b)));
+    showFor(state.cadence);
+    if (nameInput) window.setTimeout(() => nameInput.focus(), 0);
+  }
+  async submit(state, errorEl, btn) {
+    const v = validateHabitInput(state);
+    if (!v.ok) { errorEl.setText(v.error); return; }
+    btn.setDisabled(true);
+    try {
+      await this.plugin.createHabit(state);
+      this.close();
+      if (this.onCreated) this.onCreated();
+    } catch (e) {
+      errorEl.setText(`Could not create the habit: ${(e && e.message) || e}`);
+      btn.setDisabled(false);
+    }
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+// One field, Enter submits. The note is renamed with the name through
+// Obsidian's own rename, so every link to it follows.
+class RenameHabitModal extends Modal {
+  constructor(app, plugin, habit, onDone) {
+    super(app);
+    this.plugin = plugin;
+    this.habit = habit;
+    this.onDone = typeof onDone === 'function' ? onDone : null;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass('iplan-habit-modal');
+    contentEl.addClass('iplan-settings');
+    markInkPlugin(contentEl, this.plugin.manifest.id);
+    const state = { name: this.habit.name };
+    let error = null;
+    let btn = null;
+    const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' RENAME HABIT' });
+    contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: this.habit.name });
+    let input = null;
+    new Setting(contentEl)
+      .setName('Name')
+      .setDesc('The note is renamed with it; links to it follow.')
+      .addText((t) => {
+        input = t.inputEl;
+        t.setValue(state.name).onChange((v) => { state.name = v; });
+        t.inputEl.setAttribute('aria-label', 'Habit name');
+        t.inputEl.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          this.submit(state, error, btn);
+        });
+      });
+    error = contentEl.createDiv({ cls: 'iplan-routine-modal-error', attr: { 'aria-live': 'polite' } });
+    const actions = new Setting(contentEl);
+    actions.addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
+    actions.addButton((b) => { btn = b; b.setButtonText('Rename').setCta().onClick(() => this.submit(state, error, b)); });
+    if (input) window.setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+  async submit(state, errorEl, btn) {
+    const clean = String(state.name == null ? '' : state.name).trim();
+    if (!clean) { if (errorEl) errorEl.setText('Give the habit a name.'); return; }
+    if (btn) btn.setDisabled(true);
+    try {
+      await this.plugin.renameHabit(this.habit.path, clean);
+      this.close();
+      if (this.onDone) this.onDone();
+    } catch (e) {
+      if (errorEl) errorEl.setText(`Could not rename: ${(e && e.message) || e}`);
+      if (btn) btn.setDisabled(false);
+    }
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+// The candidates as rows with a toggle each, all on; the button counts
+// what is ticked. The import itself is the plugin's (importHabits).
+class ImportHabitsModal extends Modal {
+  constructor(app, plugin, candidates, onDone) {
+    super(app);
+    this.plugin = plugin;
+    this.candidates = (candidates || []).slice();
+    this.onDone = typeof onDone === 'function' ? onDone : null;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass('iplan-habit-modal');
+    contentEl.addClass('iplan-settings');
+    markInkPlugin(contentEl, this.plugin.manifest.id);
+    const n = this.candidates.length;
+    const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' IMPORT FROM MY LIFE' });
+    contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: `${n} habit note${n === 1 ? '' : 's'} in ${this.plugin.habitsImportFolder()}.` });
+    contentEl.createDiv({
+      cls: 'iplan-settings-note',
+      text: `For each note ticked: a habit note is created under ${this.plugin.habitsFolder()}/ with the schedule, the log table moves into it, and the My Life note keeps one line pointing at it. Its meaning, its links and its other fields stay where they are. A note already linked is skipped.`,
+    });
+    const chosen = new Set(this.candidates.map((c) => c.path));
+    let btn = null;
+    for (const c of this.candidates) {
+      new Setting(contentEl).setName(c.name).setDesc(importCandidateText(c)).addToggle((t) => {
+        t.setValue(true).onChange((v) => {
+          if (v) chosen.add(c.path); else chosen.delete(c.path);
+          if (btn) btn.setButtonText(importButtonText(chosen.size));
+        });
+        t.toggleEl.setAttribute('aria-label', `Import ${c.name}`);
+      });
+    }
+    const error = contentEl.createDiv({ cls: 'iplan-routine-modal-error', attr: { 'aria-live': 'polite' } });
+    const actions = new Setting(contentEl);
+    actions.addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
+    actions.addButton((b) => { btn = b; b.setButtonText(importButtonText(chosen.size)).setCta().onClick(() => this.submit(chosen, error, b)); });
+  }
+  async submit(chosen, errorEl, btn) {
+    const picked = this.candidates.filter((c) => chosen.has(c.path));
+    if (!picked.length) { errorEl.setText('Tick at least one note.'); return; }
+    btn.setDisabled(true);
+    try {
+      await this.plugin.importHabits(picked);
+      this.close();
+      if (this.onDone) this.onDone();
+    } catch (e) {
+      errorEl.setText(`Could not import: ${(e && e.message) || e}`);
+      btn.setDisabled(false);
+    }
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ========================================================================== *
  * Board view - the weekly planner in the main pane
  * ========================================================================== */
 
@@ -7350,9 +7973,11 @@ class PlannerBoardView extends ItemView {
  *   AGENDA - what is planned for TODAY, chronological: all-day chips, then
  *            MORNING / AFTERNOON as the board lane's mixed sequence.
  *            Read-plus-click in v1: no drop targets here.
- *   HABITS - (2026-09-04) weekly planning of the habits: one row per habit
- *            with seven weekday toggles that write cadence / cadence_days
- *            into the habit note. Board context only, like TASKS.
+ *   HABITS - (2026-09-04; managed here since 0.10.0) the planner's habits:
+ *            one row per habit with its cadence, its weekdays or day of the
+ *            month, its status and a menu (rename, pause, archive, delete,
+ *            open); New habit and Import from My Life on the section head.
+ *            Board context only, like TASKS.
  *   GOALS  - only the weekly-goals list.
  * Default follows context (trayDefaultTab): board active -> TASKS, any other
  * main-area page -> AGENDA. A manual pick sticks until the context flips.
@@ -7682,61 +8307,200 @@ class PlannerTrayView extends ItemView {
     else if (this.activeTab === 'goals') this.renderGoals(el, items);
     else if (this.activeTab === 'habits') this.renderHabits(el);
     else this.renderSync(el, items, today);
-    // A weekday toggle writes the note, the note re-renders the tray, and
-    // the button that had the keyboard is gone with the old DOM. Hand the
-    // caret back to its successor: our own focus, never someone else's.
+    // A control in a habit row writes the note, the note re-renders the
+    // tray, and the control that had the keyboard is gone with the old DOM.
+    // Hand the caret back to its successor: our own focus, never someone
+    // else's. `selector` names the control inside the row.
     if (this._habitFocus) {
-      const { path, day } = this._habitFocus;
+      const { path, selector } = this._habitFocus;
       this._habitFocus = null;
-      const again = el.querySelector(`.iplan-habit-row[data-path="${CSS.escape(path)}"] [data-day="${day}"]`);
+      const again = selector ? el.querySelector(`.iplan-habit-row[data-path="${CSS.escape(path)}"] ${selector}`) : null;
       if (again) again.focus();
     }
   }
 
-  /* ---- HABITS (2026-09-04): the week's habits, one row each, seven toggles */
+  /* ---- HABITS (0.10.0): the planner's habits, managed in place ----------- */
   renderHabits(el) {
     const s = this.plugin.settings;
-    const folder = this.plugin.habitsFolder();
-    const habits = (this.plugin.habits || [])
-      .filter((h) => h.status !== 'abandoned')
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const all = (this.plugin.habits || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+    const live = all.filter((h) => h.status !== 'archived');
+    const archived = all.filter((h) => h.status === 'archived');
+    const candidates = s.habitsEnabled === false ? [] : this.plugin.importCandidates();
     const sec = el.createDiv({ cls: 'iplan-tray-section' });
-    sec.createDiv({ cls: 'iplan-tray-section-head', text: 'WEEKDAYS PER HABIT' });
+    const head = sec.createDiv({ cls: 'iplan-tray-section-head' });
+    head.createSpan({ text: 'HABITS' });
+    const tools = head.createDiv({ cls: 'iplan-habits-tools' });
+    const newBtn = tools.createEl('button', { cls: 'iplan-action is-quiet', attr: { type: 'button', 'aria-label': 'New habit' } });
+    newBtn.createSpan({ cls: 'iplan-kicker-marker', text: '+' });
+    newBtn.createSpan({ text: 'NEW' });
+    newBtn.addEventListener('click', () => this.plugin.openNewHabit());
+    // The import button exists only while there is something to import.
+    if (candidates.length) {
+      const importBtn = tools.createEl('button', {
+        cls: 'iplan-action is-quiet', text: 'IMPORT FROM MY LIFE',
+        attr: { type: 'button', 'aria-label': `Import from My Life, ${candidates.length} habit note${candidates.length === 1 ? '' : 's'}` },
+      });
+      importBtn.addEventListener('click', () => this.plugin.openImportHabits(candidates));
+    }
     const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
     if (s.habitsEnabled === false) {
       body.createDiv({ cls: 'iplan-tray-note', text: 'Habits are off in settings.' });
       return;
     }
-    if (!habits.length) {
-      body.createDiv({ cls: 'iplan-tray-note', text: `No habits in ${folder}.` });
-      return;
+    if (!live.length) {
+      body.createDiv({ cls: 'iplan-tray-note', text: candidates.length ? 'No habits yet. Create one, or import from My Life.' : 'No habits yet. Create one.' });
     }
-    for (const h of habits) {
-      const st = habitTabState(h);
-      const row = body.createDiv({ cls: `iplan-habit-row${st.editable ? '' : ' is-quiet'}`, attr: { 'data-path': h.path } });
-      const top = row.createDiv({ cls: 'iplan-habit-row-head' });
-      const name = top.createEl('button', {
-        cls: 'iplan-habit-name', text: h.name,
-        attr: { type: 'button', 'aria-label': `Open ${h.name}` },
+    for (const h of live) body.appendChild(this.renderHabitRow(h));
+    // Archived habits sit in a collapsed section at the bottom, each with
+    // the same menu (Restore in place of Pause and Archive).
+    if (archived.length) {
+      const asec = el.createDiv({ cls: `iplan-tray-section iplan-habits-archived${this._archivedOpen ? '' : ' is-collapsed'}` });
+      const ahead = asec.createEl('button', {
+        cls: 'iplan-habits-archived-head',
+        attr: { type: 'button', 'aria-expanded': this._archivedOpen ? 'true' : 'false' },
       });
-      name.addEventListener('click', () => {
-        const file = this.app.vault.getAbstractFileByPath(h.path);
-        if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
+      ahead.createSpan({ text: 'ARCHIVED' });
+      ahead.createSpan({ cls: 'iplan-tray-count', text: String(archived.length) });
+      ahead.addEventListener('click', () => {
+        this._archivedOpen = !this._archivedOpen;
+        asec.classList.toggle('is-collapsed', !this._archivedOpen);
+        ahead.setAttribute('aria-expanded', this._archivedOpen ? 'true' : 'false');
       });
-      top.createSpan({ cls: 'iplan-chip', text: st.reason || habitCadenceLabel(h) });
-      // The row paints from its own copy so a toggle shows at once; the
-      // note's re-render brings the truth a moment later.
-      let current = habitDays(h);
-      weekdayToggleRow(row, () => current, async (codes) => {
-        current = codes;
-        const active = el.ownerDocument && el.ownerDocument.activeElement;
-        this._habitFocus = { path: h.path, day: active && active.dataset ? active.dataset.day : null };
-        await this.plugin.setHabitDays(h.path, codes);
-      }, `Weekdays for ${h.name}`, { disabled: !st.editable });
+      const abody = asec.createDiv({ cls: 'iplan-tray-section-body' });
+      for (const h of archived) abody.appendChild(this.renderHabitRow(h));
     }
     const foot = el.createDiv({ cls: 'iplan-tray-foot' });
-    foot.createSpan({ text: 'A TOGGLE WRITES CADENCE AND CADENCE_DAYS INTO THE HABIT NOTE. NOTHING ELSE IS TOUCHED.' });
+    foot.createSpan({ text: `EVERY CHANGE HERE WRITES THE HABIT NOTE UNDER ${this.plugin.habitsFolder().toUpperCase()}/. A CHECK-IN IS A ROW IN ITS LOG.` });
+  }
+
+  // One row: the name (a button that opens the note), the status chip, the
+  // menu button; then the cadence field and, beside it, the weekday toggles
+  // (live for weekly, the implied days inert for daily and weekdays) or the
+  // day-of-month field (monthly). Right-click and long-press open the same
+  // menu as the button.
+  renderHabitRow(h) {
+    const m = habitRowModel(h);
+    const row = document.createElement('div');
+    row.className = `iplan-habit-row${m.quiet ? ' is-quiet' : ''}`;
+    row.setAttribute('data-path', h.path);
+    const top = row.createDiv({ cls: 'iplan-habit-row-head' });
+    const name = top.createEl('button', {
+      cls: 'iplan-habit-name', text: h.name,
+      attr: { type: 'button', 'aria-label': `Open ${h.name}` },
+    });
+    name.addEventListener('click', () => this.openHabitNote(h.path));
+    top.createSpan({ cls: 'iplan-chip', text: m.statusLabel });
+    if (h.linkedBasename) top.createSpan({ cls: 'iplan-chip', text: 'LINKED', attr: { title: `Linked to ${h.linkedBasename}` } });
+    const menuBtn = top.createEl('button', {
+      cls: 'iplan-nav-btn iplan-habit-menu-btn',
+      attr: { type: 'button', 'aria-label': `Menu for ${h.name}`, 'aria-haspopup': 'menu' },
+    });
+    setIcon(menuBtn, 'more-horizontal');
+    menuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const r = menuBtn.getBoundingClientRect();
+      this.habitMenu(h, row).showAtPosition({ x: r.left, y: r.bottom });
+    });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      this.habitMenu(h, row).showAtPosition({ x: e.clientX, y: e.clientY });
+    });
+    wireLongPress(row, (pos) => this.habitMenu(h, row).showAtPosition(pos));
+    const sched = row.createDiv({ cls: 'iplan-habit-sched' });
+    const select = sched.createEl('select', { cls: 'iplan-habit-select', attr: { 'aria-label': `Cadence for ${h.name}` } });
+    for (const c of HABIT_CADENCES) select.createEl('option', { value: c, text: HABIT_CADENCE_NAMES[c] });
+    select.value = h.cadence;
+    select.addEventListener('change', () => {
+      this._habitFocus = { path: h.path, selector: 'select.iplan-habit-select' };
+      this.habitWrite(() => this.plugin.setHabitCadence(h.path, select.value));
+    });
+    if (m.monthDay !== null) {
+      const wrap = sched.createDiv({ cls: 'iplan-habit-monthday' });
+      wrap.createSpan({ cls: 'iplan-habit-monthday-label', text: 'DAY', attr: { 'aria-hidden': 'true' } });
+      const input = wrap.createEl('input', {
+        cls: 'iplan-habit-monthday-input',
+        attr: { type: 'number', min: '1', max: String(HABIT_MONTH_DAY_MAX), inputmode: 'numeric', 'aria-label': `Day of the month for ${h.name}` },
+      });
+      input.value = String(m.monthDay);
+      input.addEventListener('change', () => {
+        const n = monthDayOf(input.value);
+        if (n === null) { input.value = String(m.monthDay); return; }
+        input.value = String(n);
+        this._habitFocus = { path: h.path, selector: 'input.iplan-habit-monthday-input' };
+        this.habitWrite(() => this.plugin.setHabitMonthDay(h.path, n));
+      });
+    } else {
+      // The row paints from its own copy so a toggle shows at once; the
+      // note's re-render brings the truth a moment later.
+      let current = m.weekdays;
+      weekdayToggleRow(sched, () => current, async (codes) => {
+        current = codes;
+        const active = row.ownerDocument && row.ownerDocument.activeElement;
+        const day = active && active.dataset ? active.dataset.day : null;
+        this._habitFocus = { path: h.path, selector: day ? `[data-day="${day}"]` : null };
+        await this.plugin.setHabitDays(h.path, codes);
+      }, `Weekdays for ${h.name}`, { disabled: !m.weekdaysEditable });
+    }
+    return row;
+  }
+
+  // A write from a row control: the failure, if any, is said in a Notice
+  // (the row itself re-renders from the note either way).
+  habitWrite(fn) {
+    Promise.resolve().then(fn).catch((e) => { new Notice(`Planner: ${(e && e.message) || e}`); this.render(); });
+  }
+  openHabitNote(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
+  }
+  openLinkedNote(h) {
+    if (!h.linkedBasename) return;
+    const file = this.app.metadataCache.getFirstLinkpathDest(h.linkedBasename, h.path);
+    if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
+    else new Notice(`Planner: no note called "${h.linkedBasename}" in this vault.`);
+  }
+  // The row menu. Delete is two presses: the item arms a confirm strip in
+  // the row, its button deletes. No browser dialog.
+  habitMenu(h, row) {
+    const menu = new Menu();
+    menu.addItem((mi) => mi.setTitle('Rename').setIcon('pencil').onClick(() => new RenameHabitModal(this.app, this.plugin, h).open()));
+    if (h.status === 'archived') {
+      menu.addItem((mi) => mi.setTitle('Restore').setIcon('archive-restore').onClick(() => this.habitWrite(() => this.plugin.setHabitStatus(h.path, 'active'))));
+    } else {
+      const paused = h.status === 'paused';
+      menu.addItem((mi) => mi.setTitle(paused ? 'Resume' : 'Pause').setIcon(paused ? 'play' : 'pause')
+        .onClick(() => this.habitWrite(() => this.plugin.setHabitStatus(h.path, paused ? 'active' : 'paused'))));
+      menu.addItem((mi) => mi.setTitle('Archive').setIcon('archive').onClick(() => this.habitWrite(() => this.plugin.setHabitStatus(h.path, 'archived'))));
+    }
+    menu.addItem((mi) => mi.setTitle('Open habit note').setIcon('file-text').onClick(() => this.openHabitNote(h.path)));
+    if (h.linkedBasename) menu.addItem((mi) => mi.setTitle('Open linked note').setIcon('link').onClick(() => this.openLinkedNote(h)));
+    menu.addSeparator();
+    menu.addItem((mi) => mi.setTitle('Delete').setIcon('trash').onClick(() => this.armHabitDelete(h, row)));
+    return menu;
+  }
+  armHabitDelete(h, row) {
+    const old = row.querySelector('.iplan-habit-confirm');
+    if (old) old.remove();
+    const strip = row.createDiv({ cls: 'iplan-habit-confirm', attr: { role: 'group', 'aria-label': `Delete ${h.name}` } });
+    const say = strip.createSpan({ cls: 'iplan-habit-confirm-text', attr: { 'aria-live': 'polite' } });
+    say.setText(`Delete "${h.name}"? The note moves to the trash.`);
+    const yes = strip.createEl('button', { cls: 'iplan-action', text: 'DELETE', attr: { type: 'button', 'aria-label': `Confirm: delete ${h.name}` } });
+    const no = strip.createEl('button', { cls: 'iplan-action is-quiet', text: 'CANCEL', attr: { type: 'button', 'aria-label': 'Cancel the delete' } });
+    // The arm drops after a few seconds, like the calendar remove.
+    let timer = window.setTimeout(() => strip.remove(), 8000);
+    no.addEventListener('click', () => { window.clearTimeout(timer); strip.remove(); });
+    yes.addEventListener('click', async () => {
+      window.clearTimeout(timer);
+      yes.disabled = true;
+      try {
+        await this.plugin.deleteHabit(h.path);
+        new Notice(`Planner: moved "${h.name}" to the trash.`);
+      } catch (e) {
+        say.setText(`Could not delete: ${(e && e.message) || e}`);
+        yes.disabled = false;
+      }
+    });
+    yes.focus();
   }
 
   /* ---- AGENDA: today's plan, chronological, read-plus-click ---- */
@@ -8590,37 +9354,49 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .addButton((b) => b.setButtonText('New routine').setCta()
         .onClick(() => new NewRoutineModal(this.app, this.plugin, () => this.display()).open()));
 
-    /* ---- habits (2026-09-04) ---- */
+    /* ---- habits (2026-09-04; planner-owned since 0.10.0) ---- */
     new Setting(containerEl).setName('Habits').setHeading();
     new Setting(containerEl)
       .setName('Show habits')
-      .setDesc('Reads the habit notes in the folder below and puts an all-day HABITS block under each day a habit is scheduled for. Checking one writes a row into the habit note\'s log table; nothing else in the note is touched. Off hides the block and the HABITS tab; the notes stay.')
+      .setDesc(`Reads the habit notes under ${this.plugin.habitsFolder()}/ and puts an all-day HABITS block under each day a habit is scheduled for. Checking one writes a row into that note's log table. Off hides the block and the HABITS tab; the notes stay.`)
       .addToggle((t) => t.setValue(this.plugin.settings.habitsEnabled !== false)
         .onChange(async (v) => { this.plugin.settings.habitsEnabled = v; await this.plugin.saveSettings(); }));
-    // The folder: typing validates live (announced) and a valid folder is
-    // adopted as typed; an invalid one is refused and the last good one
-    // stays. The count line says what the folder holds.
-    const habitsFolderSetting = new Setting(containerEl).setName('Habits folder');
-    habitsFolderSetting.descEl.setAttribute('aria-live', 'polite');
-    const renderHabitsFolder = (raw) => {
+    new Setting(containerEl)
+      .setName('Your habits')
+      .setDesc(`${habitsCountText(this.plugin.habits, this.plugin.habitsFolder())} Create, rename, pause, archive and delete them in the HABITS tab beside the board.`)
+      .addButton((b) => b.setButtonText('New habit')
+        .onClick(() => new NewHabitModal(this.app, this.plugin, () => this.display()).open()));
+    // The My Life Habits folder: read for the import and the link picker
+    // only. Typing validates live (announced); a valid folder is adopted as
+    // typed, an invalid one is refused and the last good one stays.
+    const importFolderSetting = new Setting(containerEl).setName('My Life Habits folder');
+    importFolderSetting.descEl.setAttribute('aria-live', 'polite');
+    let importBtn = null;
+    const renderImportFolder = (raw) => {
       const n = normalizeHabitsFolder(raw);
-      if (!n.ok) { habitsFolderSetting.setDesc(n.error); return; }
+      if (!n.ok) { importFolderSetting.setDesc(n.error); if (importBtn) importBtn.setDisabled(true); return; }
       const exists = this.app.vault.getAbstractFileByPath(n.folder) instanceof TFolder;
-      habitsFolderSetting.setDesc(exists
-        ? habitsCountText(this.plugin.habits, n.folder)
-        : `"${n.folder}" does not exist in this vault.`);
+      const candidates = exists ? this.plugin.importCandidates() : [];
+      importFolderSetting.setDesc(exists ? importFolderText(n.folder, candidates.length) : `"${n.folder}" does not exist in this vault.`);
+      if (importBtn) importBtn.setDisabled(!candidates.length);
     };
-    habitsFolderSetting.addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.habitsFolder).setValue(this.plugin.settings.habitsFolder)
+    importFolderSetting.addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.habitsImportFolder).setValue(this.plugin.settings.habitsImportFolder)
       .onChange(async (v) => {
         const n = normalizeHabitsFolder(v);
-        if (!n.ok) { renderHabitsFolder(v); return; }
-        this.plugin.settings.habitsFolder = n.folder;
+        if (!n.ok) { renderImportFolder(v); return; }
+        this.plugin.settings.habitsImportFolder = n.folder;
         await this.plugin.saveSettings();
-        await this.plugin.refreshHabits();
-        this.plugin.emitModelChanged();
-        renderHabitsFolder(n.folder);
+        renderImportFolder(n.folder);
       }));
-    renderHabitsFolder(this.plugin.settings.habitsFolder);
+    new Setting(containerEl)
+      .setName('Import from My Life')
+      .setDesc('Once per note: creates the planner habit note with the schedule, moves the log table into it, leaves one pointer line and the meaning in the My Life note, and links the two. A note already linked is skipped.')
+      .addButton((b) => {
+        importBtn = b;
+        b.setButtonText('Import from My Life')
+          .onClick(() => new ImportHabitsModal(this.app, this.plugin, this.plugin.importCandidates(), () => this.display()).open());
+      });
+    renderImportFolder(this.plugin.settings.habitsImportFolder);
     new Setting(containerEl)
       .setName('Streaks')
       .setDesc('Shows STREAK n on a habit row: consecutive scheduled days with a done mark, computed from the note\'s log at render and never written anywhere. A habit whose log says schema=process shows none.')
@@ -8714,11 +9490,15 @@ module.exports.__test = {
   validateRoutineInput, routineTemplate,
   clickupQuery, buildItemIndex, parentOf, parentTitleFor, childrenOfItem, subtaskCounter, subtaskCounterText,
   subtaskRowMeta, cardChips, isDone, fmtDayNum,
-  HABIT_LOG_SENTINEL, HABIT_LOG_SECTION, HABIT_CADENCES, HABIT_STATUSES, BOARD_ONLY_TABS,
-  normalizeVaultFolder, normalizeHabitsFolder, habitsFolderOf, habitPathInside,
-  normalizeCadence, habitStatusOf, isHabitFrontmatter, habitBasenameOk, habitFromFrontmatter,
-  daysFromCadence, habitDays, cadenceFromDays, streakOf, habitRowState, habitOccurrences,
-  habitLogAfterCheck, habitTabState, habitCadenceLabel, habitsCountText, trayTabName,
+  HABIT_TYPE, HABIT_LOG_SENTINEL, HABIT_LOG_SECTION, HABIT_CADENCES, HABIT_CADENCE_NAMES, HABIT_STATUSES,
+  HABIT_MONTH_DAY_MAX, HABIT_SCHEDULE_FIELDS, HABIT_IMPORT_REMOVED_FIELDS, BOARD_ONLY_TABS,
+  normalizeVaultFolder, normalizeHabitsFolder, habitsImportFolderOf, importPathInside, habitPathInside, migrateHabitSettings,
+  normalizeCadence, habitStatusOf, monthDayOf, isPlannerHabitFrontmatter, isHabitFrontmatter, habitBasenameOk,
+  basenameOf, wikilinkBasename, habitFromFrontmatter,
+  daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,
+  habitLogAfterCheck, habitRowModel, applyHabitCadence, validateHabitInput, habitFrontmatterOf, habitTemplate,
+  importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, stripHabitScheduleFields,
+  importCandidateText, importButtonText, importSummaryText, importFolderText, habitsCountText, trayTabName,
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
