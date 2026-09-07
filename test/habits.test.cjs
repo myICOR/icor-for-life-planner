@@ -358,11 +358,14 @@ test('the HABITS tab: a fourth tab beside the board only; the row model', () => 
   // the row: the toggles are live for weekly only, implied and inert for
   // daily and weekdays, gone for monthly (a day field instead)
   const row = (fm) => T.habitRowModel(habit(fm, ''));
-  assert.deepEqual(row({ cadence: 'weekly', cadence_days: ['mon', 'fri'] }), { weekdays: ['mon', 'fri'], weekdaysEditable: true, monthDay: null, quiet: false, statusLabel: 'ACTIVE' });
-  assert.deepEqual(row({ cadence: 'daily' }), { weekdays: T.WEEKDAY_CODES, weekdaysEditable: false, monthDay: null, quiet: false, statusLabel: 'ACTIVE' });
-  assert.deepEqual(row({ cadence: 'weekdays', status: 'paused' }), { weekdays: ['mon', 'tue', 'wed', 'thu', 'fri'], weekdaysEditable: false, monthDay: null, quiet: true, statusLabel: 'PAUSED' });
-  assert.deepEqual(row({ cadence: 'monthly', month_day: 12, status: 'archived' }), { weekdays: [], weekdaysEditable: false, monthDay: 12, quiet: true, statusLabel: 'ARCHIVED' });
-  assert.equal(row({ cadence: 'monthly' }).monthDay, 1, 'no day shows the 1st');
+  assert.deepEqual(row({ cadence: 'weekly', cadence_days: ['mon', 'fri'] }), { weekdays: ['mon', 'fri'], weekdaysEditable: true, monthDayField: false, monthDay: null, quiet: false, statusLabel: 'ACTIVE' });
+  assert.deepEqual(row({ cadence: 'daily' }), { weekdays: T.WEEKDAY_CODES, weekdaysEditable: false, monthDayField: false, monthDay: null, quiet: false, statusLabel: 'ACTIVE' });
+  assert.deepEqual(row({ cadence: 'weekdays', status: 'paused' }), { weekdays: ['mon', 'tue', 'wed', 'thu', 'fri'], weekdaysEditable: false, monthDayField: false, monthDay: null, quiet: true, statusLabel: 'PAUSED' });
+  assert.deepEqual(row({ cadence: 'monthly', month_day: 12, status: 'archived' }), { weekdays: [], weekdaysEditable: false, monthDayField: true, monthDay: 12, quiet: true, statusLabel: 'ARCHIVED' });
+  // no day in the note (2026-09-07): the field is drawn and shows EMPTY,
+  // never a 1 the note did not say; the board still reads the 1st
+  assert.deepEqual(row({ cadence: 'monthly' }), { weekdays: [], weekdaysEditable: false, monthDayField: true, monthDay: null, quiet: false, statusLabel: 'ACTIVE' }, 'no day shows the field empty');
+  assert.equal(T.habitLandsOn(habit({ cadence: 'monthly' }, ''), '2026-11-01'), true, 'and is read as the 1st');
 });
 
 test('SOURCE: the habit notes ride the room\'s one boundary; the check-in is body only; the tab is wired', () => {

@@ -62,6 +62,7 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
     { path: `${MY}/Morning pages.md`, basename: 'Morning pages', fm: { name: 'Morning pages', cadence: 'weekly', cadence_days: ['mon', 'wed', 'fri'], started_on: '2026-08-27' } },
     { path: `${MY}/Walk.md`, basename: 'Walk', fm: { type: 'habit', cadence: 'daily', since: '2026-08-01' } },
     { path: `${MY}/Bills.md`, basename: 'Bills', fm: { cadence: 'monthly', month_day: 3, status: 'paused' } },
+    { path: `${MY}/Rent.md`, basename: 'Rent', fm: { cadence: 'monthly' } },
     { path: `${MY}/Old.md`, basename: 'Old', fm: { cadence: 'adhoc', cadence_days: ['sat'], status: 'abandoned' } },
     { path: `${MY}/Weekday.md`, basename: 'Weekday', fm: { cadence: 'weekday' } },
     { path: `${MY}/Odd.md`, basename: 'Odd', fm: { cadence: 'fortnightly', cadence_days: ['sun'] } },
@@ -74,8 +75,9 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
   ];
   const planner = [T.habitFromFrontmatter({ type: 'planner-habit', name: 'Walk', cadence: 'daily', linked_note: '[[Walk]]' }, '02 Planner/Habits/Walk.md', '')];
   const plan = T.importPlan(notes, planner);
-  assert.deepEqual(plan.map((c) => c.basename), ['Bills', 'Morning pages', 'Odd', 'Old', 'Walk', 'Weekday'], 'Done carries the back-link; the furniture, the essay and a stray planner note are not habits; Walk is listed although a planner note links to it, because its own frontmatter does not say so yet');
+  assert.deepEqual(plan.map((c) => c.basename), ['Bills', 'Morning pages', 'Odd', 'Old', 'Rent', 'Walk', 'Weekday'], 'Done carries the back-link; the furniture, the essay and a stray planner note are not habits; Walk is listed although a planner note links to it, because its own frontmatter does not say so yet');
   const by = Object.fromEntries(plan.map((c) => [c.basename, c]));
+  assert.equal(by.Rent.monthDay, null, 'a monthly note with no month_day maps to no day, never to the 1st (2026-09-07)');
   assert.deepEqual(by['Morning pages'], {
     path: `${MY}/Morning pages.md`, basename: 'Morning pages', name: 'Morning pages',
     cadence: 'weekly', cadenceDays: ['mon', 'wed', 'fri'], monthDay: null, startedOn: '2026-08-27', status: 'active', linkedNote: '[[Morning pages]]',
@@ -94,7 +96,7 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
   const walk = T.importMapping({ type: 'habit', cadence: 'daily', since: '2026-08-01' }, 'Walk');
   assert.deepEqual([walk.name, walk.cadence, walk.startedOn, walk.linkedNote], ['Walk', 'daily', '2026-08-01', '[[Walk]]']);
   // with nothing linked everything lists; with nothing to list, nothing
-  assert.equal(T.importPlan(notes, []).length, 6);
+  assert.equal(T.importPlan(notes, []).length, 7);
   assert.equal(T.importPlan(notes, []).find((c) => c.basename === 'Walk').existingPlanner, null);
   assert.deepEqual(T.importPlan([], planner), []);
   assert.deepEqual(T.importPlan(null, null), []);
@@ -350,6 +352,7 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   assert.equal(T.importCandidateText({ basename: 'Pages', cadence: 'weekly', cadenceDays: ['mon', 'fri'], status: 'paused' }), 'Weekly on Mon, Fri; paused; from Pages.md.');
   assert.equal(T.importCandidateText({ basename: 'Old', cadence: 'weekly', cadenceDays: [], status: 'archived' }), 'Weekly, no weekdays yet; archived; from Old.md.');
   assert.equal(T.importCandidateText({ basename: 'Bills', cadence: 'monthly', monthDay: 3, status: 'active' }), 'Monthly on day 3; from Bills.md.');
+  assert.equal(T.importCandidateText({ basename: 'Rent', cadence: 'monthly', monthDay: null, status: 'active' }), 'Monthly, no day of the month yet; from Rent.md.', 'an absent day is said, never shown as the 1st');
   assert.equal(T.importButtonText(3), 'Import 3');
   assert.equal(T.importFolderText('X', 0), 'Read for the import and the link picker only; the planner never writes here except during an import. Every habit note here is imported or linked.');
   assert.match(T.importFolderText('X', 2), /2 habit notes not imported yet\.$/);
@@ -428,4 +431,55 @@ test('adoptLogBlock: a planner note without a sentinel takes the block under its
   const noHeading = '# Walk\n';
   assert.equal(T.adoptLogBlock(noHeading, LOG_BLOCK), `# Walk\n\n## Log\n${LOG_BLOCK}\n`);
   assert.equal(T.adoptLogBlock(bare, null), bare);
+});
+
+// THE ASK (2026-09-07): the import wrote month_day: 1 when the source had
+// none. An absent value is read as the 1st already, so the import replaced
+// a documented absence with a specific wrong day. The import path (lenient)
+// now leaves it absent; the New habit dialog path (not lenient) still
+// requires the day and still writes it.
+test('THE ASK: an absent month_day stays absent on import, is required by the dialog, and reads as the 1st either way', async () => {
+  // the pure halves
+  assert.deepEqual(T.importMapping({ cadence: 'monthly' }, 'Rent').monthDay, null);
+  assert.deepEqual(T.importMapping({ cadence: 'monthly', month_day: 3 }, 'Bills').monthDay, 3);
+  const NOW = '2026-09-06T10:00:00.000Z';
+  const lenient = T.habitFrontmatterOf({ name: 'Rent', cadence: 'monthly', monthDay: null }, { nowIso: NOW, today: '2026-09-06', lenient: true });
+  assert.ok(!('month_day' in lenient), 'lenient: no day, no field');
+  assert.deepEqual(Object.keys(lenient), ['type', 'name', 'cadence', 'status', 'started_on', 'created_at']);
+  assert.equal(T.habitFrontmatterOf({ name: 'Rent', cadence: 'monthly', monthDay: 9 }, { nowIso: NOW, lenient: true }).month_day, 9, 'lenient with a day: the day');
+  assert.equal(T.habitFrontmatterOf({ name: 'Rent', cadence: 'monthly', monthDay: null }, { nowIso: NOW }).month_day, 1, 'the dialog path keeps writing a day (its validation refused an empty one before this point)');
+  assert.deepEqual(T.validateHabitInput({ name: 'Rent', cadence: 'monthly', monthDay: '' }), { ok: false, error: 'The day of the month is 1 to 28.' }, 'the dialog requires it');
+  assert.deepEqual(T.validateHabitInput({ name: 'Rent', cadence: 'monthly', monthDay: '' }, { lenient: true }), { ok: true, error: null }, 'the import does not');
+  assert.doesNotMatch(T.habitTemplate({ name: 'Rent', cadence: 'monthly' }, { nowIso: NOW, lenient: true }), /month_day/, 'the note text carries no month_day line');
+  assert.match(T.habitTemplate({ name: 'Rent', cadence: 'monthly', monthDay: 3 }, { nowIso: NOW, lenient: true }), /^month_day: 3$/m);
+  // the reader: an absent day is the 1st on the board and an empty field in the tab
+  const read = T.habitFromFrontmatter(lenient, '02 Planner/Habits/Rent.md', '');
+  assert.equal(read.monthDay, null);
+  assert.equal(T.habitLandsOn(read, '2026-10-01'), true);
+  assert.equal(T.habitLandsOn(read, '2026-10-02'), false);
+  assert.deepEqual([T.habitRowModel(read).monthDayField, T.habitRowModel(read).monthDay], [true, null]);
+  // the plugin half: the import path through createHabit, lenient
+  const { p, files, calls } = importApp();
+  files[`${MY}/Rent.md`] = { text: '---\ntype: habit\ncadence: monthly\n---\n\n# Rent\n', fm: { type: 'habit', cadence: 'monthly' } };
+  const rent = p.importCandidates().filter((c) => c.basename === 'Rent');
+  assert.equal(rent.length, 1);
+  assert.equal(rent[0].monthDay, null);
+  const r = await p.importHabits(rent);
+  assert.deepEqual(r, { done: 1, skipped: 0, failed: [] });
+  const note = calls.create[0].content;
+  assert.match(note, /^cadence: monthly$/m);
+  assert.doesNotMatch(note, /month_day/, 'the planner note carries no month_day: the absence is kept');
+  assert.equal(p.habits[0].monthDay, null, 'and the cache agrees');
+  // the dialog path through createHabit, not lenient: refused without a day, written with one
+  await assert.rejects(p.createHabit({ name: 'Rent 2', cadence: 'monthly', monthDay: '' }), /The day of the month is 1 to 28\./);
+  await p.createHabit({ name: 'Rent 2', cadence: 'monthly', monthDay: '5' }, { quiet: true });
+  assert.match(calls.create[1].content, /^month_day: 5$/m);
+  // the source: the lenient flag reaches both the note text and the cache entry
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const create = main.slice(main.indexOf('  async createHabit('), main.indexOf('  async importHabits('));
+  assert.ok(/const lenient = !!o\.lenient;\s*\n\s*const text = habitTemplate\(input, \{ nowIso, today, lenient, logBlock: o\.logBlock \}\);/.test(create));
+  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today, lenient \}\)/.test(create));
+  assert.ok(!/monthDayOf\(f\.month_day\) \|\| 1/.test(main), 'the import mapping never seeds the 1st');
+  // applyHabitCadence may still seed the 1st on a person's cadence switch (that is the person choosing monthly, not an import)
+  assert.equal(T.applyHabitCadence({ cadence: 'weekly', cadence_days: ['mon'] }, 'monthly').month_day, 1);
 });

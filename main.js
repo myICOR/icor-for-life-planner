@@ -4924,12 +4924,18 @@ function habitLogAfterCheck(data, day, next) {
 
 // One row of the tab: the toggles show the implied days for daily and
 // weekdays (inert), the chosen days for weekly (live), and give way to a
-// day-of-month field for monthly. A paused or archived row is quiet.
+// day-of-month field for monthly (monthDayField). The field's value is
+// the note's month_day, or null when the note has none: the board reads
+// that as the 1st, and the field shows empty so the person can set it
+// rather than reading a 1 the note never said. A paused or archived row
+// is quiet.
 function habitRowModel(habit) {
+  const monthly = habit.cadence === 'monthly';
   return {
     weekdays: habitDays(habit),
     weekdaysEditable: habit.cadence === 'weekly',
-    monthDay: habit.cadence === 'monthly' ? (habit.monthDay || 1) : null,
+    monthDayField: monthly,
+    monthDay: monthly ? (habit.monthDay == null ? null : habit.monthDay) : null,
     quiet: habit.status !== 'active',
     statusLabel: String(habit.status).toUpperCase(),
   };
@@ -4966,8 +4972,12 @@ function validateHabitInput(input, opts) {
   if (!HABIT_CADENCES.includes(c)) return { ok: false, error: 'Pick a cadence: daily, weekdays, weekly or monthly.' };
   if (c === 'weekly' && !o.lenient && !normalizeWeekdays(i.cadenceDays).length) return { ok: false, error: 'Pick at least one weekday.' };
   if (c === 'monthly') {
-    const n = Number.parseInt(String(i.monthDay == null ? '' : i.monthDay).trim(), 10);
-    if (!Number.isFinite(n) || n < 1 || n > HABIT_MONTH_DAY_MAX) return { ok: false, error: `The day of the month is 1 to ${HABIT_MONTH_DAY_MAX}.` };
+    const raw = String(i.monthDay == null ? '' : i.monthDay).trim();
+    // The import (lenient) may bring a monthly habit with no day: it stays
+    // absent and reads as the 1st. A day that IS given must be a day.
+    const absent = raw === '';
+    const n = Number.parseInt(raw, 10);
+    if (!(o.lenient && absent) && (!Number.isFinite(n) || n < 1 || n > HABIT_MONTH_DAY_MAX)) return { ok: false, error: `The day of the month is 1 to ${HABIT_MONTH_DAY_MAX}.` };
   }
   const s = String(i.startedOn == null ? '' : i.startedOn).trim();
   if (s && !ISO_DAY_RE.test(s)) return { ok: false, error: 'The start date is YYYY-MM-DD.' };
@@ -4995,7 +5005,14 @@ function habitFrontmatterOf(input, opts) {
     status: habitStatusOf(i.status),
   };
   if (cadence === 'weekly') fm.cadence_days = normalizeWeekdays(i.cadenceDays);
-  if (cadence === 'monthly') fm.month_day = monthDayOf(i.monthDay) || 1;
+  if (cadence === 'monthly') {
+    // The dialog path (not lenient) validated the day already and keeps
+    // writing it; the import path (lenient) leaves an absent day absent,
+    // read as the 1st and shown empty in the tab for the person to set.
+    const md = monthDayOf(i.monthDay);
+    if (md !== null) fm.month_day = md;
+    else if (!o.lenient) fm.month_day = 1;
+  }
   fm.started_on = ISO_DAY_RE.test(started) ? started : today;
   if (linked) fm.linked_note = `[[${linked}]]`;
   fm.created_at = nowIso;
@@ -5046,7 +5063,10 @@ function importMapping(fm, basename) {
     name: f.name != null && String(f.name).trim() ? String(f.name).trim() : basename,
     cadence,
     cadenceDays: cadence === 'weekly' && known ? normalizeWeekdays(f.cadence_days) : [],
-    monthDay: cadence === 'monthly' ? (monthDayOf(f.month_day) || 1) : null,
+    // An absent month_day stays absent (2026-09-07): the note is read as
+    // the 1st either way, and the import must not replace a documented
+    // absence with a specific wrong day. The tab shows the field empty.
+    monthDay: cadence === 'monthly' ? monthDayOf(f.month_day) : null,
     startedOn: ISO_DAY_RE.test(started) ? started : null,
     status: habitStatusOf(f.status),
     linkedNote: `[[${basename}]]`,
@@ -5191,7 +5211,7 @@ function adoptLogBlock(plannerBody, block) {
 function importCandidateText(c) {
   const parts = [HABIT_CADENCE_NAMES[c.cadence] || 'Weekly'];
   if (c.cadence === 'weekly') parts[0] += c.cadenceDays && c.cadenceDays.length ? ` on ${c.cadenceDays.map((d) => WEEKDAY_NAMES[d].slice(0, 3)).join(', ')}` : ', no weekdays yet';
-  if (c.cadence === 'monthly') parts[0] += ` on day ${c.monthDay || 1}`;
+  if (c.cadence === 'monthly') parts[0] += c.monthDay ? ` on day ${c.monthDay}` : ', no day of the month yet';
   if (c.status && c.status !== 'active') parts.push(c.status);
   if (c.startedOn) parts.push(`since ${c.startedOn}`);
   parts.push(`from ${c.basename}.md`);
@@ -6585,9 +6605,10 @@ class IcorPlannerPlugin extends Plugin {
     // the local calendar date. Pinned once so the note and its cache agree.
     const nowIso = new Date().toISOString();
     const today = todayStr();
-    const text = habitTemplate(input, { nowIso, today, logBlock: o.logBlock });
+    const lenient = !!o.lenient;
+    const text = habitTemplate(input, { nowIso, today, lenient, logBlock: o.logBlock });
     const file = await this.app.vault.create(path, text);
-    const habit = habitFromFrontmatter(habitFrontmatterOf(input, { nowIso, today }), path, text);
+    const habit = habitFromFrontmatter(habitFrontmatterOf(input, { nowIso, today, lenient }), path, text);
     if (habit && file instanceof TFile) {
       habit.file = file;
       this._habitCache.set(path, { mtime: file.stat ? file.stat.mtime : 0, habit });
@@ -8612,17 +8633,21 @@ class PlannerTrayView extends ItemView {
       this._habitFocus = { path: h.path, selector: 'select.iplan-habit-select' };
       this.habitWrite(() => this.plugin.setHabitCadence(h.path, select.value));
     });
-    if (m.monthDay !== null) {
+    if (m.monthDayField) {
       const wrap = sched.createDiv({ cls: 'iplan-habit-monthday' });
       wrap.createSpan({ cls: 'iplan-habit-monthday-label', text: 'DAY', attr: { 'aria-hidden': 'true' } });
+      // No month_day in the note: the field is empty (the board reads
+      // the 1st) with the 1st as its placeholder, so the person sees a
+      // day to set rather than one the note never carried.
       const input = wrap.createEl('input', {
         cls: 'iplan-habit-monthday-input',
-        attr: { type: 'number', min: '1', max: String(HABIT_MONTH_DAY_MAX), inputmode: 'numeric', 'aria-label': `Day of the month for ${h.name}` },
+        attr: { type: 'number', min: '1', max: String(HABIT_MONTH_DAY_MAX), inputmode: 'numeric', placeholder: '1', 'aria-label': `Day of the month for ${h.name}` },
       });
-      input.value = String(m.monthDay);
+      const shown = m.monthDay === null ? '' : String(m.monthDay);
+      input.value = shown;
       input.addEventListener('change', () => {
         const n = monthDayOf(input.value);
-        if (n === null) { input.value = String(m.monthDay); return; }
+        if (n === null) { input.value = shown; return; }
         input.value = String(n);
         this._habitFocus = { path: h.path, selector: 'input.iplan-habit-monthday-input' };
         this.habitWrite(() => this.plugin.setHabitMonthDay(h.path, n));

@@ -304,7 +304,9 @@ test('SOURCE: the tab is management, wired for keyboard, touch and mouse, with n
   assert.ok(/'aria-label': `Cadence for \$\{h\.name\}`/.test(tab));
   assert.ok(/this\.plugin\.setHabitCadence\(h\.path, select\.value\)/.test(tab));
   assert.ok(/\{ disabled: !m\.weekdaysEditable \}\);/.test(tab), 'the toggles take an edit for weekly only');
-  assert.ok(/if \(m\.monthDay !== null\) \{[\s\S]*?type: 'number', min: '1', max: String\(HABIT_MONTH_DAY_MAX\)/.test(tab), 'the day field');
+  assert.ok(/if \(m\.monthDayField\) \{[\s\S]*?type: 'number', min: '1', max: String\(HABIT_MONTH_DAY_MAX\), inputmode: 'numeric', placeholder: '1'/.test(tab), 'the day field, drawn for monthly, the 1st as its placeholder');
+  assert.ok(/const shown = m\.monthDay === null \? '' : String\(m\.monthDay\);\s*\n\s*input\.value = shown;/.test(tab), 'an absent day shows empty, never 1');
+  assert.ok(!/input\.value = String\(m\.monthDay\)/.test(tab), 'no path paints a 1 the note did not say');
   assert.ok(/this\.plugin\.setHabitMonthDay\(h\.path, n\)/.test(tab));
   // the menu: rename, pause or resume, archive or restore, open, open linked, delete
   for (const item of ["setTitle('Rename')", "paused ? 'Resume' : 'Pause'", "setTitle('Archive')", "setTitle('Restore')", "setTitle('Open habit note')", "setTitle('Open linked note')", "setTitle('Delete')"]) {
@@ -353,8 +355,8 @@ test('SOURCE: created_at is the instant, started_on the local day; createHabit p
   assert.ok(/const today = ISO_DAY_RE\.test\(String\(o\.today == null \? '' : o\.today\)\) \? String\(o\.today\) : todayStr\(\);/.test(fn), 'opts.today, else the local clock');
   assert.ok(/fm\.created_at = nowIso;/.test(fn), 'the instant stays');
   const create = main.slice(main.indexOf('  async createHabit('), main.indexOf('  freeHabitPath(') > 0 && main.indexOf('  freeHabitPath(') > main.indexOf('  async createHabit(') ? main.indexOf('  freeHabitPath(') : main.indexOf('  async importHabits('));
-  assert.ok(/const today = todayStr\(\);\s*\n\s*const text = habitTemplate\(input, \{ nowIso, today, logBlock: o\.logBlock \}\);/.test(create), 'the template takes the pinned day');
-  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today \}\)/.test(create), 'and so does the cache entry');
+  assert.ok(/const today = todayStr\(\);\s*\n\s*const lenient = !!o\.lenient;\s*\n\s*const text = habitTemplate\(input, \{ nowIso, today, lenient, logBlock: o\.logBlock \}\);/.test(create), 'the template takes the pinned day');
+  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today, lenient \}\)/.test(create), 'and so does the cache entry');
   // the calendar-date fields across the writers: due comes from the source or
   // the note, planned_day from the board; no writer derives one from an instant
   const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
