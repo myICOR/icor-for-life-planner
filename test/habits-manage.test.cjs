@@ -91,10 +91,22 @@ test('THE ASK: the template writes every contract field, and only the field the 
     const t = T.habitTemplate({ name: 'Walk', cadence: c, cadenceDays: ['mon'], monthDay: 3 }, { nowIso: NOW });
     assert.doesNotMatch(t, /cadence_days|month_day/, c);
   }
-  // no start date: today, off the pinned clock; no link: no field
-  const bare = T.habitTemplate({ name: 'Walk', cadence: 'daily' }, { nowIso: NOW });
+  // no start date: today, the LOCAL calendar date, pinned by opts.today;
+  // no link: no field
+  const bare = T.habitTemplate({ name: 'Walk', cadence: 'daily' }, { nowIso: NOW, today: '2026-09-06' });
   assert.match(bare, /^started_on: 2026-09-06$/m);
   assert.doesNotMatch(bare, /linked_note/);
+  // THE ASK (2026-09-07): a member importing at 19:20 Pacific got
+  // started_on one day in the future, the UTC day of the instant. The
+  // start date is a calendar date and takes the local day; created_at
+  // stays the UTC instant.
+  const late = T.habitFrontmatterOf({ name: 'Walk', cadence: 'daily' }, { nowIso: '2026-09-07T02:20:24Z', today: '2026-09-06' });
+  assert.equal(late.started_on, '2026-09-06', 'the local day, not the UTC one');
+  assert.equal(late.created_at, '2026-09-07T02:20:24Z', 'the instant is untouched');
+  assert.equal(T.habitFrontmatterOf({ name: 'Walk', cadence: 'daily', startedOn: '2026-08-01' }, { nowIso: '2026-09-07T02:20:24Z', today: '2026-09-06' }).started_on, '2026-08-01', 'a given start date wins');
+  const unpinned = T.habitFrontmatterOf({ name: 'Walk', cadence: 'daily' }, { nowIso: '2026-09-07T02:20:24Z' });
+  assert.equal(unpinned.started_on, T.todayStr(), 'no today given: the local clock, never the instant');
+  assert.equal(T.habitFrontmatterOf({ name: 'Walk', cadence: 'daily' }, { nowIso: NOW, today: 'yesterday' }).started_on, T.todayStr(), 'a today that is not a date is ignored');
   // the link is written as a wikilink whatever came in
   assert.match(T.habitTemplate({ name: 'Walk', cadence: 'daily', linkedNote: 'Long walk' }, { nowIso: NOW }), /^linked_note: "\[\[Long walk\]\]"$/m);
   // a status carried in (the import) is written; the dialog never sends one
@@ -331,4 +343,21 @@ test('SOURCE: the tab is management, wired for keyboard, touch and mouse, with n
   const coarse = block.slice(block.indexOf('@media (any-pointer: coarse)'));
   assert.match(coarse, /button\.iplan-habits-archived-head \{ min-height: 44px; \}/);
   assert.ok(!/\.iplan-habit-row[^{]*\{[^}]*opacity/.test(block), 'never an opacity dial');
+});
+
+test('SOURCE: created_at is the instant, started_on the local day; createHabit pins one today for the note and its cache', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const fn = main.slice(main.indexOf('function habitFrontmatterOf('), main.indexOf('function habitTemplate('));
+  assert.ok(!/started_on = .*nowIso\.slice\(0, 10\)/.test(fn), 'the start date is never the UTC slice of the instant');
+  assert.ok(/fm\.started_on = ISO_DAY_RE\.test\(started\) \? started : today;/.test(fn));
+  assert.ok(/const today = ISO_DAY_RE\.test\(String\(o\.today == null \? '' : o\.today\)\) \? String\(o\.today\) : todayStr\(\);/.test(fn), 'opts.today, else the local clock');
+  assert.ok(/fm\.created_at = nowIso;/.test(fn), 'the instant stays');
+  const create = main.slice(main.indexOf('  async createHabit('), main.indexOf('  freeHabitPath(') > 0 && main.indexOf('  freeHabitPath(') > main.indexOf('  async createHabit(') ? main.indexOf('  freeHabitPath(') : main.indexOf('  async importHabits('));
+  assert.ok(/const today = todayStr\(\);\s*\n\s*const text = habitTemplate\(input, \{ nowIso, today, logBlock: o\.logBlock \}\);/.test(create), 'the template takes the pinned day');
+  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today \}\)/.test(create), 'and so does the cache entry');
+  // the calendar-date fields across the writers: due comes from the source or
+  // the note, planned_day from the board; no writer derives one from an instant
+  const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.ok(!/(started_on|planned_day|due)\s*[=:]\s*[^\n]*toISOString\(\)\.slice\(0, 10\)/.test(code), 'no calendar-date field is the UTC slice of an instant');
+  assert.ok(!/(started_on|planned_day|due)\s*[=:]\s*[^\n]*nowIso\.slice\(0, 10\)/.test(code));
 });

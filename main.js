@@ -4976,11 +4976,15 @@ function validateHabitInput(input, opts) {
 
 // The frontmatter a new habit note starts with, every contract field
 // present and explicit, in the order it is written. `opts.nowIso` pins
-// created_at (and the start date when none is given).
+// created_at, an instant (UTC). `opts.today` pins the start date when
+// none is given: a calendar date, the LOCAL one (todayStr), never the
+// UTC day of nowIso. A member importing at 19:20 Pacific got a start date
+// one day in the future because the two were the same slice.
 function habitFrontmatterOf(input, opts) {
   const i = input || {};
   const o = opts || {};
   const nowIso = o.nowIso || new Date().toISOString();
+  const today = ISO_DAY_RE.test(String(o.today == null ? '' : o.today)) ? String(o.today) : todayStr();
   const cadence = normalizeCadence(i.cadence);
   const started = String(i.startedOn == null ? '' : i.startedOn).trim().slice(0, 10);
   const linked = i.linkedNote == null ? null : wikilinkBasename(i.linkedNote);
@@ -4992,7 +4996,7 @@ function habitFrontmatterOf(input, opts) {
   };
   if (cadence === 'weekly') fm.cadence_days = normalizeWeekdays(i.cadenceDays);
   if (cadence === 'monthly') fm.month_day = monthDayOf(i.monthDay) || 1;
-  fm.started_on = ISO_DAY_RE.test(started) ? started : nowIso.slice(0, 10);
+  fm.started_on = ISO_DAY_RE.test(started) ? started : today;
   if (linked) fm.linked_note = `[[${linked}]]`;
   fm.created_at = nowIso;
   return fm;
@@ -6531,10 +6535,13 @@ class IcorPlannerPlugin extends Plugin {
     if (!v.ok) throw new Error(v.error);
     await this.ensureFolders();
     const path = this.freeHabitPath(safeBasename(input.name));
+    // created_at is the instant; started_on (when the input has none) is
+    // the local calendar date. Pinned once so the note and its cache agree.
     const nowIso = new Date().toISOString();
-    const text = habitTemplate(input, { nowIso, logBlock: o.logBlock });
+    const today = todayStr();
+    const text = habitTemplate(input, { nowIso, today, logBlock: o.logBlock });
     const file = await this.app.vault.create(path, text);
-    const habit = habitFromFrontmatter(habitFrontmatterOf(input, { nowIso }), path, text);
+    const habit = habitFromFrontmatter(habitFrontmatterOf(input, { nowIso, today }), path, text);
     if (habit && file instanceof TFile) {
       habit.file = file;
       this._habitCache.set(path, { mtime: file.stat ? file.stat.mtime : 0, habit });
@@ -9615,7 +9622,7 @@ module.exports = IcorPlannerPlugin;
 // Headless test surface (harmless in Obsidian; the test harness reaches the
 // internals through it instead of duplicating them).
 module.exports.__test = {
-  mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel,
+  mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel, todayStr, localDayStr,
   // display formats (2026-09-07)
   setDisplayFormatSource, displayFormats, templatesFormats, resolveDisplayFormats, fmtWithMoment, fmtTimeHM,
   decodeRfc2047, icsUnescape,
