@@ -724,10 +724,15 @@ function displayFormats() {
   };
 }
 // The core Templates plugin's options: dateFormat and timeFormat are ''
-// until the person types one. Read defensively; the plugin may be off.
+// until the person types one. Read defensively. Obsidian keeps the
+// options after the plugin is switched off, so a disabled Templates
+// plugin counts as blank formats: what the person turned off must not
+// keep shaping the board.
 function templatesFormats(app) {
   const plugins = app && app.internalPlugins && app.internalPlugins.plugins;
-  const inst = plugins && plugins.templates && plugins.templates.instance;
+  const tpl = plugins && plugins.templates;
+  if (!tpl || tpl.enabled === false) return { date: '', time: '' };
+  const inst = tpl.instance;
   const opts = (inst && inst.options) || {};
   return {
     date: typeof opts.dateFormat === 'string' ? opts.dateFormat : '',

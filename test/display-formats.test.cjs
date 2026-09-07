@@ -74,6 +74,16 @@ test('THE ASK: the planner setting beats the Templates value, and a blank settin
   assert.deepEqual(T.templatesFormats({}), { date: '', time: '' }, 'no Templates plugin at all');
   assert.deepEqual(T.templatesFormats(null), { date: '', time: '' });
   assert.deepEqual(T.templatesFormats({ internalPlugins: { plugins: { templates: { instance: { options: { dateFormat: 7 } } } } } }), { date: '', time: '' }, 'a non-string option is blank');
+  // Obsidian keeps the options after Templates is switched off; a
+  // disabled plugin is blank formats, so what was turned off stops
+  // shaping the board (Flint, 0.11.0 review)
+  const off = { internalPlugins: { plugins: { templates: { enabled: false, instance: { options: { dateFormat: 'YYYY-MM-DD', timeFormat: 'LT' } } } } } };
+  assert.deepEqual(T.templatesFormats(off), { date: '', time: '' }, 'disabled Templates: blank, options ignored');
+  const on = { internalPlugins: { plugins: { templates: { enabled: true, instance: { options: { dateFormat: 'YYYY-MM-DD', timeFormat: 'LT' } } } } } };
+  assert.deepEqual(T.templatesFormats(on), { date: 'YYYY-MM-DD', time: 'LT' }, 'enabled: read');
+  assert.deepEqual(T.resolveDisplayFormats({ dateFormat: 'DD-MM' }, off), { date: 'DD-MM', time: '' }, 'the planner setting still wins on its own');
+  T.setDisplayFormatSource(() => T.resolveDisplayFormats({}, off));
+  try { assert.equal(T.fmtTimeHM(AT_1815), '18:15', 'end to end: compact when Templates is off'); } finally { T.setDisplayFormatSource(null); }
   // the override
   assert.deepEqual(T.resolveDisplayFormats({ dateFormat: 'DD-MM', timeFormat: '' }, app('YYYY-MM-DD', 'LT')), { date: 'DD-MM', time: 'LT' });
   assert.deepEqual(T.resolveDisplayFormats({ dateFormat: '', timeFormat: 'HH:mm' }, app('YYYY-MM-DD', 'LT')), { date: 'YYYY-MM-DD', time: 'HH:mm' });
@@ -142,7 +152,7 @@ test('SOURCE: one resolver decides; no call site hand-builds a date or time stri
   assert.ok(/setDisplayFormatSource\(\(\) => resolveDisplayFormats\(this\.settings, this\.app\)\);/.test(code), 'set on load, read at render');
   const unload = code.slice(code.indexOf('  onunload() {'), code.indexOf('anySourceConfigured() {'));
   assert.ok(unload.includes('setDisplayFormatSource(null);'), 'cleared on unload');
-  assert.ok(/templates && plugins\.templates\.instance/.test(code), 'the Templates plugin options are the source');
+  assert.ok(/const tpl = plugins && plugins\.templates;\s*\n\s*if \(!tpl \|\| tpl\.enabled === false\) return \{ date: '', time: '' \};/.test(code), 'the Templates plugin options are the source, and only while it is enabled');
   assert.ok(!/displayFormatsCache|_displayFormats/.test(code), 'never cached');
   // the two settings exist, blank by default, described in plain words
   const settings = main.slice(main.indexOf('class IcorPlannerSettingTab'));
