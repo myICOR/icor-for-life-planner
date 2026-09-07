@@ -5101,21 +5101,67 @@ function moveHabitLog(body, plannerSlug) {
   lines.splice(parsed.start, parsed.end - parsed.start, pointer + eol);
   return lines.join('\n');
 }
-// The My Life note's frontmatter after the import, in two steps that share
-// one processFrontMatter call. The schedule fields and the start date go
-// (they live in the planner note now); every other field stays.
-function stripHabitScheduleFields(fm) {
-  for (const k of HABIT_IMPORT_REMOVED_FIELDS) delete fm[k];
-  return fm;
-}
-// Then the note stays identifiable and linked: `type: habit` when it had
-// no type (a lived-vault note's only habit mark was the cadence that just
-// left), and `planner_habit`, the back-link to the planner note. In place.
-function importSourceFrontmatter(fm, plannerSlug) {
-  stripHabitScheduleFields(fm);
-  if (fm.type == null || String(fm.type).trim() === '') fm.type = 'habit';
-  fm.planner_habit = `[[${plannerSlug}]]`;
-  return fm;
+// The My Life note's frontmatter after the import, as a TEXT edit
+// (2026-09-07). Until 0.10.1 this went through processFrontMatter, which
+// reserialises the whole block and dropped a member's YAML comment lines
+// (the scaffold's own example note lost the comment that says where the
+// schedule lives). This touches only the lines it is asked about:
+//   - the top-level keys in HABIT_IMPORT_REMOVED_FIELDS go, each as a
+//     scalar line, an inline list, or a key followed by its block-list
+//     lines (indented, or "- " at column 0); they live in the planner
+//     note now;
+//   - `type: habit` is added when the block has no top-level type key, or
+//     fills an empty one (a lived-vault note's only habit mark was the
+//     cadence that just left);
+//   - `planner_habit`, the back-link, is added at the end of the block or
+//     replaces the line it already has, quoted the way processFrontMatter
+//     writes a value that starts with a bracket.
+// Every other line stays byte for byte, comments and blank lines
+// included; CRLF is kept (lines split on "\n" keep their "\r", new lines
+// copy the opening line's ending); a note with no block gets one.
+const FM_KEY_RE = /^([A-Za-z0-9_][A-Za-z0-9_.-]*)\s*:(?:\s|$)/;
+const FM_CONTINUATION_RE = /^(\s+\S|-\s)/;
+function importSourceFrontmatterText(text, plannerSlug) {
+  const src = String(text == null ? '' : text);
+  const link = `planner_habit: ${JSON.stringify(`[[${plannerSlug}]]`)}`;
+  const lines = src.split('\n');
+  const opens = lines.length > 1 && lines[0].replace(/\r$/, '') === '---';
+  let close = -1;
+  if (opens) for (let i = 1; i < lines.length; i++) if (lines[i].replace(/\r$/, '') === '---') { close = i; break; }
+  if (close < 0) {
+    const eol = src.includes('\r\n') ? '\r\n' : '\n';
+    return `---${eol}type: habit${eol}${link}${eol}---${eol}${src}`;
+  }
+  const eol = lines[0].endsWith('\r') ? '\r' : '';
+  const removed = new Set(HABIT_IMPORT_REMOVED_FIELDS);
+  const out = [lines[0]];
+  let hasType = false;
+  let linked = false;
+  for (let i = 1; i < close; i++) {
+    const raw = lines[i];
+    const line = raw.replace(/\r$/, '');
+    const m = FM_KEY_RE.exec(line);
+    const key = m ? m[1] : null;
+    if (key && (removed.has(key) || key === 'planner_habit')) {
+      // the key line and every block-list line under it
+      let j = i + 1;
+      while (j < close && FM_CONTINUATION_RE.test(lines[j].replace(/\r$/, ''))) j++;
+      if (key === 'planner_habit') { out.push(link + eol); linked = true; }
+      i = j - 1;
+      continue;
+    }
+    if (key === 'type') {
+      const value = line.slice(m[0].length).trim();
+      const empty = value === '' || value === '""' || value === "''" || value.startsWith('#');
+      if (empty) { out.push(`type: habit${value.startsWith('#') ? ` ${value}` : ''}${eol}`); hasType = true; continue; }
+      hasType = true;
+    }
+    out.push(raw);
+  }
+  if (!hasType) out.push(`type: habit${eol}`);
+  if (!linked) out.push(link + eol);
+  for (let i = close; i < lines.length; i++) out.push(lines[i]);
+  return out.join('\n');
 }
 // What the import changes in each My Life note, said at the point of
 // consent: the sentence above the modal's checkboxes and under the settings
@@ -6578,8 +6624,9 @@ class IcorPlannerPlugin extends Plugin {
   // The import, for the chosen candidates. Per note, in this order: the
   // planner note is created with the log block copied into it; then the My
   // Life note gives up the block for the pointer line (vault.process) and
-  // its schedule fields, gaining its type and the back-link in the same
-  // frontmatter write (processFrontMatter). The three writes are not one
+  // its schedule fields, gaining its type and the back-link in one more
+  // vault.process, a text edit of the named lines that keeps the block's
+  // comments (importSourceFrontmatterText). The three writes are not one
   // transaction, so each is written to be redone: a note is done only when
   // its own frontmatter carries the back-link (importDone, read here on
   // the source), and a note that is not done resumes from whatever is
@@ -6612,7 +6659,11 @@ class IcorPlannerPlugin extends Plugin {
         if (logBlock || !body.includes(habitPointerLine(slug))) {
           await this.app.vault.process(src, (data) => moveHabitLog(data, slug));
         }
-        await this.app.fileManager.processFrontMatter(src, (fm) => { importSourceFrontmatter(fm, slug); });
+        // A text edit, never Obsidian's frontmatter editor (which would
+        // rewrite the block and drop its comment lines). The metadata
+        // cache reparses after the write, so importDone reads the
+        // back-link on the next run.
+        await this.app.vault.process(src, (data) => importSourceFrontmatterText(data, slug));
         result.done++;
       } catch (e) {
         result.failed.push(`${c.basename}: ${(e && e.message) || e}`);
@@ -9675,7 +9726,7 @@ module.exports.__test = {
   basenameOf, wikilinkBasename, habitFromFrontmatter,
   daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,
   habitLogAfterCheck, habitRowModel, applyHabitCadence, validateHabitInput, habitFrontmatterOf, habitTemplate,
-  importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, stripHabitScheduleFields, importSourceFrontmatter,
+  importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, importSourceFrontmatterText,
   importCandidateText, importButtonText, importSummaryText, importFolderText, habitsCountText, trayTabName,
   IMPORT_EDITS_TEXT, importDone, adoptLogBlock,
   SOURCES, DEFAULT_SETTINGS,

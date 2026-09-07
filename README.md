@@ -442,8 +442,10 @@ the ones to take and, for each, the planner:
 3. in the My Life note's frontmatter, removes `cadence`, `cadence_days`
    and the start date (`started_on` or `since`; it lives in the planner
    note now, once), writes `type: habit` if the note had no type, and
-   writes `planner_habit: "[[<planner note>]]"`, the link back. Every
-   other field, the body and its links stay.
+   writes `planner_habit: "[[<planner note>]]"`, the link back. This is
+   a text edit of the lines named, not a rewrite of the block: every
+   other field, every comment line and blank line in the frontmatter,
+   the body and its links stay byte for byte.
 
 A My Life note counts as imported once its own frontmatter carries
 `planner_habit`, so pressing the button again does nothing to it. If a
