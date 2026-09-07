@@ -186,6 +186,7 @@ The connection settings, for anyone reading or scripting `data.json`:
 | `habitStreaks` | show `STREAK n` on a habit row, computed from the note's log at render, never written | `true` |
 | `clickupIncludeSubtasks` | also fetch ClickUp subtasks assigned to you (`subtasks=true` on the task query); off so an existing board does not fill up on upgrade | `false` |
 | `subtaskChecklist` | the "n of m subtasks" row and its list on a parent card; off leaves the counter out, subtask cards keep their parent line | `true` |
+| `dateFormat`, `timeFormat` | how dates and times read on the board, the tray, the agenda and the calendar cache note, in moment tokens (`DD-MM`, `MMM D`, `LT`, `h:mm A`). Blank follows the Date format and Time format in Obsidian's Templates settings; when those are blank too, the compact shapes of every earlier release (`7.09.`, `MON 7.09.2026`, `18:15`). Only what is shown changes: the `HH:MM` settings fields, routine times and everything stored in frontmatter stay as they are | empty |
 
 The board preferences (sync interval, weekend, split, lunch, workday,
 strip, the two-way toggles) sit beside them under their own names.

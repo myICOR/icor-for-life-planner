@@ -28,7 +28,7 @@
 
 const {
   Plugin, ItemView, PluginSettingTab, Setting, Notice,
-  TFile, TFolder, requestUrl, setIcon, normalizePath, Menu, Modal, Platform,
+  TFile, TFolder, requestUrl, setIcon, normalizePath, Menu, Modal, Platform, moment,
 } = require('obsidian');
 
 /* ========================================================================== *
@@ -263,6 +263,12 @@ const DEFAULT_SETTINGS = {
   secretsInStore: false,
   syncMinutes: 10,
   showWeekend: false,
+  // How dates and times are shown (2026-09-07): moment tokens, blank by
+  // default. Blank follows Obsidian's Templates setting; when that is blank
+  // too the board draws the compact shapes of every earlier release. See
+  // displayFormats. Never applied to an input or to anything stored.
+  dateFormat: '',
+  timeFormat: '',
   splitTime: '13:00',
   lunchEnabled: false,
   lunchStart: '12:30',
@@ -695,14 +701,69 @@ function fmtWeekLabel(weekStart) {
   return `${sd} ${months[sm - 1]} ${sy} - ${ed} ${months[em - 1]} ${ey}`;
 }
 
+/* ---- display formats (2026-09-07) ---------------------------------------
+ * The board's dates and times follow the person's own format: the planner
+ * settings "Date format" and "Time format" when filled, else Obsidian's
+ * Templates plugin settings (the same moment tokens), else the compact
+ * shapes every earlier release drew (7.09., MON 7.09.2026, 18:15). One
+ * resolver decides; fmtDayNum, fmtDayLabel and fmtTimeHM consume it and
+ * no call site builds a date or time string by hand (a gate asserts so).
+ * The formats are read at render time through a source the plugin sets on
+ * load, never cached: a change in either settings tab shows on the next
+ * paint. Inputs (routine times, the HH:MM fields) and everything stored
+ * in frontmatter or ISO strings stay as they are; only what is shown moves.
+ */
+let displayFormatSource = null;
+function setDisplayFormatSource(fn) { displayFormatSource = typeof fn === 'function' ? fn : null; }
+function displayFormats() {
+  let f = null;
+  try { f = displayFormatSource ? displayFormatSource() : null; } catch (e) { f = null; }
+  return {
+    date: String((f && f.date) || '').trim(),
+    time: String((f && f.time) || '').trim(),
+  };
+}
+// The core Templates plugin's options: dateFormat and timeFormat are ''
+// until the person types one. Read defensively; the plugin may be off.
+function templatesFormats(app) {
+  const plugins = app && app.internalPlugins && app.internalPlugins.plugins;
+  const inst = plugins && plugins.templates && plugins.templates.instance;
+  const opts = (inst && inst.options) || {};
+  return {
+    date: typeof opts.dateFormat === 'string' ? opts.dateFormat : '',
+    time: typeof opts.timeFormat === 'string' ? opts.timeFormat : '',
+  };
+}
+// The planner's own setting wins when filled; blank follows Templates.
+function resolveDisplayFormats(settings, app) {
+  const s = settings || {};
+  const t = templatesFormats(app);
+  const own = (v) => String(v == null ? '' : v).trim();
+  return { date: own(s.dateFormat) || t.date, time: own(s.timeFormat) || t.time };
+}
+// moment never throws on a format, but it can answer with nothing (a
+// bracket-only format) or with "Invalid date"; both fall back to compact.
+function fmtWithMoment(m, fmt, compact) {
+  if (!fmt || !moment || !m) return compact;
+  const valid = typeof m.isValid === 'function' ? m.isValid() : true;
+  const out = valid ? String(m.format(fmt) || '') : '';
+  return out && out !== 'Invalid date' ? out : compact;
+}
+function compactDayText(m, d, y) { return `${d}.${pad2(m)}.${y == null ? '' : y}`; }
+function compactTimeText(dt) { return `${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`; }
+
 function fmtDayNum(dayStr) {
   const [, m, d] = dayStr.split('-').map(Number);
-  return `${d}.${pad2(m)}.`;
+  const compact = compactDayText(m, d);
+  const fmt = displayFormats().date;
+  return fmt ? fmtWithMoment(moment(dayStr, 'YYYY-MM-DD', true), fmt, compact) : compact;
 }
 
 function fmtTimeHM(iso) {
   const d = new Date(iso);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const compact = compactTimeText(d);
+  const fmt = displayFormats().time;
+  return fmt ? fmtWithMoment(moment(d), fmt, compact) : compact;
 }
 
 // Synthetic lane order for a timed calendar event: minutes since local
@@ -1149,10 +1210,14 @@ function fmtDayTitle(day, today) {
   const [y, m, d] = day.split('-').map(Number);
   return DAY_TITLES[(new Date(y, m - 1, d, 12).getDay() + 6) % 7];
 }
+// The weekday stays in front; the date after it follows the display format.
 function fmtDayLabel(day) {
   const [y, m, d] = day.split('-').map(Number);
   const idx = (new Date(y, m - 1, d, 12).getDay() + 6) % 7;
-  return `${DAY_NAMES[idx]} ${d}.${pad2(m)}.${y}`;
+  const compact = compactDayText(m, d, y);
+  const fmt = displayFormats().date;
+  const date = fmt ? fmtWithMoment(moment(day, 'YYYY-MM-DD', true), fmt, compact) : compact;
+  return `${DAY_NAMES[idx]} ${date}`;
 }
 
 // Live pass 2026-08-30: with one task the board footer read "1 OPEN ITEMS",
@@ -5125,6 +5190,9 @@ class IcorPlannerPlugin extends Plugin {
     const adopted = adoptSettings(loaded, this.secrets);
     this.settings = adopted.settings;
     if (adopted.changed) await this.persistSettings();
+    // The display formats are resolved at every paint from the live
+    // settings and the Templates plugin's options, never cached.
+    setDisplayFormatSource(() => resolveDisplayFormats(this.settings, this.app));
     // Without a secret store the Outlook tokens live in these settings, and
     // a refresh token Microsoft rotated inside a sync must reach disk before
     // the app closes. The sink calls this after such a write; hidden from
@@ -5269,6 +5337,7 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   onunload() {
+    setDisplayFormatSource(null);
     this.removeNextBadge();
     this.removePlannerToolbarButton();
     if (this._cacheWriteTimer) { window.clearTimeout(this._cacheWriteTimer); this._cacheWriteTimer = null; }
@@ -9337,6 +9406,27 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .setName('Show weekend')
       .addToggle((t) => t.setValue(this.plugin.settings.showWeekend)
         .onChange(async (v) => { this.plugin.settings.showWeekend = v; await this.plugin.saveSettings(); }));
+    // The display formats (2026-09-07). Both blank by default: the board
+    // then follows Obsidian's own Templates setting, and with that blank
+    // too it draws what it always drew. A filled field here wins.
+    new Setting(containerEl)
+      .setName('Date format')
+      .setDesc('How dates read on the board, in moment tokens, for example DD-MM or MMM D. Blank follows the Date format in Obsidian\'s Templates settings; when that is blank too, dates read 7.09. as before. Only what is shown changes; nothing stored in your notes does.')
+      .addText((t) => t.setPlaceholder('D.MM.').setValue(this.plugin.settings.dateFormat || '')
+        .onChange(async (v) => {
+          this.plugin.settings.dateFormat = String(v || '').trim();
+          await this.plugin.saveSettings();
+          this.plugin.emitModelChanged();
+        }));
+    new Setting(containerEl)
+      .setName('Time format')
+      .setDesc('How times read on the board, in moment tokens, for example LT or h:mm A for 6:15 PM. Blank follows the Time format in Obsidian\'s Templates settings; when that is blank too, times read 18:15 as before. The HH:MM fields below stay 24-hour.')
+      .addText((t) => t.setPlaceholder('HH:mm').setValue(this.plugin.settings.timeFormat || '')
+        .onChange(async (v) => {
+          this.plugin.settings.timeFormat = String(v || '').trim();
+          await this.plugin.saveSettings();
+          this.plugin.emitModelChanged();
+        }));
     new Setting(containerEl)
       .setName('Morning / afternoon split')
       .setDesc('HH:MM. Timed events before this hour land in the morning lane.')
@@ -9526,6 +9616,8 @@ module.exports = IcorPlannerPlugin;
 // internals through it instead of duplicating them).
 module.exports.__test = {
   mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel,
+  // display formats (2026-09-07)
+  setDisplayFormatSource, displayFormats, templatesFormats, resolveDisplayFormats, fmtWithMoment, fmtTimeHM,
   decodeRfc2047, icsUnescape,
   todoistPriorityRank, imapSplitResponses, imapQuote, imapUidOrThrow,
   imapProviderOf, classifyImapError, imapReplyError, imapReasonToConnector, imapConnect, IMAP_PROVIDERS,
