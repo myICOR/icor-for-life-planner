@@ -357,7 +357,7 @@ test('source scan: no credential consumer is handed the raw settings', () => {
   assert.equal((c.match(/const s = this\.withSecrets\(\);/g) || []).length, 3, 'syncNow, upsertSource and detectAndPush');
   // Every write of the settings to disk goes through the one method that moves secrets out first.
   assert.equal((c.match(/this\.saveData\(this\.settings\)/g) || []).length, 1, 'saveData is called from persistSettings only');
-  assert.match(c, /async persistSettings\(\) \{\n\s*migrateSecrets\(this\.settings, this\.secrets\);\n\s*await this\.saveData\(this\.settings\);/);
+  assert.match(c, /async persistSettings\(\) \{\n\s*await migrateSecretsSettled\(this\.settings, this\.secrets\);\n\s*await this\.saveData\(this\.settings\);/);
   assert.match(c, /this\.secretStorage = secretStorageUsable\(this\.app && this\.app\.secretStorage\) \? this\.app\.secretStorage : null;/, 'the store is feature-detected at load');
   assert.match(c, /this\.secrets = this\.vaultFor\(backend\);\n\s*const adopted = adoptSettings\(loaded, this\.secrets\);/, 'the load goes through adoptSettings with the vault of the selected backend');
 });

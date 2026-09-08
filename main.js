@@ -416,21 +416,41 @@ class SecretVault {
   get backend() { return this.env ? 'env-file' : (this.storage ? 'secret-storage' : 'data-json'); }
   available() { return !!(this.env || this.storage); }
   target() { return this.env || this.storage; }
+  // true when a write is on disk by the time set() returns (the store, or
+  // nothing). The env file writes through a queue, so there it is false and
+  // only put() can say that the value is held.
+  get immediate() { return !this.env; }
   // '' when absent, unreadable, or cleared; never null, never a throw.
   get(key) {
     const t = this.target();
     if (!t) return '';
     try { return trimmed(t.getSecret(key)); } catch { return ''; }
   }
-  // true when the backend holds the value now. false means the caller must
-  // keep the value where it was: a blank is written to data.json only after
-  // the backend accepted the secret.
+  // true when the backend holds the value now, on disk. false means the
+  // caller must keep the value where it was: a blank is written to
+  // data.json only after the backend accepted the secret. The env file
+  // cannot answer that synchronously, so for a value it returns false and
+  // writes nothing (the caller keeps it; put() moves it once the write has
+  // landed). A clear still queues there: no caller blanks anything on its
+  // answer, and a clear that fails leaves an old line, never a lost key.
   set(key, value) {
     const t = this.target();
     if (!t) return false;
     const v = trimmed(value);
     if (!v) return this.delete(key);
+    if (!this.immediate) return false;
     try { t.setSecret(key, v); return true; } catch { return false; }
+  }
+  // The same, awaited: resolves true only once the backend holds the value
+  // (for the env file, once its own write reached disk without an error).
+  // Never rejects.
+  async put(key, value) {
+    const t = this.target();
+    if (!t) return false;
+    const v = trimmed(value);
+    if (!v) return this.delete(key);
+    if (this.immediate) return this.set(key, v);
+    try { return (await t.setSecret(key, v)) === true; } catch { return false; }
   }
   delete(key) {
     const t = this.target();
@@ -471,6 +491,9 @@ function readSecret(settings, vault, field) {
   return vault.get(fieldSecretKey(field));
 }
 // Returns true when the value lives in the store now (the field is blank).
+// In env-file mode a value stays in the field (set() answers false there)
+// until persistSettings moves it through migrateSecretsSettled; the caller
+// that needs the move now asks for a save.
 function writeSecret(settings, vault, field, value) {
   const v = trimmed(value);
   if (vault && vault.available() && vault.set(fieldSecretKey(field), v)) {
@@ -518,6 +541,50 @@ function migrateSecrets(settings, vault) {
   return { changed, moved };
 }
 
+// Whether the settings object still carries a secret in any field or feed.
+function settingsHoldSecrets(settings) {
+  const s = settings || {};
+  if (SECRET_FIELD_NAMES.some((field) => trimmed(s[field]))) return true;
+  // Through the accessor: with no vault given it answers the entry's own address.
+  return Array.isArray(s.calendars) && s.calendars.some((f) => f && typeof f === 'object' && !!feedUrl(f));
+}
+
+// migrateSecrets, then for a backend that cannot confirm a write
+// synchronously (the env file) every value still in the settings goes
+// through put(), and its field is blanked only once that write is on disk.
+// A value whose write failed stays where it was, so a save that follows
+// writes it back to data.json rather than nowhere. Same result shape.
+async function migrateSecretsSettled(settings, vault) {
+  const r = migrateSecrets(settings, vault);
+  if (!vault || !vault.available() || vault.immediate) return r;
+  const s = settings || {};
+  const slots = [];
+  for (const field of SECRET_FIELD_NAMES) {
+    const v = trimmed(s[field]);
+    if (v) slots.push({ obj: s, prop: field, name: field, key: fieldSecretKey(field), value: v });
+  }
+  if (Array.isArray(s.calendars)) {
+    s.calendars.forEach((f, i) => {
+      if (!f || typeof f !== 'object') return;
+      const v = trimmed(f.url);
+      if (!v) return;
+      if (!f.id) f.id = normalizeCalendarFeed(f, i).id;
+      slots.push({ obj: f, prop: 'url', name: `calendar:${f.id}`, key: calendarSecretKey(f.id), value: v });
+    });
+  }
+  // Every write queued first, then each awaited in order: the queue lands
+  // them in that order, and each slot answers for its own write only.
+  const writes = slots.map((slot) => vault.put(slot.key, slot.value));
+  for (let i = 0; i < slots.length; i++) {
+    if (!(await writes[i])) continue;
+    slots[i].obj[slots[i].prop] = '';
+    r.moved.push(slots[i].name);
+    r.changed = true;
+  }
+  if (r.moved.length && s.secretsInStore !== true) { s.secretsInStore = true; r.changed = true; }
+  return r;
+}
+
 // The settings with every secret filled back in: a shallow copy, so the
 // `_shadow` map inside is the live one. In data-json mode the copy is the
 // settings as they are. Only ever handed to readers; never saved.
@@ -563,8 +630,11 @@ function adoptSettings(loaded, vault) {
   const raw = loaded && typeof loaded === 'object' ? loaded : {};
   const migrated = migrateHabitSettings(migrateCalendarSettings(raw));
   const secrets = migrateSecrets(migrated, vault);
+  // A backend that takes a value only through put() (the env file) leaves
+  // it in place here; the write-back that follows moves it settled.
+  const pending = !!(vault && vault.available() && !vault.immediate && settingsHoldSecrets(migrated));
   const settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
-  return { settings, changed: migrated !== raw || secrets.changed, moved: secrets.moved };
+  return { settings, changed: migrated !== raw || secrets.changed || pending, moved: secrets.moved, pending };
 }
 
 // The settings tab's one line on where the secrets are. The store is named
@@ -682,7 +752,10 @@ function envErrorText(e) { return trimmed(e && e.message ? e.message : e) || 'un
 // are from memory (load once, reload before a sync and before the settings
 // tab draws); a write lands in memory at once and on disk through one
 // queue, each write reading the file again first so lines another tool
-// wrote meanwhile survive. `error` is the last read or write failure.
+// wrote meanwhile survive. setSecret returns that write's own promise
+// (true landed, false failed, never a throw), and a failed write takes the
+// value back out of memory, so the store never claims what the disk
+// refused. `error` is the last read or write failure.
 class EnvFileStore {
   constructor(adapter, path) {
     this.adapter = adapter || null;
@@ -692,6 +765,7 @@ class EnvFileStore {
     this.exists = false;
     this.error = '';
     this._chain = Promise.resolve();
+    this._latest = {}; // key -> the most recent write of it, for the revert
   }
   async _present() {
     if (!this.adapter) return false;
@@ -721,17 +795,37 @@ class EnvFileStore {
   setSecret(id, value) {
     const k = envKeyFor(id);
     const v = String(value == null ? '' : value).replace(/[\r\n]+/g, '');
+    const w = { key: k, value: v };
     this.values[k] = v;
-    this._chain = this._chain.then(() => this._flush(k, v)).catch((e) => { this.error = envErrorText(e); });
+    this._latest[k] = w;
+    const write = this._chain.then(() => this._flush(w)).then(() => true, (e) => { this.error = envErrorText(e); return false; });
+    this._chain = write.then(() => undefined);
+    return write;
   }
-  async _flush(key, value) {
+  async _flush(w) {
     this.error = '';
-    if (!this.adapter) throw new Error('no vault adapter');
-    const cur = (await this._present()) ? await this.adapter.read(this.path) : '';
-    const next = upsertEnvLine(cur, key, value);
-    if (next === cur) { this.exists = this.exists || cur !== ''; return; }
-    await this.adapter.write(this.path, next);
-    this.exists = true;
+    let cur = null;
+    try {
+      if (!this.adapter) throw new Error('no vault adapter');
+      cur = (await this._present()) ? await this.adapter.read(this.path) : '';
+      const next = upsertEnvLine(cur, w.key, w.value);
+      if (next === cur) { this.exists = this.exists || cur !== ''; return; }
+      await this.adapter.write(this.path, next);
+      this.exists = true;
+    } catch (e) {
+      this._revert(w, cur);
+      throw e;
+    }
+  }
+  // After a failed write, memory goes back to what the disk holds for that
+  // key: the bytes read just before the write, or nothing when even the
+  // read failed (load() would answer the same). A later write of the same
+  // key that is still queued answers for itself, so it is left alone.
+  _revert(w, cur) {
+    if (this._latest[w.key] !== w) return;
+    const disk = cur == null ? {} : parseEnvText(cur);
+    if (Object.prototype.hasOwnProperty.call(disk, w.key)) this.values[w.key] = disk[w.key];
+    else delete this.values[w.key];
   }
   settle() { return this._chain; }
 }
@@ -2156,17 +2250,19 @@ function saveOutlookTokens(sink, tokens, now) {
   const live = k.live || {};
   const t = tokens || {};
   const at = (now == null ? Date.now() : now) + Math.max(0, Number(t.expiresIn) || 0) * 1000;
+  let held = true;
   const put = (field, value) => {
-    writeSecret(live, k.vault, field, value);
+    held = writeSecret(live, k.vault, field, value) && held;
     if (k.view && k.view !== live) k.view[field] = value;
   };
   put('outlookAccessToken', t.accessToken ? String(t.accessToken) : '');
   put('outlookExpiresAt', t.accessToken ? String(at) : '');
   if (t.refreshToken) put('outlookRefreshToken', String(t.refreshToken));
   if (t.account != null) put('outlookAccount', String(t.account));
-  // Without a store the token lives in the settings: reach disk now, not at
-  // the next save that happens to come along.
-  if (!(k.vault && k.vault.available()) && typeof live._persist === 'function') live._persist();
+  // A token the backend did not take on the spot lives in the settings
+  // (no store, or the env file, which moves it at the save): reach disk
+  // now, not at the next save that happens to come along.
+  if (!held && typeof live._persist === 'function') live._persist();
 }
 // Sign-out: the four keys cleared, in the store or in the settings.
 function clearOutlookTokens(sink) {
@@ -5670,10 +5766,13 @@ class IcorPlannerPlugin extends Plugin {
 
   // The one write of the settings to disk. Belt and braces: a secret that
   // reached the in-memory object by any path (a hand edit, a data.json
-  // synced in from a machine without a store) is moved out first, so in
-  // store mode data.json never carries one.
+  // synced in from a machine without a store, a keystroke in the tab) is
+  // moved out first, so data.json never carries one the backend holds. In
+  // env-file mode the move waits for the file: a field is blanked only
+  // once its line is on disk, and a value whose write failed is saved back
+  // into data.json rather than lost (Vex P-1, 2026-09-08).
   async persistSettings() {
-    migrateSecrets(this.settings, this.secrets);
+    await migrateSecretsSettled(this.settings, this.secrets);
     await this.saveData(this.settings);
     await this.secrets.settle();
   }
@@ -9338,7 +9437,17 @@ class IcorPlannerSettingTab extends PluginSettingTab {
         t.inputEl.type = 'password';
         t.inputEl.autocomplete = 'off';
         if (label) t.inputEl.setAttribute('aria-label', label);
-        t.onChange(async (v) => { set(v.trim()); await this.plugin.saveSettings(); });
+        t.onChange(async (v) => {
+          set(v.trim());
+          await this.plugin.saveSettings();
+          // In env-file mode the save moves the key into the file; when
+          // that write failed the key stayed in data.json, and the member
+          // is told once per failure, with the Env file line refreshed.
+          const err = this.plugin.secrets.mode === 'env-file' ? this.plugin.envStore.error : '';
+          if (err && err !== this._envWriteWarned) new Notice('Planner: the env file could not be written; the key stays in data.json until it can. See the Env file line in settings.', 8000);
+          this._envWriteWarned = err;
+          if (this.plugin.secrets.mode === 'env-file') renderEnvStatus();
+        });
       });
     };
 
@@ -10178,6 +10287,7 @@ module.exports.__test = {
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
+  settingsHoldSecrets, migrateSecretsSettled, IcorPlannerPlugin,
   // the env file backend (0.12.0)
   DEFAULT_ENV_FILE_PATH, SECRETS_BACKENDS, BACKEND_LABELS, normalizeSecretsBackend, secretsBackendLabel, normalizeEnvFilePath,
   envKeyFor, parseEnvText, envLineFor, upsertEnvLine, envErrorText, EnvFileStore, dataJsonStore, secretPresence, moveSecret,

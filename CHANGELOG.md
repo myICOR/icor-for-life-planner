@@ -23,6 +23,9 @@ Releases before 0.12.0 carry their notes on the GitHub release itself
   exists and offers "Move to ..." per key and for all of them at once.
 - The env file is read again before every sync, so a line edited by hand
   is picked up without a restart.
+- A key is blanked in `data.json` only after its line is on disk in the
+  env file. When the file cannot be written, the key stays in `data.json`,
+  the settings tab says so once, and the next save that succeeds moves it.
 
 ### Changed
 - The settings tab and the README call the store by Obsidian's own name

@@ -231,7 +231,11 @@ live" picks one of two places, and only the selected one is ever read:
   starts a comment only at the start of a line; nothing is interpolated.
   The file is inside your vault, so whatever syncs or commits your vault
   carries it: keep it in `.gitignore` and out of any sync you do not
-  trust. The keys:
+  trust. (Obsidian Sync is the exception: it skips dotfiles other than
+  `.obsidian`, so a `.env` is not carried by it.) When you save a key
+  and the file cannot be written, the key stays in this plugin's
+  `data.json` and the "Env file" line in settings says why; it moves at
+  the next save that succeeds. The keys:
 
   | key | what |
   | --- | --- |
@@ -554,7 +558,9 @@ differences:
   would fail at the first sync.
 - With the default backend, secrets live in Obsidian's keychain, which is
   per device (see "Where your keys live") and never travels with vault
-  sync; with the env file they travel wherever the vault does. A source
+  sync; with the env file they travel wherever the vault does, except
+  through Obsidian Sync, which skips dotfiles other than `.obsidian`, so
+  a `.env` at the default path does not reach the phone that way. A source
   connected on one device
   shows "Not connected on this device." with a "Connect this device"
   button on a fresh one, rather than the plain "Not connected." a

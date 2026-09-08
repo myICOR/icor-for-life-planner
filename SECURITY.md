@@ -88,10 +88,13 @@ backend is an env file inside the vault (`envFilePath`, default
 `06 AI Team/AI Team Knowledge/.env`): one `KEY=value` line per secret,
 read through the vault adapter, edited one line at a time with every
 other byte preserved; being inside the vault, it travels with whatever
-syncs or commits the vault, which is the member's choice to make. In
-both backends the matching fields in `data.json` are empty, and any
-secret found in `data.json` on load is moved into the selected backend
-once and blanked. On an Obsidian older than 1.11.4 with the default
+syncs or commits the vault, which is the member's choice to make
+(Obsidian Sync skips dotfiles other than `.obsidian`, so it does not
+carry a `.env`). In both backends the matching fields in `data.json`
+are empty, and any secret found in `data.json` on load is moved into
+the selected backend once and blanked; with the env file the field is
+blanked only after the line is on disk, and a value whose write failed
+stays in `data.json` until a later save succeeds. On an Obsidian older than 1.11.4 with the default
 setting they are in the plugin's `data.json` inside the vault, at
 `.obsidian/plugins/icor-for-life-planner/data.json`, as in every release
 before 0.9.0, until the env file is chosen. The single `icsUrl` key of

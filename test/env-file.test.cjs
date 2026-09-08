@@ -17,6 +17,11 @@
  *   - the migration moves a plaintext data.json value into the env file;
  *   - a move copies into the selected backend and blanks the source only
  *     after the target holds the value;
+ *   - Vex P-1 (2026-09-08): on the env backend no synchronous path (set,
+ *     writeSecret, migrateSecrets, setFeedUrl) ever blanks data.json; the
+ *     settled migration in persistSettings blanks a field only once its
+ *     line is on disk, a failed write leaves the value in data.json, and
+ *     the store's memory never claims what the disk refused;
  *   - the existing store ids are unchanged, so nothing already stored is lost;
  *   - source scans: the load order, the sync reload, the settle in
  *     persistSettings, the dropdown, and no console or Notice inside the layer;
@@ -219,17 +224,35 @@ test('the store: a refused write is an error sentence, never a throw, never the 
   const s = new T.EnvFileStore(a, ENV);
   await s.load();
   a.fail = 'EACCES: permission denied';
-  s.setSecret(T.fieldSecretKey('todoistToken'), 'tok-secret-value');
-  await s.settle();
+  const failed = s.setSecret(T.fieldSecretKey('todoistToken'), 'tok-secret-value');
+  assert.equal(s.getSecret(T.fieldSecretKey('todoistToken')), 'tok-secret-value', 'memory first, while the write is queued');
+  assert.equal(await failed, false, 'the write answers for itself: false, never a throw');
   assert.equal(s.error, 'EACCES: permission denied');
   assert.ok(!s.error.includes('tok-secret-value'));
   assert.equal(a.files[ENV], 'A=1\n', 'the file is untouched');
-  assert.equal(s.getSecret(T.fieldSecretKey('todoistToken')), 'tok-secret-value', 'memory still holds it, and the tab says the write failed');
+  assert.equal(s.getSecret(T.fieldSecretKey('todoistToken')), null, 'memory takes it back: the store never claims what the disk refused (Vex P-1)');
+  assert.deepEqual(s.listSecrets(), ['A']);
+  // A key the disk already had goes back to the disk's value, not to nothing.
+  assert.equal(await s.setSecret('a', 'two'), false);
+  assert.equal(s.getSecret('a'), '1', 'back to the bytes read just before the failed write');
   a.fail = null;
-  s.setSecret(T.fieldSecretKey('clickupToken'), 'pk');
-  await s.settle();
+  assert.equal(await s.setSecret(T.fieldSecretKey('clickupToken'), 'pk'), true);
   assert.equal(s.error, '', 'the next successful write clears the error');
   assert.equal(T.parseEnvText(a.files[ENV]).CLICKUP_TOKEN, 'pk');
+  // Two writes of one key queued together: the first fails, the second
+  // lands, and memory ends where the disk ends. Both failing ends at the disk too.
+  const realWrite = a.write;
+  let refusals = 1; // the adapter is asked at write time, so the refusal is counted there, not flipped here
+  a.write = async (p, text) => { if (refusals > 0) { refusals -= 1; throw new Error('EACCES'); } return realWrite(p, text); };
+  const first = s.setSecret('a', 'x');
+  const second = s.setSecret('a', 'y');
+  assert.deepEqual([await first, await second], [false, true]);
+  assert.equal(s.getSecret('a'), 'y');
+  assert.equal(T.parseEnvText(a.files[ENV]).A, 'y');
+  refusals = 2;
+  assert.deepEqual(await Promise.all([s.setSecret('a', 'p'), s.setSecret('a', 'q')]), [false, false]);
+  assert.equal(s.getSecret('a'), 'y', 'the disk still says y, so memory says y');
+  a.write = realWrite;
   // An unreadable file: an error and an empty store, never a stale one.
   const b = fakeAdapter({ [ENV]: 'A=1\n' });
   b.read = async () => { throw new Error('EISDIR: is a directory'); };
@@ -264,12 +287,19 @@ test('the vault in env mode reads the file and only the file: no fallback to the
   assert.equal(new T.SecretVault(storage).backend, 'secret-storage');
   assert.equal(new T.SecretVault(null).backend, 'data-json');
   assert.equal(new T.SecretVault(storage, {}).mode, 'store', 'a thing that is not a store is not an env backend');
-  // A write goes to the file, and settle resolves once it is there.
-  assert.equal(T.writeSecret(s, vault, 'todoistToken', 'tok-env'), true);
-  assert.equal(s.todoistToken, '');
+  // A sync write cannot be confirmed on this backend, so it keeps the value
+  // in the field; the settled migration moves it, and the file has it
+  // before the field is blanked.
+  assert.equal(vault.immediate, false);
+  assert.equal(T.writeSecret(s, vault, 'todoistToken', 'tok-env'), false);
+  assert.equal(s.todoistToken, 'tok-env', 'kept in the field until the file has it');
   await vault.settle();
+  assert.equal('TODOIST_TOKEN' in T.parseEnvText(a.files[ENV]), false, 'a sync set writes nothing on this backend');
+  assert.deepEqual(await T.migrateSecretsSettled(s, vault), { changed: true, moved: ['todoistToken'] });
+  assert.equal(s.todoistToken, '');
   assert.equal(T.parseEnvText(a.files[ENV]).TODOIST_TOKEN, 'tok-env');
   assert.equal(storage.getSecret(T.fieldSecretKey('todoistToken')), 'in-the-store', 'the store is never written in env mode');
+  assert.equal(new T.SecretVault(storage).immediate, true);
   await new T.SecretVault(storage).settle();
 });
 
@@ -278,18 +308,31 @@ test('the migration moves a plaintext data.json value into the env file, once', 
   const env = await new T.EnvFileStore(a, ENV).load();
   const vault = new T.SecretVault(null, env);
   const s = { todoistToken: ' tok-plain ', clickupToken: '', calendars: [{ id: 'cal-1', name: 'Work', url: 'https://x/private-abc/basic.ics', color: 1, enabled: true, kind: 'ics' }] };
-  const r = T.migrateSecrets(s, vault);
+  // The synchronous migration (adoptSettings at load) moves nothing on this
+  // backend: it cannot know whether the file took the value.
+  assert.deepEqual(T.migrateSecrets(s, vault), { changed: false, moved: [] });
+  assert.equal(s.todoistToken, ' tok-plain ', 'untouched');
+  assert.equal(s.calendars[0].url, 'https://x/private-abc/basic.ics');
+  assert.equal(s.secretsInStore, undefined);
+  assert.deepEqual(a.writes, []);
+  // The settled one (persistSettings) moves each value once its line is on disk.
+  const r = await T.migrateSecretsSettled(s, vault);
   assert.deepEqual(r, { changed: true, moved: ['todoistToken', 'calendar:cal-1'] });
   assert.equal(s.todoistToken, '');
   assert.equal(s.calendars[0].url, '');
   assert.equal(s.secretsInStore, true);
-  await vault.settle();
   assert.equal(a.files[ENV], '# keys\nTODOIST_TOKEN=tok-plain\nPLANNER_CALENDAR_CAL_1=https://x/private-abc/basic.ics\n');
   const json = JSON.stringify(s);
   for (const n of ['tok-plain', 'private-abc']) assert.ok(!json.includes(n), `data.json still carries: ${n}`);
-  assert.deepEqual(T.migrateSecrets(s, vault), { changed: false, moved: [] });
+  assert.deepEqual(await T.migrateSecretsSettled(s, vault), { changed: false, moved: [] });
   await vault.settle();
   assert.equal(a.writes.length, 2, 'a second run writes nothing');
+  // On the store the settled migration is the sync one: same answer, no await needed inside.
+  const storage = new FakeSecretStorage();
+  const ks = { todoistToken: 'tok-store', calendars: [] };
+  assert.deepEqual(await T.migrateSecretsSettled(ks, new T.SecretVault(storage)), { changed: true, moved: ['todoistToken'] });
+  assert.equal(storage.getSecret(T.fieldSecretKey('todoistToken')), 'tok-store');
+  assert.deepEqual(await T.migrateSecretsSettled({ todoistToken: 'x' }, new T.SecretVault(null)), { changed: false, moved: [] }, 'no backend, nothing moves');
   // adoptSettings carries the two settings through untouched and lays the defaults under them.
   const adopted = T.adoptSettings({ secretsBackend: 'env-file', envFilePath: 'x/.env' }, new T.SecretVault(null));
   assert.equal(adopted.settings.secretsBackend, 'env-file');
@@ -416,7 +459,8 @@ test('the key list: the five credentials by name, every pasted calendar, never t
 test('source scan: the load order, the reload before a sync, the settle after a save', () => {
   assert.match(code, /this\.secretStorage = secretStorageUsable\(this\.app && this\.app\.secretStorage\) \? this\.app\.secretStorage : null;/);
   assert.match(code, /const backend = normalizeSecretsBackend\(loaded\.secretsBackend\);\n\s*const envPath = normalizeEnvFilePath\(loaded\.envFilePath\)\.path \|\| DEFAULT_ENV_FILE_PATH;\n\s*this\.envStore = this\.envStoreFor\(envPath\);\n\s*if \(backend === 'env-file'\) await this\.envStore\.load\(\);\n\s*this\.secrets = this\.vaultFor\(backend\);\n\s*const adopted = adoptSettings\(loaded, this\.secrets\);/, 'the env file is read before the migration and only when selected');
-  assert.match(code, /async persistSettings\(\) \{\n\s*migrateSecrets\(this\.settings, this\.secrets\);\n\s*await this\.saveData\(this\.settings\);\n\s*await this\.secrets\.settle\(\);\n\s*\}/, 'a save is not done until the env file is');
+  assert.match(code, /async persistSettings\(\) \{\n\s*await migrateSecretsSettled\(this\.settings, this\.secrets\);\n\s*await this\.saveData\(this\.settings\);\n\s*await this\.secrets\.settle\(\);\n\s*\}/, 'the move waits for the file before data.json is written, and a save is not done until the env file is');
+  assert.doesNotMatch(code.slice(code.indexOf('async persistSettings()'), code.indexOf('envStoreFor(path)')), /[^d]\s*migrateSecrets\(this\.settings/, 'the sync migration is never the one a save relies on');
   assert.match(code, /await this\.ensureFolders\(\);\n\s*if \(this\.secrets\.mode === 'env-file'\) await this\.envStore\.load\(\);\n\s*const s = this\.withSecrets\(\);/, 'a hand edit of the env file is seen at the next sync');
   assert.match(code, /vaultFor\(backend\) \{\n\s*return normalizeSecretsBackend\(backend\) === 'env-file' \? new SecretVault\(null, this\.envStore\) : new SecretVault\(this\.secretStorage\);/, 'one backend per vault, never both');
   assert.match(code, /'secret-storage': this\.secretStorage, 'env-file': this\.envStore, 'data-json': dataJsonStore\(this\.settings\)/, 'the three holders for the status rows');
@@ -484,4 +528,164 @@ test('the shipped files: README section, CHANGELOG line, the three version files
   for (const f of ['README.md', 'CHANGELOG.md', 'SECURITY.md']) {
     assert.doesNotMatch(fs.readFileSync(path.join(root, f), 'utf8'), /[\u2013\u2014]/, `${f}: no dashes of either length`);
   }
+});
+
+/* Vex P-1 (2026-09-08): with the env file selected, the automatic paths
+ * blanked data.json on a synchronous "true" while the file write was only
+ * queued; a write that then failed left the credential in memory only,
+ * gone at unload. The gate: an adapter whose write throws, and data.json
+ * keeps the value at every layer, up to the plugin's own persistSettings.
+ */
+test('P-1 gate: on the env backend no synchronous path blanks data.json, and a failed write leaves the value where it was', async () => {
+  const id = T.fieldSecretKey('todoistToken');
+  const a = fakeAdapter({ [ENV]: 'A=1\n' });
+  const env = await new T.EnvFileStore(a, ENV).load();
+  const vault = new T.SecretVault(null, env);
+  assert.equal(vault.immediate, false);
+  a.fail = 'EACCES: permission denied';
+  const feed = { id: 'cal-1', name: 'Work', url: '', color: 1, enabled: true, kind: 'ics' };
+  const s = { todoistToken: '', clickupToken: 'pk_plain', calendars: [feed] };
+  // The sync paths: none claims, none writes, none blanks.
+  assert.equal(vault.set(id, 'tok-typed'), false, 'a sync set cannot know, so it does not claim');
+  assert.equal(T.writeSecret(s, vault, 'todoistToken', 'tok-typed'), false);
+  assert.equal(s.todoistToken, 'tok-typed', 'the keystroke keeps the value in the field');
+  assert.deepEqual(T.migrateSecrets(s, vault), { changed: false, moved: [] }, 'the sync migration moves nothing on this backend');
+  assert.equal(s.clickupToken, 'pk_plain');
+  assert.equal(T.setFeedUrl(feed, 'https://x/private-abc/basic.ics', vault), false);
+  assert.equal(feed.url, 'https://x/private-abc/basic.ics');
+  await vault.settle();
+  assert.deepEqual(a.writes, [], 'the sync paths did not even queue a write');
+  assert.equal(env.getSecret(id), null);
+  // The settled migration with a write that fails: every value stays, the
+  // error is the adapter's sentence without a value, nothing on disk, and
+  // memory does not claim it either. The value is still the one in use.
+  assert.deepEqual(await T.migrateSecretsSettled(s, vault), { changed: false, moved: [] });
+  assert.equal(s.todoistToken, 'tok-typed');
+  assert.equal(s.clickupToken, 'pk_plain');
+  assert.equal(feed.url, 'https://x/private-abc/basic.ics');
+  assert.equal(s.secretsInStore, undefined);
+  assert.equal(env.error, 'EACCES: permission denied');
+  assert.ok(!env.error.includes('tok-typed'));
+  assert.equal(a.files[ENV], 'A=1\n');
+  assert.equal(env.getSecret(id), null, 'memory does not claim what the disk refused');
+  assert.equal(T.readSecret(s, vault, 'todoistToken'), 'tok-typed', 'and the value is still in use');
+  assert.equal(T.withSecrets(s, vault).clickupToken, 'pk_plain');
+  // put() is the honest form of set(): false on this failure, true once the disk has it.
+  assert.equal(await vault.put(id, 'tok-typed'), false);
+  a.fail = null;
+  assert.equal(await vault.put(id, 'tok-typed'), true);
+  assert.equal(T.parseEnvText(a.files[ENV]).TODOIST_TOKEN, 'tok-typed');
+  // The adapter recovered: the next settled migration moves the rest,
+  // blanks each field, and the file has every line.
+  assert.deepEqual(await T.migrateSecretsSettled(s, vault), { changed: true, moved: ['todoistToken', 'clickupToken', 'calendar:cal-1'] });
+  assert.equal(s.todoistToken, '');
+  assert.equal(s.clickupToken, '');
+  assert.equal(feed.url, '');
+  assert.equal(s.secretsInStore, true);
+  assert.deepEqual(T.parseEnvText(a.files[ENV]), { A: '1', TODOIST_TOKEN: 'tok-typed', CLICKUP_TOKEN: 'pk_plain', PLANNER_CALENDAR_CAL_1: 'https://x/private-abc/basic.ics' });
+  // A clear still goes through synchronously: nothing is blanked on its answer, and a failed clear leaves an old line, not a lost key.
+  assert.equal(T.writeSecret(s, vault, 'clickupToken', ''), true);
+  await vault.settle();
+  assert.equal(T.parseEnvText(a.files[ENV]).CLICKUP_TOKEN, '');
+  // On the store, set() is still the immediate answer it always was.
+  const storage = new FakeSecretStorage();
+  const sv = new T.SecretVault(storage);
+  const ks = { todoistToken: '' };
+  assert.equal(T.writeSecret(ks, sv, 'todoistToken', 'tok-store'), true);
+  assert.equal(ks.todoistToken, '');
+  assert.equal(storage.getSecret(id), 'tok-store');
+});
+
+test('P-1 gate: persistSettings with a throwing adapter writes the value into data.json, and blanks it only after the file has it', async () => {
+  const a = fakeAdapter({ [ENV]: '' });
+  const p = Object.create(T.IcorPlannerPlugin.prototype);
+  p.app = { vault: { adapter: a } };
+  p.secretStorage = null;
+  p.envStore = p.envStoreFor(ENV);
+  await p.envStore.load();
+  p.secrets = p.vaultFor('env-file');
+  assert.equal(p.secrets.mode, 'env-file');
+  p.settings = Object.assign({}, T.DEFAULT_SETTINGS, { secretsBackend: 'env-file', envFilePath: ENV, todoistToken: 'tok-live' });
+  const saved = [];
+  p.saveData = async (s) => { saved.push(JSON.parse(JSON.stringify(s))); };
+  a.fail = 'EACCES: permission denied';
+  await p.persistSettings();
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].todoistToken, 'tok-live', 'data.json keeps the value when the env write fails');
+  assert.equal(saved[0].secretsInStore, false);
+  assert.equal(p.settings.todoistToken, 'tok-live');
+  assert.equal(a.files[ENV], '');
+  assert.equal(p.envStore.error, 'EACCES: permission denied');
+  assert.equal(p.withSecrets().todoistToken, 'tok-live', 'the sync still has a token');
+  a.fail = null;
+  await p.persistSettings();
+  assert.equal(saved.length, 2);
+  assert.equal(saved[1].todoistToken, '', 'blanked once the line is on disk');
+  assert.equal(saved[1].secretsInStore, true);
+  assert.equal(T.parseEnvText(a.files[ENV]).TODOIST_TOKEN, 'tok-live');
+  assert.equal(p.envStore.error, '');
+  assert.equal(p.withSecrets().todoistToken, 'tok-live', 'now read from the file');
+  // At load, adoptSettings leaves the value in place (the sync half cannot
+  // move it) and reports the pending move, so onload writes back once and
+  // that write-back is the settled one.
+  // (calendars given as [] so the calendar migration has nothing to add and `changed` speaks for the secrets alone.)
+  const adopted = T.adoptSettings({ secretsBackend: 'env-file', calendars: [], todoistToken: 'x' }, p.secrets);
+  assert.equal(adopted.pending, true);
+  assert.equal(adopted.changed, true);
+  assert.deepEqual(adopted.moved, []);
+  assert.equal(adopted.settings.todoistToken, 'x', 'not blanked by the sync half');
+  const feedOnly = T.adoptSettings({ secretsBackend: 'env-file', calendars: [{ id: 'c', url: 'https://feed', kind: 'ics' }] }, p.secrets);
+  assert.equal(feedOnly.pending, true);
+  assert.equal(feedOnly.changed, true);
+  assert.equal(T.adoptSettings({ secretsBackend: 'env-file', calendars: [] }, p.secrets).pending, false);
+  assert.equal(T.adoptSettings({ secretsBackend: 'env-file', calendars: [] }, p.secrets).changed, false, 'nothing to move, nothing to write back');
+  assert.equal(T.adoptSettings({ todoistToken: 'x', calendars: [] }, new T.SecretVault(new FakeSecretStorage())).pending, false, 'the store moved it on the spot');
+  assert.equal(T.settingsHoldSecrets({ calendars: [{ id: 'c', url: ' ' }] }), false);
+  assert.equal(T.settingsHoldSecrets(null), false);
+});
+
+test('P-1 gate: a rotated Outlook token in env mode asks for a save and stays in the settings until the file has it', async () => {
+  const a = fakeAdapter({ [ENV]: '' });
+  const env = await new T.EnvFileStore(a, ENV).load();
+  const vault = new T.SecretVault(null, env);
+  const settings = Object.assign({}, T.DEFAULT_SETTINGS, { secretsBackend: 'env-file', outlookClientId: 'client-1' });
+  let persisted = 0;
+  Object.defineProperty(settings, '_persist', { value: () => { persisted += 1; }, enumerable: false });
+  const s = T.withSecrets(settings, vault);
+  T.saveOutlookTokens(T.outlookTokenSink(s), { accessToken: 'at-1', refreshToken: 'rt-new', expiresIn: 3600 }, 5);
+  assert.equal(settings.outlookRefreshToken, 'rt-new', 'in the live settings until the save moves it');
+  assert.equal(settings.outlookAccessToken, 'at-1');
+  assert.equal(settings.outlookExpiresAt, String(5 + 3600000));
+  assert.equal(s.outlookRefreshToken, 'rt-new', 'and in the copy the run keeps reading');
+  assert.equal(persisted, 1, 'the sink asked for a save, as without a store');
+  await vault.settle();
+  assert.equal(a.files[ENV], '', 'nothing reaches the file before the save');
+  const r = await T.migrateSecretsSettled(settings, vault);
+  assert.deepEqual(r.moved, ['outlookRefreshToken', 'outlookAccessToken', 'outlookExpiresAt']);
+  assert.equal(settings.outlookRefreshToken, '');
+  assert.deepEqual(T.parseEnvText(a.files[ENV]), { OUTLOOK_REFRESH_TOKEN: 'rt-new', OUTLOOK_ACCESS_TOKEN: 'at-1', OUTLOOK_EXPIRES_AT: String(5 + 3600000) });
+  assert.equal(T.outlookSignedIn(T.withSecrets(settings, vault)), true);
+  // Sign-out in env mode clears the file's lines and asks for nothing: the fields were already blank.
+  T.clearOutlookTokens({ live: settings, vault });
+  await vault.settle();
+  assert.equal(persisted, 1);
+  assert.deepEqual(T.parseEnvText(a.files[ENV]), { OUTLOOK_REFRESH_TOKEN: '', OUTLOOK_ACCESS_TOKEN: '', OUTLOOK_EXPIRES_AT: '' });
+  // With a store the sink does not ask: the store held it on the spot.
+  const storage = new FakeSecretStorage();
+  const ks = Object.assign({}, T.DEFAULT_SETTINGS);
+  let p2 = 0;
+  Object.defineProperty(ks, '_persist', { value: () => { p2 += 1; }, enumerable: false });
+  T.saveOutlookTokens(T.outlookTokenSink(T.withSecrets(ks, new T.SecretVault(storage))), { accessToken: 'at', refreshToken: 'rt', expiresIn: 1 }, 0);
+  assert.equal(p2, 0);
+  assert.equal(ks.outlookRefreshToken, '');
+  assert.equal(storage.getSecret(T.fieldSecretKey('outlookRefreshToken')), 'rt');
+});
+
+test('source scan: the tab tells the member once when the env write failed, and the layer still raises no Notice', () => {
+  const tab = code.slice(code.indexOf('class IcorPlannerSettingTab'));
+  const helper = tab.slice(tab.indexOf('const secret = (setting, get, set, placeholder, label)'), tab.indexOf("setName('Secrets').setHeading()"));
+  assert.match(helper, /await this\.plugin\.saveSettings\(\);\n\s*const err = this\.plugin\.secrets\.mode === 'env-file' \? this\.plugin\.envStore\.error : '';/, 'the check runs after the save that moves the key');
+  assert.match(helper, /if \(err && err !== this\._envWriteWarned\) new Notice\('Planner: the env file could not be written; the key stays in data\.json until it can\./, 'one Notice per failure, naming no value');
+  assert.doesNotMatch(helper, /\$\{(v|value|err|secret)\}/, 'the Notice carries neither the value nor the error text');
+  assert.doesNotMatch(helper, /[\u2013\u2014]/, 'no dashes of either length');
 });
