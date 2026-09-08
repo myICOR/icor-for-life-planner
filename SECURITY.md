@@ -75,18 +75,28 @@ The figures below describe the shipped `main.js` on `main` (the 0.9.0 line).
   ID of the member's own Entra app sits beside them in settings and is not a
   secret (a public-client id; there is no client secret anywhere)
 
-Where they live depends on the Obsidian running the plugin. On Obsidian
-1.11.4 or newer (desktop and mobile) they are in Obsidian's secret store,
-`app.secretStorage` (outside the vault and outside `data.json`, so it is
-never synced or committed with your notes; Obsidian's docs describe it as
-"stored in local storage, keyed to the specific vault", not a system
-keyring), under ids prefixed `icor-for-life-planner-`; the matching fields
-in `data.json` are empty, and
-any secret found in `data.json` on load is moved over once and blanked. On
-an older Obsidian they are in the plugin's `data.json` inside the vault, at
+Where they live is a setting (`secretsBackend`, since 0.12.0), and only
+the selected backend is read; there is no fallback from one to the other.
+The default, on Obsidian 1.11.4 or newer (desktop and mobile), is
+Obsidian's keychain, `app.secretStorage` (outside the vault and outside `data.json`,
+so it is never synced or committed with your notes; on desktop an
+encrypted blob per vault whose key the operating system holds, on mobile a per-device native store; Obsidian's docs describe it
+as "stored in local storage, keyed to the specific vault"), under ids
+prefixed `icor-for-life-planner-`. Obsidian's keychain is shared by every
+plugin in the app, which is why every id carries the prefix. The other
+backend is an env file inside the vault (`envFilePath`, default
+`06 AI Team/AI Team Knowledge/.env`): one `KEY=value` line per secret,
+read through the vault adapter, edited one line at a time with every
+other byte preserved; being inside the vault, it travels with whatever
+syncs or commits the vault, which is the member's choice to make. In
+both backends the matching fields in `data.json` are empty, and any
+secret found in `data.json` on load is moved into the selected backend
+once and blanked. On an Obsidian older than 1.11.4 with the default
+setting they are in the plugin's `data.json` inside the vault, at
 `.obsidian/plugins/icor-for-life-planner/data.json`, as in every release
-before 0.9.0. The store is feature-detected; there is no third place. The
-single `icsUrl` key of releases before 0.8.0 is deleted on load.
+before 0.9.0, until the env file is chosen. The single `icsUrl` key of
+releases before 0.8.0 is deleted on load. A value is never written to a
+log, a notice or an error sentence, in any backend.
 
 `data.json` is git-ignored in this repository and is never transmitted anywhere by
 the plugin other than to the services the credential belongs to.
@@ -161,9 +171,12 @@ These are not vulnerabilities and we will close them as such:
   service, and the only storage those versions offer a plugin is `data.json` in
   your vault. If your vault is synced somewhere, those credentials go with it,
   which is a property of your sync setup rather than a flaw in this plugin. On
-  1.11.4 or newer the secrets are in Obsidian's secret storage, outside the
+  1.11.4 or newer the secrets are in Obsidian's keychain, outside the
   vault and never in `data.json`; a secret found in `data.json` there IS in
-  scope. Exfiltration *away*
+  scope. The same holds for the env file backend: you chose a file inside
+  the vault, and where the vault goes is your sync setup; a value leaking
+  from that file into any OTHER file the plugin writes IS in scope.
+  Exfiltration *away*
   from your vault is in scope everywhere; storage *in* it, on an older
   Obsidian, is not.
 - Anyone with filesystem access to your vault being able to read `data.json`. If

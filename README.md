@@ -48,8 +48,8 @@ for defects. It gets fixed fast.
   about ten minutes, once: the step-by-step guide is
   [docs/outlook-setup-guide.md](docs/outlook-setup-guide.md). Nothing
   passes through myICOR: the client id is yours, the tokens are yours, and
-  they live in Obsidian's secret storage, outside the vault and outside
-  `data.json` (or in your vault on an older Obsidian).
+  they live in Obsidian's keychain, outside the vault and outside
+  `data.json` (or in the env file you chose; see "Where your keys live").
   Works on desktop and mobile; the sign-in comes back through an
   `obsidian://` link, with a device code as the fallback.
 - A Planner button on the file-tree toolbar under the sidebar logo, and
@@ -136,6 +136,11 @@ for defects. It gets fixed fast.
 
 ## Network use (disclosure)
 
+An account is required for every synced source: a Todoist account, a
+ClickUp account, a mailbox with an app password, a Microsoft account, a
+calendar that publishes an iCal address. Without one the source is
+simply off; the manual tray and the board need no account at all.
+
 With the matching key configured, the plugin talks to exactly these
 services (reads always; writes only through the two toggles above):
 
@@ -164,19 +169,21 @@ The connection settings, for anyone reading or scripting `data.json`:
 
 | key | meaning | default |
 | --- | --- | --- |
-| `todoistToken`, `clickupToken` | **secret.** The task-source API tokens. On Obsidian 1.11.4 or newer these fields are empty and the values live in Obsidian's secret store (see Secrets below) | empty |
+| `todoistToken`, `clickupToken` | **secret.** The task-source API tokens. On Obsidian 1.11.4 or newer these fields are empty and the values live in Obsidian's keychain or in the env file (see "Where your keys live" below) | empty |
 | `clickupTeamId` | the ClickUp workspace id, optional | empty |
 | `imapHost`, `imapUser` | the mailbox host and address; neither is a secret | `imap.gmail.com`, empty |
-| `imapPassword` | **secret.** The app password; empty here on Obsidian 1.11.4 or newer, where it lives in the secret store | empty |
+| `imapPassword` | **secret.** The app password; empty here on Obsidian 1.11.4 or newer, where it lives in Obsidian's keychain or the env file | empty |
 | `imapPort` | the IMAP port | `993` |
 | `imapSecurity` | `tls` (encrypted from the first byte) or `starttls` (plain connect, upgraded before login, never a plain login) | `tls` |
 | `imapAllowSelfSigned` | accept the host's own certificate; honoured only when the host is loopback, enforced in the transport code, not just in the settings tab | `false` |
 | `outlookClientId` | the Application (client) ID of your own Entra app; a public-client id, not a secret | empty |
 | `outlookTenant` | the sign-in's account segment: `common`, `organizations` or `consumers` | `common` |
-| `outlookRefreshToken`, `outlookAccessToken`, `outlookExpiresAt`, `outlookAccount` | **secret.** The Microsoft sign-in: the refresh token, the short-lived access token with its expiry, and the account name shown in settings. Empty here on Obsidian 1.11.4 or newer, where they live in the secret store; all four cleared by Sign out | empty |
+| `outlookRefreshToken`, `outlookAccessToken`, `outlookExpiresAt`, `outlookAccount` | **secret.** The Microsoft sign-in: the refresh token, the short-lived access token with its expiry, and the account name shown in settings. Empty here on Obsidian 1.11.4 or newer, where they live in Obsidian's keychain or the env file; all four cleared by Sign out | empty |
 | `outlookScopes` | the permissions the last sign-in granted, space-separated; `Mail.ReadWrite` appears once "Complete on source" has been switched on and consented to | empty |
-| `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the **secret** iCal address (empty here on Obsidian 1.11.4 or newer, where it lives in the secret store under the feed's `id`), `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics` (a pasted address) or `graph` (the Outlook calendar, added on sign-in, id `outlook-graph`; it has no address, so `url` stays empty and it is ready when Outlook is signed in). An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and the key is then deleted | empty |
-| `secretsInStore` | `true` once any secret has been written to Obsidian's secret storage. Not a secret; it lets an older Obsidian explain its empty fields | `false` |
+| `calendars` | the calendar feeds, one entry each: `{ id, name, url, color, enabled, kind }`; `url` is the **secret** iCal address (empty here on Obsidian 1.11.4 or newer, where it lives in Obsidian's keychain or the env file under the feed's `id`), `color` is a swatch index 1 to 4 (never a colour value), `kind` is `ics` (a pasted address) or `graph` (the Outlook calendar, added on sign-in, id `outlook-graph`; it has no address, so `url` stays empty and it is ready when Outlook is signed in). An `icsUrl` from a release before 0.8.0 becomes the first entry on the first launch and the key is then deleted | empty |
+| `secretsInStore` | `true` once any secret has been written to Obsidian's keychain or the env file. Not a secret; it lets an older Obsidian explain its empty fields | `false` |
+| `secretsBackend` | where the secrets live: `secret-storage` (Obsidian's keychain) or `env-file`. Only the selected one is read; see "Where your keys live" | `secret-storage` |
+| `envFilePath` | the env file, relative to the vault root, used only while `secretsBackend` is `env-file` | `06 AI Team/AI Team Knowledge/.env` |
 | `plannerFolder` | the room folder every path derives from (`<folder>/Todoist`, `<folder>/Calendar Events.md`, `<folder>/Routines`, `<folder>/Habits`); on launch a missing folder is replaced by the one top-level folder whose name ends in "planner", if there is exactly one | `02 Planner` |
 | `routinesEnabled` | show routine blocks on the board and in the agenda; off hides them, the notes stay | `true` |
 | `routineDefaults` | the times a new routine starts with, per type: `{ morning: { start, end }, afternoon: { start, end }, evening: { start, end } }`, each `HH:MM`; each routine keeps its own times in its note | `06:30` to `07:30`, `13:00` to `13:30`, `21:00` to `21:45` |
@@ -191,36 +198,66 @@ The connection settings, for anyone reading or scripting `data.json`:
 The board preferences (sync interval, weekend, split, lunch, workday,
 strip, the two-way toggles) sit beside them under their own names.
 
-## Secrets
+## Where your keys live
 
 Five things the plugin holds are secrets: the Todoist token, the ClickUp
 token, the mailbox app password, every calendar feed address (a Google
 secret address or a published Apple, Proton or Outlook link is a bearer
 credential: anyone holding it can read the calendar), and the Outlook
 sign-in (its refresh token, the short-lived access token with its expiry,
-and the account name). Where they live depends on the Obsidian you run:
+and the account name). Settings, ICOR for Life - Planner, "Where they
+live" picks one of two places, and only the selected one is ever read:
 
-- **Obsidian 1.11.4 or newer (desktop and mobile):** in Obsidian's secret
-  storage (outside the vault and outside `data.json`, so it is never
-  synced or committed with your notes), under keys prefixed
-  `icor-for-life-planner-`. Obsidian's own docs describe it as "stored
-  in local storage, keyed to the specific vault"; it is not a system
-  keyring. The fields in `data.json` are empty. On the first launch after
-  updating, any secret still in `data.json` is moved over once and its
-  field blanked; nothing to do. The settings tab says "Secrets are stored
-  in Obsidian's secret storage".
-- **Older Obsidian:** in this plugin's `data.json`, as before. The
-  settings tab says so in one line. If a newer Obsidian on another
-  machine has already moved this vault's secrets into its secret storage,
-  the fields here are empty; paste them again or update Obsidian.
+- **Obsidian's keychain (Settings, General, Keychain), the default.**
+  Outside the vault and outside `data.json`, so it is never synced or
+  committed with your notes; on desktop an encrypted blob per vault (the
+  operating system holds the key), on iOS and Android a per-device native
+  store. Obsidian's own docs describe it as "stored in local storage,
+  keyed to the specific vault". Every entry is prefixed
+  `icor-for-life-planner-` (for example
+  `icor-for-life-planner-todoist-token`), because every plugin can read
+  every entry. Needs Obsidian 1.11.4 or newer; on an older Obsidian the
+  option is shown but cannot be picked, and the keys stay in this
+  plugin's `data.json` as in every release since 0.9.0, until you choose
+  the env file.
+- **An env file in the vault.** One `KEY=value` line per secret in the
+  file named by "Env file" (default `06 AI Team/AI Team Knowledge/.env`,
+  relative to the vault root). The plugin reads the file at launch,
+  before every sync and whenever the settings tab opens; when you save a
+  key in settings it rewrites exactly that one line (or appends it) and
+  leaves every other byte of the file as it was, comments included. The
+  first line with a key wins, both for reading and for the line that is
+  edited. No quotes are written; a quoted value is read without them; `#`
+  starts a comment only at the start of a line; nothing is interpolated.
+  The file is inside your vault, so whatever syncs or commits your vault
+  carries it: keep it in `.gitignore` and out of any sync you do not
+  trust. The keys:
 
-The secret store is feature-detected at load, so the plugin's minimum
-Obsidian version is unchanged. Nothing the plugin writes into the vault
-ever carries a secret: not the item notes, not the calendar cache, not a
-log line. The plugin also writes a `.gitignore` guard into the vault so
-its folder never reaches your vault's git repository, and this
-repository ignores `data.json` itself. Treat an iCal address like a
-password (it is one).
+  | key | what |
+  | --- | --- |
+  | `TODOIST_TOKEN` | the Todoist API token |
+  | `CLICKUP_TOKEN` | the ClickUp personal API token |
+  | `IMAP_PASSWORD` | the mailbox app password |
+  | `OUTLOOK_REFRESH_TOKEN` | the Microsoft sign-in (the credential) |
+  | `OUTLOOK_ACCESS_TOKEN`, `OUTLOOK_EXPIRES_AT`, `OUTLOOK_ACCOUNT` | the short-lived access token, its expiry, and the account name; they move together with the access token |
+  | `PLANNER_CALENDAR_<ID>` | the iCal address of the calendar with that id, upper-cased (`cal-1` becomes `PLANNER_CALENDAR_CAL_1`) |
+
+Switching the backend moves nothing by itself. Under the switch the
+settings tab lists every key with where a value exists ("Stored in
+Obsidian's keychain", "Stored in the env file", "Not set") and, for a key
+that sits in the backend not in use, a "Move to ..." button that copies
+it into the selected backend and blanks it where it was; "Move all"
+does that for every key at once. The corresponding `data.json` settings
+are `secretsBackend` and `envFilePath`. On the first launch after an
+update, any secret still in `data.json` is moved into the selected
+backend once and its field blanked; nothing to do.
+
+Nothing the plugin writes into the vault ever carries a secret: not the
+item notes, not the calendar cache, not a log line, not a notice (the
+env file is the one exception, and it is the place you chose). The
+plugin also writes a `.gitignore` guard into the vault so its own folder
+never reaches your vault's git repository, and this repository ignores
+`data.json` itself. Treat an iCal address like a password (it is one).
 
 ## The frontmatter contract (for people and agents)
 
@@ -484,9 +521,10 @@ the cache, its events render pale and pulsing on the board.
 Requires Obsidian 1.6.6 or newer (0.10.0 deletes a habit note through
 Obsidian's own trash, an API of that release; 0.9.x ran on 1.4.0). On
 1.11.4 or newer your tokens,
-password and feed addresses are kept in Obsidian's secret storage
+password and feed addresses are kept in Obsidian's keychain
 (outside the vault and outside `data.json`, so they are never synced or
-committed with your notes) instead of `data.json` (see Secrets).
+committed with your notes) instead of `data.json`, or in an env file in
+the vault if you choose that (see "Where your keys live").
 
 1. Copy `main.js`, `manifest.json` and `styles.css` from the latest
    release into `.obsidian/plugins/icor-for-life-planner/` in your vault.
@@ -514,8 +552,10 @@ differences:
   sync. The IMAP settings section itself only appears on the desktop app;
   on mobile it is replaced by one line saying so, rather than fields that
   would fail at the first sync.
-- Secrets live in Obsidian's per-device secret store (see Secrets above)
-  and never travel with vault sync. A source connected on one device
+- With the default backend, secrets live in Obsidian's keychain, which is
+  per device (see "Where your keys live") and never travels with vault
+  sync; with the env file they travel wherever the vault does. A source
+  connected on one device
   shows "Not connected on this device." with a "Connect this device"
   button on a fresh one, rather than the plain "Not connected." a
   genuinely never-configured vault shows: the same fields, filled in

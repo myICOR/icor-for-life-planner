@@ -216,6 +216,10 @@ function sourceConfigured(settings, source) {
   return c ? !!c.configured(settings || {}) : false;
 }
 
+// The env file the secrets can live in instead of Obsidian's keychain
+// (0.12.0): vault-relative, the AI team's own key file by default.
+const DEFAULT_ENV_FILE_PATH = '06 AI Team/AI Team Knowledge/.env';
+
 const DEFAULT_SETTINGS = {
   // Where the planner lives in the vault: the room folder. Every path the
   // plugin reads or writes derives from this one value (plannerPaths); a
@@ -261,6 +265,15 @@ const DEFAULT_SETTINGS = {
   // (0.9.0). Never a secret itself; it lets an older Obsidian opening this
   // vault say why its fields are empty (secretsNoteText).
   secretsInStore: false,
+  // Where the secrets live (0.12.0): 'secret-storage' (Obsidian's keychain,
+  // the default wherever Obsidian offers it) or 'env-file' (KEY=value lines
+  // in the file at envFilePath, inside the vault). The selected backend is
+  // the only one read at runtime; choosing the other moves nothing by
+  // itself, the settings tab has a Move button per key. On an Obsidian
+  // without the store, 'secret-storage' still means data.json, as in every
+  // release since 0.9.0, until the env file is chosen.
+  secretsBackend: 'secret-storage',
+  envFilePath: DEFAULT_ENV_FILE_PATH,
   syncMinutes: 10,
   showWeekend: false,
   // How dates and times are shown (2026-09-07): moment tokens, blank by
@@ -389,28 +402,45 @@ function secretStorageUsable(storage) {
 }
 
 class SecretVault {
-  constructor(storage) { this.storage = secretStorageUsable(storage) ? storage : null; }
-  get mode() { return this.storage ? 'store' : 'data-json'; }
-  available() { return !!this.storage; }
+  // `storage` is Obsidian's store (feature-detected). `env` is an
+  // EnvFileStore (0.12.0); when it is given it IS the backend and the store
+  // is ignored, because the selected backend is the only one read. There is
+  // no fallback from one to the other: a fallback hides a misconfiguration.
+  constructor(storage, env) {
+    this.env = secretStorageUsable(env) ? env : null;
+    this.storage = !this.env && secretStorageUsable(storage) ? storage : null;
+  }
+  get mode() { return this.env ? 'env-file' : (this.storage ? 'store' : 'data-json'); }
+  // The settings value this vault answers to, or 'data-json' when neither
+  // backend is there (an older Obsidian with the default setting).
+  get backend() { return this.env ? 'env-file' : (this.storage ? 'secret-storage' : 'data-json'); }
+  available() { return !!(this.env || this.storage); }
+  target() { return this.env || this.storage; }
   // '' when absent, unreadable, or cleared; never null, never a throw.
   get(key) {
-    if (!this.storage) return '';
-    try { return trimmed(this.storage.getSecret(key)); } catch { return ''; }
+    const t = this.target();
+    if (!t) return '';
+    try { return trimmed(t.getSecret(key)); } catch { return ''; }
   }
-  // true when the store holds the value now. false means the caller must
+  // true when the backend holds the value now. false means the caller must
   // keep the value where it was: a blank is written to data.json only after
-  // the store accepted the secret.
+  // the backend accepted the secret.
   set(key, value) {
-    if (!this.storage) return false;
+    const t = this.target();
+    if (!t) return false;
     const v = trimmed(value);
     if (!v) return this.delete(key);
-    try { this.storage.setSecret(key, v); return true; } catch { return false; }
+    try { t.setSecret(key, v); return true; } catch { return false; }
   }
   delete(key) {
-    if (!this.storage) return false;
+    const t = this.target();
+    if (!t) return false;
     if (this.get(key) === '') return true;
-    try { this.storage.setSecret(key, ''); return true; } catch { return false; }
+    try { t.setSecret(key, ''); return true; } catch { return false; }
   }
+  // Resolves once every write the env file has queued is on disk. A store
+  // write is synchronous, so there the promise is already settled.
+  settle() { return this.env && typeof this.env.settle === 'function' ? this.env.settle() : Promise.resolve(); }
 }
 
 // The address of one feed: the entry's own url when it has one (data-json
@@ -537,14 +567,259 @@ function adoptSettings(loaded, vault) {
   return { settings, changed: migrated !== raw || secrets.changed, moved: secrets.moved };
 }
 
-// The settings tab's one line on where the secrets are.
-function secretsNoteText(mode, secretsInStore) {
-  if (mode === 'store') return 'Secrets are stored in Obsidian\'s secret storage (outside the vault and outside data.json, so they are never synced or committed with your notes).';
-  const base = 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s secret storage, outside the vault).';
+// The settings tab's one line on where the secrets are. The store is named
+// the way Obsidian names it, "Obsidian's keychain", and the member is
+// pointed at the section by its path (Settings, General, Keychain). It is
+// never called the operating system's own store, because it is not one: an
+// encrypted blob per vault on desktop, a per-device native store on mobile,
+// in both cases outside the vault and outside data.json.
+function secretsNoteText(mode, secretsInStore, envPath) {
+  if (mode === 'env-file') return `Secrets are stored in the env file at ${trimmed(envPath) || DEFAULT_ENV_FILE_PATH} (inside the vault, one KEY=value line each). Only that file is read while it is selected; Obsidian's keychain is not consulted.`;
+  if (mode === 'store') return 'Secrets are stored in Obsidian\'s keychain (Settings, General, Keychain): outside the vault and outside data.json, so they are never synced or committed with your notes.';
+  const base = 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s keychain, outside the vault; on this Obsidian, choose the env file above to move them out of data.json).';
   if (secretsInStore) {
-    return `${base} A newer Obsidian moved this vault's secrets into its secret storage; this version cannot read them, so paste them again here or update Obsidian.`;
+    return `${base} A newer Obsidian moved this vault's secrets into its keychain; this version cannot read them, so paste them again here or update Obsidian.`;
   }
   return base;
+}
+
+/* ---- the env file backend (0.12.0) ---------------------------------------
+ * KEY=value lines in one file inside the vault, read and written through
+ * the vault adapter (desktop and mobile alike; a dotfile is fine, the
+ * adapter does not care what the file explorer hides). The parser: blank
+ * lines and `#` comments skipped, an `export ` prefix tolerated, the key
+ * [A-Za-z_][A-Za-z0-9_]*, the value everything after the first `=` with
+ * the surrounding whitespace and one pair of matching quotes dropped, no
+ * interpolation, and the FIRST occurrence of a key wins (which is also the
+ * line the writer edits, so reader and writer agree). The writer changes
+ * exactly one line, or appends one; every other byte of the file comes back
+ * as it went in, CRLF included. A value is never logged, never put in a
+ * Notice, never part of an error sentence.
+ */
+const SECRETS_BACKENDS = ['secret-storage', 'env-file'];
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_LINE_RE = /^(\s*)(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
+const BACKEND_LABELS = { 'secret-storage': 'Obsidian\'s keychain', 'env-file': 'the env file', 'data-json': 'this plugin\'s data.json' };
+
+function normalizeSecretsBackend(v) { return v === 'env-file' ? 'env-file' : 'secret-storage'; }
+function secretsBackendLabel(backend) { return BACKEND_LABELS[backend] || BACKEND_LABELS['data-json']; }
+
+// A vault-relative file path: forward slashes, no leading slash, no `..`.
+function normalizeEnvFilePath(v) {
+  const raw = trimmed(v).replace(/\\/g, '/');
+  if (!raw) return { ok: false, path: '', error: `Enter a path inside the vault, for example ${DEFAULT_ENV_FILE_PATH}.` };
+  if (/^([a-zA-Z]:)?\//.test(raw) || raw.startsWith('~')) return { ok: false, path: '', error: 'The path is relative to the vault root, not an absolute path.' };
+  const parts = raw.split('/').filter((p) => p !== '' && p !== '.');
+  if (parts.some((p) => p === '..')) return { ok: false, path: '', error: 'The path must stay inside the vault (no "..").' };
+  if (!parts.length) return { ok: false, path: '', error: 'Enter a file name, not a folder.' };
+  return { ok: true, path: parts.join('/'), error: '' };
+}
+
+// The env key for a store id: the suffix after the plugin prefix in upper
+// snake case (todoist-token becomes TODOIST_TOKEN). A calendar feed's
+// address keeps a PLANNER_ prefix, because the feed id is the member's own.
+function envKeyFor(secretId) {
+  const id = String(secretId == null ? '' : secretId);
+  const suffix = id.startsWith(SECRET_KEY_PREFIX) ? id.slice(SECRET_KEY_PREFIX.length) : id;
+  const snake = suffix.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase();
+  const key = suffix.startsWith('calendar-') ? `PLANNER_${snake}` : snake;
+  if (!ENV_KEY_RE.test(key)) throw new Error('not an env key');
+  return key;
+}
+
+function parseEnvText(text) {
+  const out = {};
+  for (const raw of String(text == null ? '' : text).split('\n')) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const m = ENV_LINE_RE.exec(line);
+    if (!m) continue;
+    const key = m[2];
+    if (Object.prototype.hasOwnProperty.call(out, key)) continue;
+    let v = m[3].trim();
+    if (v.length >= 2 && (v[0] === '"' || v[0] === '\'') && v[v.length - 1] === v[0]) v = v.slice(1, -1);
+    out[key] = v;
+  }
+  return out;
+}
+
+// The line the plugin writes: bare, unquoted; a value cannot carry a line break.
+function envLineFor(key, value) {
+  if (!ENV_KEY_RE.test(String(key))) throw new Error('not an env key');
+  return `${key}=${String(value == null ? '' : value).replace(/[\r\n]+/g, '')}`;
+}
+
+// The file with `key` set to `value`: the first matching line rewritten
+// (its own line ending kept), else one line appended, after a separator
+// when the file does not end in one. Every byte before the change is the
+// byte that came in. The same text back when nothing has to change: the
+// line already reads so, or the key is absent and the value is empty (an
+// empty value is never appended; clearing a present key leaves `KEY=`).
+function upsertEnvLine(text, key, value) {
+  const src = String(text == null ? '' : text);
+  const line = envLineFor(key, value);
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const cr = lines[i].endsWith('\r');
+    const bare = cr ? lines[i].slice(0, -1) : lines[i];
+    const m = ENV_LINE_RE.exec(bare);
+    if (!m || m[2] !== key) continue;
+    if (bare === line) return src;
+    lines[i] = line + (cr ? '\r' : '');
+    return lines.join('\n');
+  }
+  if (String(value == null ? '' : value) === '') return src;
+  const nl = src.includes('\r\n') ? '\r\n' : '\n';
+  return src + (src === '' || src.endsWith('\n') ? '' : nl) + line + nl;
+}
+
+// A failure sentence that cannot carry a value: the error's message only.
+function envErrorText(e) { return trimmed(e && e.message ? e.message : e) || 'unknown error'; }
+
+// The env file seen through the store interface (getSecret, setSecret,
+// listSecrets), so SecretVault wraps it exactly like Obsidian's store. Reads
+// are from memory (load once, reload before a sync and before the settings
+// tab draws); a write lands in memory at once and on disk through one
+// queue, each write reading the file again first so lines another tool
+// wrote meanwhile survive. `error` is the last read or write failure.
+class EnvFileStore {
+  constructor(adapter, path) {
+    this.adapter = adapter || null;
+    this.path = trimmed(path) || DEFAULT_ENV_FILE_PATH;
+    this.values = {};
+    this.loaded = false;
+    this.exists = false;
+    this.error = '';
+    this._chain = Promise.resolve();
+  }
+  async _present() {
+    if (!this.adapter) return false;
+    if (typeof this.adapter.exists !== 'function') return true;
+    try { return !!(await this.adapter.exists(this.path)); } catch { return true; }
+  }
+  // Read the file into memory, after any queued write has landed. A missing
+  // file is an empty store, not an error; an unreadable one is an error and
+  // an empty store (never a stale one).
+  async load() {
+    await this.settle();
+    let text = '';
+    this.exists = false;
+    this.error = '';
+    try {
+      if (await this._present()) { text = await this.adapter.read(this.path); this.exists = true; }
+    } catch (e) { this.error = envErrorText(e); text = ''; }
+    this.values = parseEnvText(text);
+    this.loaded = true;
+    return this;
+  }
+  getSecret(id) {
+    const k = envKeyFor(id);
+    return Object.prototype.hasOwnProperty.call(this.values, k) ? this.values[k] : null;
+  }
+  listSecrets() { return Object.keys(this.values); }
+  setSecret(id, value) {
+    const k = envKeyFor(id);
+    const v = String(value == null ? '' : value).replace(/[\r\n]+/g, '');
+    this.values[k] = v;
+    this._chain = this._chain.then(() => this._flush(k, v)).catch((e) => { this.error = envErrorText(e); });
+  }
+  async _flush(key, value) {
+    this.error = '';
+    if (!this.adapter) throw new Error('no vault adapter');
+    const cur = (await this._present()) ? await this.adapter.read(this.path) : '';
+    const next = upsertEnvLine(cur, key, value);
+    if (next === cur) { this.exists = this.exists || cur !== ''; return; }
+    await this.adapter.write(this.path, next);
+    this.exists = true;
+  }
+  settle() { return this._chain; }
+}
+
+// The settings object seen through the same interface, so a value still in
+// data.json can be moved like any other. An id resolves to its field or to
+// the calendar entry it names; anything else is unknown (null, no write).
+function dataJsonStore(settings) {
+  const s = settings || {};
+  const slot = (id) => {
+    for (const field of SECRET_FIELD_NAMES) if (fieldSecretKey(field) === id) return { obj: s, prop: field };
+    for (const f of (Array.isArray(s.calendars) ? s.calendars : [])) {
+      if (f && typeof f === 'object' && f.id && calendarSecretKey(f.id) === id) return { obj: f, prop: 'url' };
+    }
+    return null;
+  };
+  return {
+    getSecret(id) { const t = slot(id); return t ? trimmed(t.obj[t.prop]) : null; },
+    setSecret(id, value) { const t = slot(id); if (!t) throw new Error('unknown secret'); t.obj[t.prop] = trimmed(value); },
+    listSecrets() { return []; },
+  };
+}
+
+// Which backends hold a value for one id. `holders` maps a backend name to
+// a store-like object, or null when that backend is not there.
+function secretPresence(id, holders) {
+  const out = [];
+  for (const name of Object.keys(holders || {})) {
+    const h = holders[name];
+    if (!h) continue;
+    let v = null;
+    try { v = h.getSecret(id); } catch { v = null; }
+    if (trimmed(v)) out.push(name);
+  }
+  return out;
+}
+
+// Copy one secret from one backend into another, then blank the source. The
+// source is blanked only after the target holds the value: for the env file
+// that means after its write reached disk without an error. false when the
+// source has nothing or the target refused; the source is then untouched.
+async function moveSecret(id, from, to) {
+  if (!from || !to || from === to) return false;
+  let v = '';
+  try { v = trimmed(from.getSecret(id)); } catch { v = ''; }
+  if (!v) return false;
+  try { to.setSecret(id, v); } catch { return false; }
+  if (typeof to.settle === 'function') {
+    await to.settle();
+    if (to.error) return false;
+  }
+  try { from.setSecret(id, ''); } catch { /* the target holds it; the status row shows both until the source is cleared */ }
+  if (typeof from.settle === 'function') await from.settle();
+  return true;
+}
+
+// The rows of the settings tab's key list: the five credentials by name,
+// then every pasted calendar address. The Outlook expiry and the account
+// name travel with the access token (one sign-in, four keys).
+const SECRET_SLOT_LABELS = {
+  todoistToken: 'Todoist API token',
+  clickupToken: 'ClickUp API token',
+  imapPassword: 'Mailbox app password',
+  outlookRefreshToken: 'Outlook refresh token',
+  outlookAccessToken: 'Outlook access token',
+};
+const SECRET_SLOT_COMPANIONS = { outlookAccessToken: ['outlookExpiresAt', 'outlookAccount'] };
+function secretSlots(settings) {
+  const slots = Object.keys(SECRET_SLOT_LABELS).map((field) => {
+    const id = fieldSecretKey(field);
+    return { id, label: SECRET_SLOT_LABELS[field], envKey: envKeyFor(id), ids: [field].concat(SECRET_SLOT_COMPANIONS[field] || []).map(fieldSecretKey) };
+  });
+  for (const f of calendarFeeds(settings)) {
+    if (!f || !f.id || f.kind === 'graph') continue;
+    const id = calendarSecretKey(f.id);
+    slots.push({ id, label: `Calendar address: ${f.name || f.id}`, envKey: envKeyFor(id), ids: [id] });
+  }
+  return slots;
+}
+
+// One key's status line: where a value exists, and whether the copy in the
+// selected backend is the one in use.
+function secretStatusText(present, selected) {
+  const names = present.map(secretsBackendLabel);
+  if (!names.length) return 'Not set.';
+  const where = names.length === 1 ? `Stored in ${names[0]}.` : `Stored in ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}.`;
+  if (present.includes(selected)) return names.length > 1 ? `${where} The copy in ${secretsBackendLabel(selected)} is the one in use.` : where;
+  return `${where} Not in ${secretsBackendLabel(selected)}, the backend in use, so it is not read until it is moved.`;
 }
 
 const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
@@ -5260,11 +5535,20 @@ class IcorPlannerPlugin extends Plugin {
     // adoptSettings: the calendar migration, the secret migration (each
     // secret data.json still holds moves into the store and its field is
     // blanked), the defaults. One write back when anything moved.
-    this.secrets = new SecretVault(this.app && this.app.secretStorage);
+    // 0.12.0: the backend is the one data.json names. The env file is read
+    // only while it is the selected one; the store is feature-detected once.
+    this.secretStorage = secretStorageUsable(this.app && this.app.secretStorage) ? this.app.secretStorage : null;
     const loaded = (await this.loadData()) || {};
+    const backend = normalizeSecretsBackend(loaded.secretsBackend);
+    const envPath = normalizeEnvFilePath(loaded.envFilePath).path || DEFAULT_ENV_FILE_PATH;
+    this.envStore = this.envStoreFor(envPath);
+    if (backend === 'env-file') await this.envStore.load();
+    this.secrets = this.vaultFor(backend);
     const adopted = adoptSettings(loaded, this.secrets);
     this.settings = adopted.settings;
-    if (adopted.changed) await this.persistSettings();
+    this.settings.secretsBackend = backend;
+    this.settings.envFilePath = envPath;
+    if (adopted.changed || loaded.secretsBackend !== backend || loaded.envFilePath !== envPath) await this.persistSettings();
     // The display formats are resolved at every paint from the live
     // settings and the Templates plugin's options, never cached.
     setDisplayFormatSource(() => resolveDisplayFormats(this.settings, this.app));
@@ -5391,6 +5675,56 @@ class IcorPlannerPlugin extends Plugin {
   async persistSettings() {
     migrateSecrets(this.settings, this.secrets);
     await this.saveData(this.settings);
+    await this.secrets.settle();
+  }
+
+  /* ---- the secrets backend (0.12.0) ---- */
+  envStoreFor(path) { return new EnvFileStore(this.app && this.app.vault ? this.app.vault.adapter : null, path); }
+  // The vault for one backend and nothing else: no fallback.
+  vaultFor(backend) {
+    return normalizeSecretsBackend(backend) === 'env-file' ? new SecretVault(null, this.envStore) : new SecretVault(this.secretStorage);
+  }
+  // Every place a secret can be, by backend name, for the settings tab's
+  // status rows and the moves. data.json is a source only (never selected).
+  secretHolders() {
+    return { 'secret-storage': this.secretStorage, 'env-file': this.envStore, 'data-json': dataJsonStore(this.settings) };
+  }
+  // Choosing a backend moves nothing: the tab offers a Move per key.
+  async setSecretsBackend(backend) {
+    const b = normalizeSecretsBackend(backend);
+    this.settings.secretsBackend = b;
+    if (b === 'env-file') await this.envStore.load();
+    this.secrets = this.vaultFor(b);
+    await this.saveSettings();
+  }
+  async setEnvFilePath(path) {
+    const n = normalizeEnvFilePath(path);
+    if (!n.ok) return false;
+    this.settings.envFilePath = n.path;
+    await this.envStore.settle();
+    this.envStore = this.envStoreFor(n.path);
+    if (this.secrets.mode === 'env-file') {
+      await this.envStore.load();
+      this.secrets = this.vaultFor('env-file');
+    }
+    await this.saveSettings();
+    return true;
+  }
+  // Move the keys of the given slots from one backend into the selected
+  // one. Returns how many keys moved; the values never appear anywhere.
+  async moveSecretsFrom(from, slots) {
+    const holders = this.secretHolders();
+    const to = this.secrets.backend;
+    if (to === 'data-json' || !holders[to] || !holders[from] || from === to) return 0;
+    let n = 0;
+    for (const slot of slots || []) {
+      for (const id of slot.ids || [slot.id]) {
+        if (await moveSecret(id, holders[from], holders[to])) n += 1;
+      }
+    }
+    if (n) this.settings.secretsInStore = true;
+    await this.saveSettings();
+    return n;
   }
 
   // Boot: if the configured folder is missing but exactly one top-level
@@ -5796,6 +6130,7 @@ class IcorPlannerPlugin extends Plugin {
     this.emitModelChanged();
     try {
       await this.ensureFolders();
+      if (this.secrets.mode === 'env-file') await this.envStore.load();
       const s = this.withSecrets();
       // Every task connector starts at once, in registry order; results are
       // awaited and applied in that same order.
@@ -9007,14 +9342,95 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       });
     };
 
-    // Where the secrets are, in one sentence, before the first field that
-    // takes one.
+    // Where the secrets are: the backend, the env file, then one status row
+    // per key with a Move button when a value sits in the other backend
+    // (0.12.0). All of it before the first field that takes a secret.
     const secrets = this.plugin.secrets;
+    const storedIn = ` Stored in ${secretsBackendLabel(secrets.backend)}.`;
     new Setting(containerEl).setName('Secrets').setHeading();
-    new Setting(containerEl)
+    const whereSetting = new Setting(containerEl)
       .setName('Where they live')
-      .setDesc(secretsNoteText(secrets.mode, this.plugin.settings.secretsInStore === true))
+      .setDesc(secretsNoteText(secrets.mode, this.plugin.settings.secretsInStore === true, this.plugin.settings.envFilePath))
       .setClass('iplan-settings-secrets');
+    whereSetting.addDropdown((d) => {
+      const hasStore = !!this.plugin.secretStorage;
+      d.addOption('secret-storage', hasStore ? 'Obsidian\'s keychain' : 'Obsidian\'s keychain (needs Obsidian 1.11.4 or newer)');
+      d.addOption('env-file', 'An env file in the vault');
+      if (!hasStore) {
+        // No store to choose: the option stays visible, so the member sees
+        // what a newer Obsidian would offer, and cannot be picked.
+        const opt = d.selectEl.querySelector('option[value="secret-storage"]');
+        if (opt) opt.disabled = true;
+      }
+      d.setValue(normalizeSecretsBackend(this.plugin.settings.secretsBackend));
+      d.selectEl.setAttribute('aria-label', 'Where the secrets live');
+      d.onChange(async (v) => { await this.plugin.setSecretsBackend(v); this.display(); });
+    });
+    const envSetting = new Setting(containerEl)
+      .setName('Env file')
+      .setDesc('Checking the file.');
+    envSetting.descEl.setAttribute('aria-live', 'polite');
+    const renderEnvStatus = () => {
+      const store = this.plugin.envStore;
+      envSetting.descEl.toggleClass('is-failed', !!store.error);
+      const lead = 'A path inside the vault, one KEY=value line per secret; every other line is left as it is. Read only while the env file is selected above.';
+      if (store.error) envSetting.setDesc(`${lead} Could not read ${store.path}: ${store.error}`);
+      else if (store.exists) envSetting.setDesc(`${lead} Found: ${store.path}.`);
+      else envSetting.setDesc(`${lead} Not found: ${store.path}. It is created on the first save.`);
+    };
+    const keysEl = containerEl.createDiv({ cls: 'iplan-settings-keys' });
+    const renderKeys = () => {
+      keysEl.empty();
+      const holders = this.plugin.secretHolders();
+      const selected = this.plugin.secrets.backend;
+      const canMove = selected !== 'data-json' && !!holders[selected];
+      const movable = [];
+      for (const slot of secretSlots(this.plugin.settings)) {
+        const present = secretPresence(slot.id, holders);
+        const row = new Setting(keysEl).setName(slot.label).setDesc(`${secretStatusText(present, selected)} Env key: ${slot.envKey}.`);
+        const from = present.find((b) => b !== selected);
+        if (!from || !canMove) continue;
+        movable.push({ slot, from });
+        row.addButton((b) => b.setButtonText(`Move to ${secretsBackendLabel(selected)}`).onClick(async () => {
+          b.setDisabled(true);
+          const n = await this.plugin.moveSecretsFrom(from, [slot]);
+          new Notice(n ? `Planner: moved ${slot.label} to ${secretsBackendLabel(selected)}.` : `Planner: ${slot.label} was not moved; see the Env file line.`);
+          await refreshSecrets();
+        }));
+      }
+      if (movable.length > 1) {
+        new Setting(keysEl)
+          .setName('Move every key')
+          .setDesc(`Moves the ${movable.length} keys above into ${secretsBackendLabel(selected)} and blanks them where they were.`)
+          .addButton((b) => b.setButtonText(`Move all to ${secretsBackendLabel(selected)}`).onClick(async () => {
+            b.setDisabled(true);
+            let n = 0;
+            for (const from of [...new Set(movable.map((m) => m.from))]) {
+              n += await this.plugin.moveSecretsFrom(from, movable.filter((m) => m.from === from).map((m) => m.slot));
+            }
+            new Notice(`Planner: moved ${n} ${n === 1 ? 'key' : 'keys'} to ${secretsBackendLabel(selected)}.`);
+            await refreshSecrets();
+          }));
+      }
+    };
+    const refreshSecrets = async () => {
+      await this.plugin.envStore.load();
+      renderEnvStatus();
+      renderKeys();
+    };
+    envSetting.addText((t) => {
+      t.setPlaceholder(DEFAULT_ENV_FILE_PATH).setValue(this.plugin.settings.envFilePath || '');
+      t.inputEl.autocomplete = 'off';
+      t.inputEl.spellcheck = false;
+      t.inputEl.setAttribute('aria-label', 'Env file path, relative to the vault');
+      t.onChange(async (v) => {
+        const n = normalizeEnvFilePath(v);
+        if (!n.ok) { envSetting.descEl.toggleClass('is-failed', true); envSetting.setDesc(n.error); return; }
+        await this.plugin.setEnvFilePath(n.path);
+        await refreshSecrets();
+      });
+    });
+    refreshSecrets();
 
     // The planner folder. Typing validates live (announced); Apply commits,
     // moving the existing notes with a link-safe rename when the new folder
@@ -9067,14 +9483,14 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Todoist').setHeading();
     secret(new Setting(containerEl)
       .setName('API token')
-      .setDesc('Todoist -> Settings -> Integrations -> Developer -> API token.'),
+      .setDesc(`Todoist -> Settings -> Integrations -> Developer -> API token.${storedIn}`),
       () => readSecret(this.plugin.settings, secrets, 'todoistToken'),
       (v) => { writeSecret(this.plugin.settings, secrets, 'todoistToken', v); }, 'paste token');
 
     new Setting(containerEl).setName('ClickUp').setHeading();
     secret(new Setting(containerEl)
       .setName('Personal API token')
-      .setDesc('ClickUp -> avatar -> Settings -> Apps -> API Token. Starts with pk_.'),
+      .setDesc(`ClickUp -> avatar -> Settings -> Apps -> API Token. Starts with pk_.${storedIn}`),
       () => readSecret(this.plugin.settings, secrets, 'clickupToken'),
       (v) => { writeSecret(this.plugin.settings, secrets, 'clickupToken', v); }, 'pk_...');
     new Setting(containerEl)
@@ -9219,7 +9635,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           .onChange(async (v) => { this.plugin.settings.imapUser = v.trim(); await this.plugin.saveSettings(); }));
       secret(new Setting(containerEl)
         .setName('App password')
-        .setDesc('Never your normal password. Paste the app password without spaces.'),
+        .setDesc(`Never your normal password. Paste the app password without spaces.${storedIn}`),
         () => readSecret(this.plugin.settings, secrets, 'imapPassword'),
         (v) => { writeSecret(this.plugin.settings, secrets, 'imapPassword', v.replace(/\s+/g, '')); }, 'app password');
       // Test connection: the probe logs in and straight out, so a wrong host,
@@ -9762,6 +10178,10 @@ module.exports.__test = {
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
+  // the env file backend (0.12.0)
+  DEFAULT_ENV_FILE_PATH, SECRETS_BACKENDS, BACKEND_LABELS, normalizeSecretsBackend, secretsBackendLabel, normalizeEnvFilePath,
+  envKeyFor, parseEnvText, envLineFor, upsertEnvLine, envErrorText, EnvFileStore, dataJsonStore, secretPresence, moveSecret,
+  SECRET_SLOT_LABELS, SECRET_SLOT_COMPANIONS, secretSlots, secretStatusText,
   // Outlook (2026-09-06)
   OUTLOOK_REDIRECT_URI, OUTLOOK_PROTOCOL_ACTION, OUTLOOK_LOGIN_HOST, GRAPH_BASE, OUTLOOK_TENANTS, OUTLOOK_NOTICE,
   OUTLOOK_GUIDE_URL, OUTLOOK_REVOKE_URLS, OUTLOOK_SCOPES_READ, OUTLOOK_SCOPES_WRITE, OUTLOOK_TOKEN_SLACK_MS,

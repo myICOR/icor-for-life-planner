@@ -276,8 +276,8 @@ test('adoptSettings: what onload does with the bytes, in order, and whether it m
 });
 
 test('the settings tab says where the secrets are, in one line per mode', () => {
-  assert.equal(T.secretsNoteText('data-json', false), 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s secret storage, outside the vault).');
-  assert.equal(T.secretsNoteText('store', true), 'Secrets are stored in Obsidian\'s secret storage (outside the vault and outside data.json, so they are never synced or committed with your notes).');
+  assert.equal(T.secretsNoteText('data-json', false), 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s keychain, outside the vault; on this Obsidian, choose the env file above to move them out of data.json).');
+  assert.equal(T.secretsNoteText('store', true), 'Secrets are stored in Obsidian\'s keychain (Settings, General, Keychain): outside the vault and outside data.json, so they are never synced or committed with your notes.');
   assert.doesNotMatch(T.secretsNoteText('store', true), /data\.json \(/);
   // An older Obsidian opening a vault a newer one migrated: say why the fields are empty.
   const moved = T.secretsNoteText('data-json', true);
@@ -288,23 +288,35 @@ test('the settings tab says where the secrets are, in one line per mode', () => 
   }
 });
 
-test('THE GATE: no shipped text calls the secret storage a keychain', () => {
-  // Obsidian's docs: the data is "stored in local storage, keyed to the
-  // specific vault". It is outside the vault and outside data.json, which
-  // is the property that matters; it is not a system keychain, and a
-  // member who read that would draw the wrong conclusions about what
-  // protects it. Substring scan, case-insensitive, no carve-outs: the mode
-  // name and the settings flag were renamed so nothing needs one.
+test('THE GATE: the only keychain in shipped text is Obsidian\'s own, never the operating system\'s', () => {
+  // "Keychain" is the name of the Obsidian settings section that holds the
+  // secrets (Settings, General, Keychain; the label is in the app bundle
+  // since 1.11.0), so that is what the member reads and that is the word to
+  // use. What must never be said is that it is the system's keychain: on
+  // desktop it is an encrypted blob per vault in Obsidian's own storage
+  // (the OS holds only the key), on mobile a per-device native store, and a
+  // member who read "your Mac's keychain" would draw the wrong conclusions
+  // about what protects it and where it travels. So: every "keychain" in a
+  // shipped file must be Obsidian's, by one of three spellings, and no
+  // sentence may pin it to an operating system.
   const root = process.env.PLANNER_ROOT ? path.resolve(process.env.PLANNER_ROOT) : path.join(__dirname, '..');
   const shipped = [
     ['main.js', fs.readFileSync(T.__mainPath, 'utf8')],
-    ...['README.md', 'SECURITY.md', 'docs/outlook-setup-guide.md'].map((f) => [f, fs.readFileSync(path.join(root, f), 'utf8')]),
+    ...['README.md', 'SECURITY.md', 'CHANGELOG.md', 'docs/outlook-setup-guide.md'].map((f) => [f, fs.readFileSync(path.join(root, f), 'utf8')]),
   ];
+  const allowed = /Obsidian\\?'?s (own )?keychain|Settings, General, Keychain|into its keychain/gi;
+  const forbidden = /\b(os|system|operating.system|mac|macos|apple|ios|android|windows|device)'?s? keychain/i;
   const hits = [];
   for (const [name, text] of shipped) {
-    text.split('\n').forEach((line, i) => { if (/keychain/i.test(line)) hits.push(`${name}:${i + 1}: ${line.trim().slice(0, 80)}`); });
+    text.split('\n').forEach((line, i) => {
+      if (!/keychain/i.test(line)) return;
+      if (forbidden.test(line)) { hits.push(`${name}:${i + 1} (system): ${line.trim().slice(0, 80)}`); return; }
+      const rest = line.replace(allowed, '');
+      if (/keychain/i.test(rest)) hits.push(`${name}:${i + 1}: ${line.trim().slice(0, 80)}`);
+    });
   }
-  assert.deepEqual(hits, [], `the word is back:\n${hits.join('\n')}`);
+  assert.deepEqual(hits, [], `a keychain that is not Obsidian's:\n${hits.join('\n')}`);
+  assert.ok(/Obsidian\\?'s keychain \(Settings, General, Keychain\)/.test(shipped[0][1]), 'main.js points the member at the section by its path');
   // And the accurate sentence is what the member reads.
   for (const [name, text] of shipped.slice(1, 3)) assert.match(text, /outside the vault and outside `data\.json`/, `${name} says where the secrets are`);
 });
@@ -346,8 +358,8 @@ test('source scan: no credential consumer is handed the raw settings', () => {
   // Every write of the settings to disk goes through the one method that moves secrets out first.
   assert.equal((c.match(/this\.saveData\(this\.settings\)/g) || []).length, 1, 'saveData is called from persistSettings only');
   assert.match(c, /async persistSettings\(\) \{\n\s*migrateSecrets\(this\.settings, this\.secrets\);\n\s*await this\.saveData\(this\.settings\);/);
-  assert.match(c, /this\.secrets = new SecretVault\(this\.app && this\.app\.secretStorage\);/, 'the store is feature-detected at load');
-  assert.match(c, /const adopted = adoptSettings\(loaded, this\.secrets\);/, 'the load goes through adoptSettings');
+  assert.match(c, /this\.secretStorage = secretStorageUsable\(this\.app && this\.app\.secretStorage\) \? this\.app\.secretStorage : null;/, 'the store is feature-detected at load');
+  assert.match(c, /this\.secrets = this\.vaultFor\(backend\);\n\s*const adopted = adoptSettings\(loaded, this\.secrets\);/, 'the load goes through adoptSettings with the vault of the selected backend');
 });
 
 test('source scan: a feed address is read through feedUrl and nowhere else', () => {
@@ -382,6 +394,6 @@ test('the settings tab: the secret fields read and write through the layer, and 
     assert.match(c, new RegExp(`readSecret\\(this\\.plugin\\.settings, secrets, '${field}'\\)`), `${field} read`);
     assert.match(c, new RegExp(`writeSecret\\(this\\.plugin\\.settings, secrets, '${field}', `), `${field} write`);
   }
-  assert.match(c, /setDesc\(secretsNoteText\(secrets\.mode, this\.plugin\.settings\.secretsInStore === true\)\)/);
+  assert.match(c, /setDesc\(secretsNoteText\(secrets\.mode, this\.plugin\.settings\.secretsInStore === true, this\.plugin\.settings\.envFilePath\)\)/);
   assert.equal(T.DEFAULT_SETTINGS.secretsInStore, false, 'the flag is declared, off, and not a secret');
 });
