@@ -61,3 +61,6 @@ not the listing and not the name.
 
 For a security problem, use the process in `SECURITY.md` instead of a public
 issue or pull request.
+
+A contributor who runs `npm test` before opening a pull request sees the
+same result the `ci` check reports.
