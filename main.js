@@ -3377,7 +3377,8 @@ async function emailProbeGone(settings, item, deps) {
 /* ========================================================================== *
  * Connector: Google Calendar via secret ICS URL (read-only, no OAuth).
  * Minimal RFC 5545 parser + best-effort RRULE expansion for the visible week:
- * FREQ=DAILY/WEEKLY/MONTHLY/YEARLY with INTERVAL, BYDAY (weekly), UNTIL,
+ * FREQ=DAILY/WEEKLY/MONTHLY/YEARLY with INTERVAL, BYDAY (weekly, and
+ * monthly with an optional ordinal such as 3SU or -1FR), UNTIL,
  * COUNT, EXDATE and RECURRENCE-ID overrides. Exotic rules degrade to "shows
  * the master occurrence only", never to a crash.
  * ========================================================================== */
@@ -3582,9 +3583,39 @@ function expandOccurrences(def, winStart, winEnd) {
       if (weekAnchor >= winEnd) break;
     }
   } else if (freq === 'MONTHLY') {
+    // BYDAY on a monthly rule names weekdays of the month, each with an
+    // optional ordinal: 3SU is the third Sunday, -1FR the last Friday, SU
+    // every Sunday. Without BYDAY the start's day-of-month repeats.
+    const bydays = def.rrule.BYDAY
+      ? def.rrule.BYDAY.split(',').map((x) => /^([+-]?\d{1,2})?(MO|TU|WE|TH|FR|SA|SU)$/.exec(x.trim())).filter(Boolean)
+      : null;
     const dom = startInstant.getDate();
     for (let i = 0; i < 240; i++) {
       const d = new Date(startInstant);
+      if (bydays && bydays.length) {
+        d.setDate(1);
+        d.setMonth(d.getMonth() + i * interval);
+        const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+        const days = new Set();
+        for (const [, n, wd] of bydays) {
+          const all = [];
+          for (let day = 1; day <= last; day++) {
+            if (new Date(d.getFullYear(), d.getMonth(), day).getDay() === (ICS_BYDAY[wd] + 1) % 7) all.push(day);
+          }
+          // A fifth weekday the month does not have picks nothing: the month is skipped.
+          for (const day of n ? [all[+n > 0 ? +n - 1 : all.length + +n]] : all) if (day != null) days.add(day);
+        }
+        let stop = false;
+        for (const day of [...days].sort((a, b) => a - b)) {
+          const occ = new Date(d);
+          occ.setDate(day);
+          if (occ < startInstant) continue;
+          if (occ >= winEnd && !until && !count) { stop = true; break; }
+          if (!push(occ)) { stop = true; break; }
+        }
+        if (stop) break;
+        continue;
+      }
       d.setMonth(d.getMonth() + i * interval);
       if (d.getDate() !== dom) continue; // month overflow (e.g. 31st) - skip
       if (d >= winEnd && !until && !count) break;
