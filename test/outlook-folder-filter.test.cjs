@@ -333,6 +333,48 @@ test('a filtered message is neither reconciled to done nor stripped of its shado
   );
 });
 
+test('a walk that stops short still carries the retained ids: filtered is not finished, complete or not', async () => {
+  // Upstream 0.13.0 returns a healthy-but-incomplete result when the page
+  // cap is hit or a paging link is refused. The filtered mail on those
+  // pages is still flagged at the source, so it rides back on the short
+  // result exactly as on the clean one; openIds unions it either way and the
+  // shadow pruner, which is not behind the completeness gate, keeps seeing
+  // it. Ran red against a main.js that attached retainedIds to the clean
+  // return only.
+  const folderCalls = (req) => {
+    if (/msgfolderroot/.test(req.url)) return json(200, { id: ROOT });
+    if (/mailFolders\/delta/.test(req.url)) return json(200, { value: FOLDERS });
+    return null;
+  };
+  // The cap: every message page offers another link, each page has one
+  // Inbox mail and one Sent mail.
+  let pages = 0;
+  const capped = async (req) => folderCalls(req) || (() => {
+    pages += 1;
+    return json(200, {
+      value: [mail(`in-${pages}`, 'f-inbox'), mail(`sent-${pages}`, 'f-sent')],
+      '@odata.nextLink': `https://graph.microsoft.com/v1.0/me/messages?$skip=${pages * 50}`,
+    });
+  })();
+  let r = await T.outlookFetchOpen(resolved({ outlookIncludedFolderPaths: ['Inbox'] }), { requestUrl: capped });
+  assert.equal(r.ok, true);
+  assert.equal(r.complete, false, 'upstream: a link still in hand means the walk is short');
+  assert.match(r.warning, /nothing was marked done/);
+  assert.equal(r.items.length, pages, 'every Inbox mail read reaches the board');
+  assert.deepEqual(r.retainedIds, Array.from({ length: pages }, (_, i) => `sent-${i + 1}`), 'and every Sent mail read is retained');
+  // The refused link: one page, then a link the origin guard will not follow.
+  const refused = async (req) => folderCalls(req) || json(200, {
+    value: [mail('in-1', 'f-inbox'), mail('sent-1', 'f-sent')],
+    '@odata.nextLink': 'https://graph.microsoft.com.evil.example/v1.0/me/messages?$skip=50',
+  });
+  r = await T.outlookFetchOpen(resolved({ outlookIncludedFolderPaths: ['Inbox'] }), { requestUrl: refused });
+  assert.equal(r.ok, true);
+  assert.equal(r.complete, false);
+  assert.match(r.warning, /another host/);
+  assert.deepEqual(r.items.map((i) => i.id), ['in-1']);
+  assert.deepEqual(r.retainedIds, ['sent-1'], 'the refused walk retains what it read too');
+});
+
 test('nothing filtered means nothing retained, and the result is the plain healthy one', async () => {
   const w = mailbox([mail('m-inbox', 'f-inbox'), mail('m-receipt', 'f-receipts')]);
   const r = await T.outlookFetchOpen(resolved({ outlookIncludedFolderPaths: ['Inbox'] }), { requestUrl: w.requestUrl });
