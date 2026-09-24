@@ -173,9 +173,9 @@ const CONNECTORS = {
     id: 'outlook-calendar', label: 'Outlook calendar', folder: null, kind: 'calendar',
     feedKind: 'graph',
     feeds: (s) => calendarFeeds(s).filter((f) => f.kind === 'graph'),
-    ready: (feed, s) => outlookSignedIn(s || {}),
+    ready: (feed, s) => outlookSignedIn(outlookFeedView(s || {}, feed)),
     configured: (s) => enabledCalendarFeeds(s).some((f) => f.kind === 'graph'),
-    fetchFeed: (feed, s, deps) => outlookCalendarFetchFeed(feed, s, deps),
+    fetchFeed: (feed, s, deps) => outlookCalendarFetchFeed(feed, outlookFeedView(s, feed), deps),
     fetchOpen: null, setClosed: null, pushFields: null,
     platforms: ['desktop', 'mobile'],
     svg: 'M4 2h2v20H4V2zm3 1h12.5l-3.4 4.75L19.5 12.5H7V3z',
@@ -2583,6 +2583,13 @@ function secretFieldNames(settings) {
   }
   return extra.length ? SECRET_FIELD_NAMES.concat(extra) : SECRET_FIELD_NAMES;
 }
+// The settings as ONE graph calendar feed's account sees them. Declared here
+// with the rest of the projection; the feed id / accountId pair it reads is
+// defined with the calendar code.
+function outlookFeedView(settings, feed) {
+  const s = settings || {};
+  return outlookAccountView(s, outlookAccountById(s, graphFeedAccountId(feed)));
+}
 
 /* ---- the stored sign-in ---- */
 function outlookSignedIn(settings) {
@@ -4149,6 +4156,8 @@ function normalizeCalendarFeed(raw, index) {
     color: clampSwatch(f.color),
     enabled: f.enabled !== false,
     kind: typeof f.kind === 'string' && f.kind ? f.kind : 'ics',
+    // Which Outlook sign-in a graph feed reads. Absent is the default one.
+    ...(typeof f.accountId === 'string' && f.accountId.trim() ? { accountId: f.accountId.trim() } : {}),
   };
 }
 
@@ -4182,11 +4191,31 @@ function calendarFeedConfigured(settings) { return enabledCalendarFeeds(settings
 // The Outlook calendar entry, added once on sign-in (removable; a later
 // sign-in adds it again). Takes the least-used lens like a pasted feed.
 const GRAPH_FEED_ID = 'outlook-graph';
-function ensureGraphCalendarFeed(settings) {
+// One feed per account. `default` keeps the bare legacy id, the same
+// reservation the secret keys use, so the feed already in data.json - and the
+// lens colour on it - survives untouched.
+function graphFeedId(accountId) {
+  const a = accountId ? String(accountId) : OUTLOOK_DEFAULT_ACCOUNT;
+  return a === OUTLOOK_DEFAULT_ACCOUNT ? GRAPH_FEED_ID : `${GRAPH_FEED_ID}-${a}`;
+}
+// The account a graph feed reads. A feed written before accounts existed
+// carries no accountId, and it is the default one.
+function graphFeedAccountId(feed) {
+  const v = feed && feed.accountId != null ? String(feed.accountId).trim() : '';
+  return v || OUTLOOK_DEFAULT_ACCOUNT;
+}
+function ensureGraphCalendarFeed(settings, accountId, label) {
   const s = settings || {};
+  const acct = accountId ? String(accountId) : OUTLOOK_DEFAULT_ACCOUNT;
   if (!Array.isArray(s.calendars)) s.calendars = calendarFeeds(s);
-  if (s.calendars.some((f) => f && f.kind === 'graph')) return false;
-  s.calendars.push({ id: GRAPH_FEED_ID, name: 'Outlook calendar', url: '', color: leastUsedSwatch(s.calendars), enabled: true, kind: 'graph' });
+  // Scoped to this account: the old guard was "any graph feed at all", which
+  // would silently leave a second mailbox with no calendar.
+  if (s.calendars.some((f) => f && f.kind === 'graph' && graphFeedAccountId(f) === acct)) return false;
+  const feed = { id: graphFeedId(acct), name: 'Outlook calendar', url: '', color: leastUsedSwatch(s.calendars), enabled: true, kind: 'graph' };
+  // The default feed keeps the shape it has always had - no accountId key at
+  // all - so the row already in data.json stays byte-identical.
+  if (acct !== OUTLOOK_DEFAULT_ACCOUNT) { feed.name = `Outlook calendar (${label || acct})`; feed.accountId = acct; }
+  s.calendars.push(feed);
   return true;
 }
 
@@ -12538,5 +12567,6 @@ module.exports.__test = {
   OUTLOOK_DEFAULT_ACCOUNT, OUTLOOK_ACCOUNT_SECRET_FIELDS,
   outlookAccountId, outlookAccountField, outlookAccountFieldParts, outlookAccountSecretSuffix,
   normalizeOutlookAccount, outlookAccountList, outlookAccountById,
-  outlookAccountView, secretFieldNames,
+  outlookAccountView, outlookFeedView, secretFieldNames,
+  graphFeedId, graphFeedAccountId,
 };

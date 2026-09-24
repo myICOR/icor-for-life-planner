@@ -177,6 +177,45 @@ test('a rotated token is written to the account it belongs to, never to the firs
   assert.equal(store.get('icor-for-life-planner-outlook-refresh-token'), 'rt-1', 'the other mailbox stays signed in');
 });
 
+/* -------------------------------------------------------------------------
+ * 9. THE CALENDAR FEED, AND THE OAUTH CALLBACK
+ * ---------------------------------------------------------------------- */
+
+test('the default calendar feed keeps its legacy id and its exact legacy shape', () => {
+  assert.equal(T.graphFeedId('default'), 'outlook-graph');
+  assert.equal(T.graphFeedId(null), 'outlook-graph');
+  assert.equal(T.graphFeedId('work'), 'outlook-graph-work');
+  assert.equal(T.graphFeedAccountId({ id: 'outlook-graph' }), 'default', 'a feed from before accounts existed is the default one');
+  assert.equal(T.graphFeedAccountId({ id: 'outlook-graph-work', accountId: 'work' }), 'work');
+  const s = { calendars: [] };
+  assert.equal(T.ensureGraphCalendarFeed(s), true);
+  assert.deepEqual(Object.keys(s.calendars[0]).sort(), ['color', 'enabled', 'id', 'kind', 'name', 'url'],
+    'no accountId key on the default feed: the row already in data.json stays byte-identical');
+  // The guard is per account: a second sign-in must not find the first
+  // account's feed and decide there is nothing to do.
+  assert.equal(T.ensureGraphCalendarFeed(s), false, 'idempotent for the same account');
+  assert.equal(T.ensureGraphCalendarFeed(s, 'work', 'Work'), true, 'the second mailbox gets its own');
+  assert.equal(s.calendars[1].id, 'outlook-graph-work');
+  assert.equal(s.calendars[1].accountId, 'work');
+  assert.equal(s.calendars[1].name, 'Outlook calendar (Work)');
+  assert.equal(T.ensureGraphCalendarFeed(s, 'work', 'Work'), false);
+  // accountId survives the sanitiser, or it would vanish on the next save.
+  assert.equal(T.calendarFeeds(s)[1].accountId, 'work');
+  assert.equal(T.calendarFeeds(s)[0].accountId, undefined);
+});
+
+test('a graph feed is ready by ITS OWN account\'s sign-in', () => {
+  const s = T.withSecrets(base({
+    outlookAccounts: [WORK],
+    calendars: [{ id: 'outlook-graph', kind: 'graph' }, { id: 'outlook-graph-work', kind: 'graph', accountId: 'work' }],
+  }), new T.SecretVault(null));
+  const c = T.CONNECTORS['outlook-calendar'];
+  assert.equal(c.ready({ id: 'outlook-graph', kind: 'graph' }, s), true, 'the first account is signed in');
+  assert.equal(c.ready({ id: 'outlook-graph-work', kind: 'graph', accountId: 'work' }, s), false, 'the work account is not');
+  const signedIn = T.withSecrets(base({ outlookAccounts: [WORK], outlookRefreshToken__work: 'rt-2' }), new T.SecretVault(null));
+  assert.equal(c.ready({ id: 'outlook-graph-work', kind: 'graph', accountId: 'work' }, signedIn), true);
+});
+
 test('a junk account record cannot make the plugin read a mailbox it should not', () => {
   const s = base({
     outlookAccounts: [
@@ -190,6 +229,24 @@ test('a junk account record cannot make the plugin read a mailbox it should not'
   // A tenant the login endpoint does not accept falls back rather than being
   // pasted into an authorize URL.
   assert.equal(T.outlookAccountList(base({ outlookAccounts: [{ id: 'x', tenant: 'evil.example.com' }] }))[1].tenant, 'common');
+});
+
+test('an account nothing lists any more resolves to NOT SIGNED IN, never to the first mailbox', () => {
+  const s = base({ outlookAccounts: [WORK] });
+  // A note, or a calendar feed, left behind by a record deleted from
+  // data.json. Falling back to the default account would read - and flag -
+  // somebody else's mail under the wrong label.
+  const ghost = T.outlookAccountById(s, 'ghost');
+  assert.equal(ghost.id, 'ghost');
+  assert.equal(ghost.enabled, false);
+  assert.equal(ghost.clientId, '');
+  const view = T.outlookAccountView(s, ghost);
+  assert.equal(T.outlookSignedIn(view), false);
+  assert.notEqual(view.outlookRefreshToken, 'rt-1', 'not the first account\'s token');
+  const feed = { id: 'outlook-graph-ghost', kind: 'graph', accountId: 'ghost' };
+  assert.equal(T.CONNECTORS['outlook-calendar'].ready(feed, T.withSecrets(s, new T.SecretVault(null))), false);
+  // A flag write for such a note is refused rather than sent anywhere.
+  assert.equal(T.outlookSignedIn(T.outlookFeedView(s, feed)), false);
 });
 
 test('a `default` record adds what is new and can never override the flat credentials', () => {
