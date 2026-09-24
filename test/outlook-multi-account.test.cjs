@@ -320,6 +320,52 @@ test('SOURCE: the registry call site is unchanged; the connector resolves the ac
   assert.match(body, /outlookAccountView\(settings \|\| \{\}, outlookAccountById\(settings \|\| \{\}, itemAccountId\(item\)\)\)/);
 });
 
+test('the gone probe is routed by the item too: a work note is asked of the work mailbox', async () => {
+  // 0.15.0's probeGoneIds hands the connector this.withSecrets(), the DEFAULT
+  // account's view. Read as given, a probe on a work note would ask the
+  // default mailbox, Graph would answer 404 for an id it has never seen, and
+  // a mail the member completed in the work mailbox would move its note to
+  // the Recycle Bin. The item names its account; the probe resolves it.
+  const seen = [];
+  const requestUrl = async (req) => { seen.push(req); return { status: 200, json: { id: 'x' }, text: '{"id":"x"}', headers: {} }; };
+  const s = T.withSecrets(base({
+    outlookAccounts: [WORK], outlookRefreshToken__work: 'rt-2', outlookAccessToken__work: 'at-2',
+    outlookExpiresAt__work: String(Date.now() + 3600000),
+  }), new T.SecretVault(null));
+  const probe = T.CONNECTORS.outlook.probeGone;
+  assert.equal(await probe(s, { id: 'm-work', sourceAccount: 'work' }, { requestUrl }), false, 'present in its own mailbox');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].headers.Authorization, 'Bearer at-2', 'the work note is asked of the work mailbox');
+  assert.match(seen[0].url, /\/me\/messages\/m-work\?\$select=id$/);
+  assert.equal(await probe(s, { id: 'm-default' }, { requestUrl }), false);
+  assert.equal(seen[1].headers.Authorization, 'Bearer at-1', 'a note without the field is the default account, as ever');
+});
+
+test('the gone probe reports gone only for a 404 from the note\'s own mailbox, and never from an account that is not signed in', async () => {
+  const gone404 = async () => ({ status: 404, json: { error: { code: 'ErrorItemNotFound' } }, text: '', headers: {} });
+  const s = T.withSecrets(base({
+    outlookAccounts: [WORK], outlookRefreshToken__work: 'rt-2', outlookAccessToken__work: 'at-2',
+    outlookExpiresAt__work: String(Date.now() + 3600000),
+  }), new T.SecretVault(null));
+  const probe = T.CONNECTORS.outlook.probeGone;
+  assert.equal(await probe(s, { id: 'm-work', sourceAccount: 'work' }, { requestUrl: gone404 }), true, 'a 404 from the right door is the one positive signal');
+  // The work account signed out: the default account still holds a token,
+  // and reading the settings as given would probe with it. Null, never true.
+  const off = T.withSecrets(base({ outlookAccounts: [WORK] }), new T.SecretVault(null));
+  let calls = 0;
+  const r = await probe(off, { id: 'm-work', sourceAccount: 'work' }, { requestUrl: async () => { calls += 1; return gone404(); } });
+  assert.equal(r, null, 'no sign-in for that account: the probe knows nothing');
+  assert.equal(calls, 0, 'and it made no call with another account\'s token');
+});
+
+test('SOURCE: outlookProbeGone resolves its view from the item, the same line outlookSetClosed uses', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('async function outlookProbeGone('), main.indexOf('// The settings tab\'s one line on the sign-in'));
+  assert.ok(body.length > 50 && body.length < 2000);
+  assert.match(body, /const s = outlookAccountView\(settings \|\| \{\}, outlookAccountById\(settings \|\| \{\}, itemAccountId\(item\)\)\);/);
+  assert.ok(!/const s = settings \|\| \{\};/.test(body), 'the settings are never read as given');
+});
+
 /* -------------------------------------------------------------------------
  * 6. NOTHING EVER RETURNS A HEALTHY EMPTY RESULT
  * ---------------------------------------------------------------------- */

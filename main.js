@@ -3023,7 +3023,10 @@ async function outlookSetClosed(settings, item, closed, deps) {
 // that is still there but no longer flagged is not deleted, it is completed,
 // and reconcile handles that as it always has.
 async function outlookProbeGone(settings, item, deps) {
-  const s = settings || {};
+  // Asked of the mailbox the note came from, never of whichever account the
+  // caller's settings happen to name: a 404 from the wrong door would read as
+  // "gone" and trash a note the member merely completed elsewhere.
+  const s = outlookAccountView(settings || {}, outlookAccountById(settings || {}, itemAccountId(item)));
   if (!outlookSignedIn(s)) return null;
   try {
     await graphRequest(s, deps, {
