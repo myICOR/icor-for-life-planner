@@ -665,6 +665,43 @@ test('an account nothing lists any more resolves to NOT SIGNED IN, never to the 
   assert.equal(T.outlookSignedIn(T.outlookFeedView(s, feed)), false);
 });
 
+test('a source_account that is present but not a valid id is an unlisted account, never the default', async () => {
+  // itemAccountId hands the raw trimmed value over. Collapsing "absent" and
+  // "given but invalid" into `default` meant a hand-edited
+  // `source_account: WORK` probed the default mailbox with the default's
+  // token, Graph answered 404 for an id it had never seen, and the member's
+  // own note went to the Recycle Bin; the flag write went the same way.
+  // Absent still means the default; anything present that the list cannot
+  // name is the blank, disabled account, and every consumer reads "not
+  // signed in". Same door for a calendar feed's accountId.
+  const s = T.withSecrets(base({
+    outlookAccounts: [WORK], outlookScopes: 'Mail.Read Mail.ReadWrite',
+    outlookRefreshToken__work: 'rt-2', outlookAccessToken__work: 'at-2',
+    outlookExpiresAt__work: String(Date.now() + 3600000),
+  }), new T.SecretVault(null));
+  const gone404 = async () => ({ status: 404, json: { error: { code: 'ErrorItemNotFound' } }, text: '', headers: {} });
+  const ok200 = async () => ({ status: 200, json: {}, text: '{}', headers: {} });
+  for (const bad of ['WORK', 'a/b']) {
+    const a = T.outlookAccountById(s, bad);
+    assert.notEqual(a.id, 'default', `${bad}: not the default account`);
+    assert.equal(a.enabled, false, `${bad}: disabled`);
+    assert.equal(a.clientId, '');
+    assert.equal(T.outlookSignedIn(T.outlookAccountView(s, a)), false, `${bad}: not signed in`);
+    let calls = 0;
+    const count = (stub) => async (req) => { calls += 1; return stub(req); };
+    assert.equal(await T.CONNECTORS.outlook.probeGone(s, { id: 'm-work', sourceAccount: bad }, { requestUrl: count(gone404) }), null, `${bad}: the probe knows nothing, never "gone"`);
+    await assert.rejects(T.outlookSetClosed(s, { id: 'm-work', sourceAccount: bad }, true, { requestUrl: count(ok200) }), /not signed in/, `${bad}: the flag write is refused`);
+    assert.equal(calls, 0, `${bad}: no call made with the default account's token`);
+    const feed = { id: `outlook-graph-${bad}`, kind: 'graph', accountId: bad };
+    assert.equal(T.CONNECTORS['outlook-calendar'].ready(feed, s), false, `${bad}: the feed is not ready`);
+  }
+  // Absent, blank and the reserved id itself are still the default, as ever.
+  assert.equal(T.outlookAccountById(s, undefined).id, 'default');
+  assert.equal(T.outlookAccountById(s, '').id, 'default');
+  assert.equal(T.outlookAccountById(s, 'default').id, 'default');
+  assert.equal(await T.CONNECTORS.outlook.probeGone(s, { id: 'm-default' }, { requestUrl: gone404 }), true, 'a note without the field is the default account, and its own 404 is gone');
+});
+
 test('a `default` record adds what is new and can never override the flat credentials', () => {
   // The default account IS the flat fields. If a record could override them
   // the list would say one thing and the fetch, which reads the settings

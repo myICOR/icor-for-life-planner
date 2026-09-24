@@ -2515,7 +2515,12 @@ function outlookAccountList(settings) {
 // instead of quietly falling back to the first mailbox and reading, or
 // writing a flag to, somebody else's mail.
 function outlookAccountById(settings, accountId) {
-  const id = outlookAccountId(accountId) || OUTLOOK_DEFAULT_ACCOUNT;
+  // Only an ABSENT id means the default. A value that is present but not a
+  // valid id (a hand-edited `source_account: WORK`) is an account nothing
+  // lists, never the first mailbox: the list holds validated ids only, so
+  // the lookup cannot match it and it falls through to the blank below.
+  const raw = accountId == null ? '' : String(accountId).trim();
+  const id = raw || OUTLOOK_DEFAULT_ACCOUNT;
   const found = outlookAccountList(settings).find((a) => a.id === id);
   if (found) return found;
   return { id, label: id, clientId: '', tenant: 'common', scopes: '', includedFolderPaths: undefined, enabled: false };
