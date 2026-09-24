@@ -8165,7 +8165,7 @@ class IcorPlannerPlugin extends Plugin {
   // setting; this one was not asked for here. The same method serves both discoveries: a probe during reconcile,
   // and a write that came back 404.
   async removeGoneItem(source, item) {
-    const key = `${source}:${item.id}`;
+    const key = shadowKey(source, itemAccountId(item), item.id);
     delete this.settings._shadow[key];
     if (this._pushTimers.has(item.path)) {
       window.clearTimeout(this._pushTimers.get(item.path));

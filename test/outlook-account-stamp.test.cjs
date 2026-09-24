@@ -176,3 +176,37 @@ test("the guard is Outlook's: another source's unstamped run reconciles as befor
   assert.equal(kept.fm.status, 'open');
   assert.equal(irl.fm.status, 'open', 'and a ClickUp run never reads an Outlook note');
 });
+
+/* ---- 0.15.x: a note the source says is GONE leaves with its own shadow ---- */
+
+// A us note confirmed gone by the probe goes to the trash, and the shadow it
+// leaves behind is the ACCOUNT-KEYED one. removeGoneItem (0.15.0) deleted the
+// bare `source:id`; for a second mailbox that key never existed, so the real
+// shadow lingered until pruneShadows, and a re-appearing id would have read a
+// stale baseline. The probe is asked only about this run's own notes.
+test('a us note the probe confirms gone is trashed with its outlook@us shadow, and the irl note is never asked about', async () => {
+  const { p, irl, usKept, usGone, result } = usFixture();
+  const trashed = [];
+  p.app.vault.trash = async (f, system) => { assert.equal(system, true); trashed.push(f.path); };
+  const asked = [];
+  const c = T.CONNECTORS.outlook;
+  const real = c.probeGone;
+  c.probeGone = async (s, item) => { asked.push(item.id); return item.id === 'B2'; };
+  try {
+    await p.upsertSource('outlook', Object.assign({}, result, { account: TWO[1] }));
+  } finally { c.probeGone = real; }
+  assert.deepEqual(asked, ['B2'], 'only this run\'s absent note is probed; the irl note belongs to another run');
+  assert.deepEqual(trashed, [usGone.path], 'gone at the source, gone here');
+  assert.equal('outlook@us:B2' in p.settings._shadow, false, 'its account-keyed shadow leaves with it');
+  assert.ok(p.settings._shadow['outlook@us:B1'], 'the kept note keeps its shadow');
+  assert.ok(p.settings._shadow['outlook:A1'], 'the irl shadow is untouched');
+  assert.equal(irl.fm.status, 'open');
+  assert.equal(usKept.fm.status, 'open');
+});
+
+test('SOURCE: removeGoneItem deletes the shadow under the item\'s own account key', () => {
+  const main = require('fs').readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('async removeGoneItem('), main.indexOf('async probeGoneIds('));
+  assert.ok(body.length > 50 && body.length < 1500);
+  assert.match(body, /const key = shadowKey\(source, itemAccountId\(item\), item\.id\);/);
+});
