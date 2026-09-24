@@ -938,6 +938,74 @@ test('RUN: a note whose account nothing lists any more is left where it is', asy
 });
 
 /* -------------------------------------------------------------------------
+ * 11. THE SYNC STOPS ON AN UNVERIFIED MOVE
+ * ---------------------------------------------------------------------- */
+
+// The migration computes `verified` - the set of (account, external_id)
+// is the same after the move as before it - and raises a Notice when it is
+// not. syncNow must then STOP: a run that cannot see a moved note finds no
+// `existing` entry for it and writes a second copy at exactly the path the
+// original now occupies. The fake here answers a null metadata cache for any
+// file at its new path, which is the one realistic way `verified` goes false.
+test('RUN: when the id set after the move is not the set before it, the sync stops - no fetch, no note written', async () => {
+  const { app, calls } = fakeVault({
+    '02 Planner/Outlook/A.md': note('m1'),
+    '02 Planner/Outlook/B.md': note('m2'),
+  });
+  const cache = app.metadataCache.getFileCache;
+  app.metadataCache.getFileCache = (f) => (f.path.includes('/Personal/') ? null : cache(f));
+  const writes = [];
+  app.vault.create = async (path) => { writes.push(path); };
+  app.vault.modify = async (f) => { writes.push(f.path); };
+  app.workspace = { getLeavesOfType: () => [] };
+  const settings = base({ plannerFolder: '02 Planner', outlookAccounts: [{ id: 'default', folder: 'Personal' }] });
+  const p = plugin(settings, app);
+  p.syncing = false;
+  p.syncStatus = {};
+  p.secrets = { mode: 'data-json', available: () => false };
+  p.emitModelChanged = () => {};
+  p.persistSettings = async () => {};
+  p.connectorDeps = () => ({});
+  p.scheduleCalendarCacheWrite = () => {};
+  p.calendarDefsByFeed = {};
+  p.calendarFeedSyncedAt = {};
+  let fetches = 0;
+  let upserts = 0;
+  p.withSecrets = () => { fetches += 1; return settings; };
+  p.upsertSource = async () => { upserts += 1; };
+  const real = T.CONNECTORS.outlook.fetchOpen;
+  // A healthy mailbox with the two notes still open: exactly the fetch that
+  // would write `A-2.md` next to the moved `A.md` it can no longer see.
+  T.CONNECTORS.outlook.fetchOpen = async () => T.okResult('outlook', [
+    { source: 'outlook', id: 'm1', title: 'A', status: 'open' }, { source: 'outlook', id: 'm2', title: 'B', status: 'open' },
+  ]);
+  try {
+    await p.syncNow(true);
+  } finally {
+    T.CONNECTORS.outlook.fetchOpen = real;
+  }
+  assert.equal(calls.renamed.length, 2, 'the move itself happened');
+  assert.equal(upserts, 0, 'not one note was upserted: the run that cannot see the moved note is the one that duplicates it');
+  assert.equal(fetches, 0, 'not one connector was asked for anything');
+  assert.deepEqual(writes, [], 'not one note was written');
+  assert.equal(p.syncing, false, 'the lock is released');
+  assert.ok(p.syncStatus.outlook && p.syncStatus.outlook.ok === false, 'the Outlook row says the sync was stopped');
+  assert.match(String(p.syncStatus.outlook.message), /moved|move/i, 'and names the move as the reason');
+});
+
+test('SOURCE: syncNow reads the migration\'s verdict and returns on it before withSecrets', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('async syncNow('), main.indexOf('async upsertSource('));
+  const mig = body.indexOf('await this.migrateOutlookFolders()');
+  const gate = body.search(/if \(!\w+\.verified\)/);
+  const fetch = body.indexOf('this.withSecrets()');
+  assert.ok(mig > 0, 'the migration runs inside syncNow');
+  assert.ok(gate > mig, 'its verified flag is read');
+  assert.ok(fetch > gate, 'and read BEFORE the settings are resolved for any fetch');
+  assert.match(body.slice(gate, fetch), /return;/, 'the sync returns when it is false');
+});
+
+/* -------------------------------------------------------------------------
  * 12. ORPHANED TOKEN FIELDS ARE STILL SECRETS
  * ---------------------------------------------------------------------- */
 

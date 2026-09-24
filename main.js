@@ -7913,7 +7913,7 @@ class IcorPlannerPlugin extends Plugin {
     const b = ids(after);
     const verified = a.size === b.size && [...a].every((k) => b.has(k));
     if (!verified) {
-      new Notice(`Planner: after moving Outlook notes the vault holds ${b.size} of them where it held ${a.size}. Nothing was deleted by the move; check ${p.sourceFolder('outlook')} before syncing again.`, 20000);
+      new Notice(`Planner: after moving Outlook notes the vault holds ${b.size} of them where it held ${a.size}. Nothing was deleted by the move, and the sync was stopped before reading any mail; check ${p.sourceFolder('outlook')}, then sync again.`, 20000);
     } else if (moved && report !== false) {
       new Notice(`Planner: moved ${moved} Outlook note${moved === 1 ? '' : 's'} into their account folder. Links were updated.`, 8000);
     }
@@ -7931,7 +7931,22 @@ class IcorPlannerPlugin extends Plugin {
       // that account's run reads the vault, or the run would find no note at
       // the new path and write a second copy of it there. A no-op - not one
       // vault read - until an account names a folder in data.json.
-      await this.migrateOutlookFolders();
+      const mig = await this.migrateOutlookFolders();
+      // The move's own verdict is the gate. It compares the set of
+      // (account, external_id) after the move with the set before it; when
+      // they differ, a run would find no `existing` entry for the missing
+      // note and write a second copy at the very path the original now
+      // holds. So: no fetch, no reconcile, one degraded row saying why. The
+      // migration has already raised the Notice that says what to check.
+      if (!mig.verified) {
+        const where = this.paths().sourceFolder('outlook');
+        this.syncStatus.outlook = {
+          ok: false, reason: 'misconfigured',
+          message: 'Outlook notes were moved, but the vault does not hold the same set of them afterwards, so this sync was stopped before reading any mail.',
+          hint: `Check ${where} and its account folders, then sync again.`, docUrl: null, count: 0, at: new Date().toISOString(),
+        };
+        return;
+      }
       await this.ensureFolders();
       if (this.secrets.mode === 'env-file') await this.envStore.load();
       const s = this.withSecrets();
