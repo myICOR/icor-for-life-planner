@@ -10911,6 +10911,58 @@ function trayConnectionState(settings) {
   };
 }
 
+/* ---- one tray section per Outlook account (2026-09-12) ----
+ *
+ * A source with one sign-in renders the section it always has: keyed and
+ * labelled by the source, admitting every item of the source, so a data.json
+ * with no `outlookAccounts` renders byte-for-byte what it did. With two or
+ * more accounts listed, Outlook renders one section per account in list
+ * order (default first), each counting only its own items (itemAccountId:
+ * absent means default), each collapsing on its own. The reserved default
+ * keeps the bare `outlook` key so a collapse made before this build still
+ * holds; every other account is keyed `outlook@<id>`, the shape the shadow
+ * keys already use. An account a note names that the list does not is
+ * appended after the listed ones under its id, the same blank account
+ * outlookAccountById hands every other consumer, so no item leaves the tray
+ * because its record did.
+ *
+ * `configured` is per account through the same lever the connector uses
+ * (outlookSignedIn on the account's view): a mailbox not yet signed in says
+ * "Not connected" under its own head with the Connect button, instead of
+ * borrowing the first mailbox's answer. The sync status row is not split: it
+ * is one row per source (syncNow), and the renderer hands that one row to
+ * every section of the source.
+ */
+function traySectionKey(source, accountId) {
+  return accountId === OUTLOOK_DEFAULT_ACCOUNT ? source : `${source}@${accountId}`;
+}
+function traySourceSections(settings, source, items) {
+  const meta = SOURCES[source];
+  const whole = { key: source, label: meta.label, account: null, configured: sourceConfigured(settings, source), member: () => true };
+  if (source !== 'outlook') return [whole];
+  const listed = outlookAccountList(settings);
+  if (listed.length < 2) return [whole];
+  // outlookAccountById's own resolution of a note's account: a valid id is
+  // taken as written, anything else is the default.
+  const accountOf = (it) => outlookAccountId(itemAccountId(it)) || OUTLOOK_DEFAULT_ACCOUNT;
+  const accounts = listed.slice();
+  const seen = new Set(accounts.map((a) => a.id));
+  for (const it of items || []) {
+    if (it.source !== source) continue;
+    const id = accountOf(it);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    accounts.push(outlookAccountById(settings, id));
+  }
+  return accounts.map((a) => ({
+    key: traySectionKey(source, a.id),
+    label: `${meta.label} · ${a.label}`,
+    account: a,
+    configured: outlookSignedIn(outlookAccountView(settings, a)),
+    member: (it) => accountOf(it) === a.id,
+  }));
+}
+
 /* ---- opening the board should reveal the tray ----------------------------
  *
  * ...but exactly once per session. A user who collapses the right sidebar or
@@ -11509,11 +11561,17 @@ class PlannerTrayView extends ItemView {
       // In the all-cold state the synced heads are replaced by the lead block.
       if (key !== MANUAL_SOURCE && conn.allCold) continue;
 
-      const meta = SOURCES[key];
-      const configured = sourceConfigured(resolved, key);
       const st = this.plugin.syncStatus[key];
+      // One section per source, or one per account of a source with more
+      // than one sign-in (traySourceSections). `part` is what differs: the
+      // head label, the membership, the collapse key, the configured answer.
+      // The body below is not re-indented on purpose: it is upstream's, and
+      // a whitespace-only hunk over sixty lines is the rebase cost this
+      // patch is trying not to pay.
+      for (const part of traySourceSections(resolved, key, items)) {
+      const configured = part.configured;
       const list = items
-        .filter((i) => i.source === key && !i.plannedDay && !isDone(i) && !i.weeklyGoal)
+        .filter((i) => i.source === key && part.member(i) && !i.plannedDay && !isDone(i) && !i.weeklyGoal)
         .sort((a, b) => {
           const br = bucketRank[dueBucketOf(a.due, today)] - bucketRank[dueBucketOf(b.due, today)];
           if (br) return br;
@@ -11524,13 +11582,13 @@ class PlannerTrayView extends ItemView {
       const sec = el.createDiv({ cls: 'iplan-tray-section' });
       const headRow = sec.createDiv({ cls: 'iplan-tray-section-head is-clickable' });
       headRow.appendChild(sourceMarkEl(key));
-      headRow.createSpan({ text: ` ${meta.label.toUpperCase()}` });
+      headRow.createSpan({ text: ` ${part.label.toUpperCase()}` });
       headRow.createSpan({ cls: 'iplan-tray-count', text: String(list.length) });
       const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
-      if (this.collapsed[key]) sec.addClass('is-collapsed');
+      if (this.collapsed[part.key]) sec.addClass('is-collapsed');
       headRow.addEventListener('click', () => {
-        this.collapsed[key] = !this.collapsed[key];
-        sec.classList.toggle('is-collapsed', this.collapsed[key]);
+        this.collapsed[part.key] = !this.collapsed[part.key];
+        sec.classList.toggle('is-collapsed', this.collapsed[part.key]);
       });
 
       // The one authority on what this section is allowed to claim.
@@ -11543,7 +11601,7 @@ class PlannerTrayView extends ItemView {
         note.createSpan({ text: state.text });
         const connect = note.createEl('button', {
           cls: 'iplan-action',
-          attr: { type: 'button', 'aria-label': `Connect ${meta.label}` },
+          attr: { type: 'button', 'aria-label': `Connect ${part.label}` },
           text: state.kind === 'unconfigured-device' ? TRAY_COPY.connectDeviceAction : TRAY_COPY.connectAction,
         });
         connect.addEventListener('click', () => this.plugin.openPluginSettings());
@@ -11559,6 +11617,7 @@ class PlannerTrayView extends ItemView {
         }
       }
       for (const it of list) body.appendChild(renderCard(this.plugin, it, 'tray', this));
+      }
     }
 
     const foot = el.createDiv({ cls: 'iplan-tray-foot' });
@@ -12781,4 +12840,5 @@ module.exports.__test = {
   outlookAccountView, outlookFeedView, secretFieldNames, outlookExtraRuns, mergeSyncStatus,
   outlookWriteAccountScopes, itemAccountId, shadowKey, shadowPrefix,
   graphFeedId, graphFeedAccountId,
+  traySectionKey, traySourceSections, PlannerTrayView,
 };
