@@ -382,3 +382,16 @@ test('nothing filtered means nothing retained, and the result is the plain healt
   assert.equal(r.items.length, 2);
   assert.equal('retainedIds' in r, false, 'the field is absent when it has nothing to say');
 });
+
+/* -------------------------------------------------------------------- *
+ * 6. an Outlook item carries no message id
+ * -------------------------------------------------------------------- */
+
+test('an Outlook item carries no messageId, so the message-id remap never sees one', () => {
+  // remapByMessageId re-pairs a fetched item with the note whose shadow
+  // carries the same messageId. Outlook items carry none and the $select
+  // asks Graph for none, so that walk is a no-op for Outlook; the day one is
+  // added, the remap's shadow walk is the first thing to look at.
+  assert.equal(T.outlookItemFromMessage({ id: 'm1', subject: 'x' }).messageId, undefined, 'no messageId on the item');
+  assert.doesNotMatch(fs.readFileSync(T.__mainPath, 'utf8'), /internetMessageId/, 'no Message-ID field is selected from Graph');
+});
