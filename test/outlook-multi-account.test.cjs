@@ -338,12 +338,48 @@ test('the extra runs are the mailboxes past the first, and the status rows fold 
   // Two healthy runs add up; one unhealthy run wins and is what the tray says.
   const ok1 = { ok: true, reason: null, message: null, count: 3, at: 'A' };
   const ok2 = { ok: true, reason: null, message: null, count: 4, at: 'B' };
-  assert.deepEqual(T.mergeSyncStatus(ok1, ok2), { ok: true, reason: null, message: null, count: 7, at: 'B' });
+  assert.deepEqual(T.mergeSyncStatus(ok1, ok2), { ok: true, reason: null, message: null, count: 7, at: 'B', complete: true, warning: null });
   const bad = { ok: false, reason: 'no-token', message: 'Work: Outlook is not signed in.', count: 0, at: 'B' };
   assert.equal(T.mergeSyncStatus(ok1, bad).ok, false);
   assert.match(T.mergeSyncStatus(ok1, bad).message, /^Work: /, 'the row names the mailbox');
   assert.equal(T.mergeSyncStatus(bad, ok2).message, bad.message, 'the FIRST unhealthy run is the one reported');
   assert.equal(T.mergeSyncStatus(null, ok1), ok1);
+});
+
+test('the folded status row keeps upstream\'s completeness and the first warning (0.13.0 page cap)', () => {
+  // Upstream 0.13.0 marks a run that hit its page cap, or was refused a
+  // paging link, `complete: false` with a warning the board prints as its
+  // "sync incomplete" line. One row per source means two runs fold into
+  // it, and a fold that read only ok and count lost both: one mailbox short,
+  // the other complete, and the line vanished.
+  const row = (extra) => Object.assign({
+    ok: true, reason: null, message: null, hint: null, docUrl: null, warning: null, complete: true, count: 1, at: 'A',
+  }, extra || {});
+  const short = row({ warning: 'sync incomplete, more flagged mail than was read.', complete: false, at: 'B' });
+  let m = T.mergeSyncStatus(short, row({ at: 'C' }));
+  assert.equal(m.complete, false, 'a source is incomplete when ANY of its runs was');
+  assert.equal(m.warning, short.warning, 'and the board still has the line to print');
+  m = T.mergeSyncStatus(row(), short);
+  assert.equal(m.complete, false, 'in either order');
+  assert.equal(m.warning, short.warning);
+  m = T.mergeSyncStatus(row({ warning: 'first', complete: false }), row({ warning: 'second', complete: false }));
+  assert.equal(m.warning, 'first', 'two warnings: the first raised is the one kept');
+  m = T.mergeSyncStatus(row(), row());
+  assert.equal(m.complete, true, 'two complete runs stay complete');
+  assert.equal(m.warning, null);
+  // An unhealthy run still owns the row; the short run beside it still
+  // marks the source incomplete.
+  const bad = row({ ok: false, reason: 'no-token', message: 'Work: Outlook is not signed in.', count: 0 });
+  m = T.mergeSyncStatus(short, bad);
+  assert.equal(m.ok, false);
+  assert.equal(m.message, bad.message);
+  assert.equal(m.complete, false);
+  assert.equal(m.warning, short.warning);
+  // A row from before these fields existed reads as complete, as upstream's
+  // own `result.complete !== false` does.
+  const legacy = { ok: true, reason: null, message: null, count: 2, at: 'A' };
+  assert.equal(T.mergeSyncStatus(legacy, row()).complete, true);
+  assert.equal(T.mergeSyncStatus(legacy, short).complete, false);
 });
 
 /* -------------------------------------------------------------------------

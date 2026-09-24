@@ -2629,7 +2629,13 @@ function mergeSyncStatus(prior, next) {
   if (!prior) return next;
   const count = (Number(prior.count) || 0) + (Number(next.count) || 0);
   const worse = prior.ok ? next : prior;
-  return Object.assign({}, worse, { ok: prior.ok && next.ok, count, at: next.at });
+  // Upstream's page-cap signal (0.13.0) folds too: the source is incomplete
+  // when ANY of its runs was, and the row keeps the first warning raised,
+  // which is the line the board prints. Absent reads as complete, exactly as
+  // syncNow's own `result.complete !== false` does.
+  const complete = prior.complete !== false && next.complete !== false;
+  const warning = prior.warning != null ? prior.warning : (next.warning != null ? next.warning : null);
+  return Object.assign({}, worse, { ok: prior.ok && next.ok, count, at: next.at, complete, warning });
 }
 
 /* ---- the stored sign-in ---- */
