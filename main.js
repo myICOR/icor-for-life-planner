@@ -2544,19 +2544,164 @@ function outlookItemFromMessage(m) {
     parentId: null,
   };
 }
+/* ---- which mailbox folders are read (hand-edited, data.json only) ----
+ * `outlookIncludedFolderPaths` in data.json: a list of folder paths, each
+ * anchored at the mailbox root, '/'-separated, case-insensitive, matching
+ * its own folder AND everything beneath it, folders created later included.
+ * There is no settings UI: the list is typed into data.json and picked up on
+ * the next Obsidian reload.
+ *
+ * ABSENT is not the same as EMPTY, and the difference is deliberate.
+ *   absent      -> the filter was never turned on; every folder is read,
+ *                  which is exactly what this plugin did before the feature
+ *                  existed. A vault that never edited data.json sees nothing
+ *                  change.
+ *   [] or junk  -> the key is there and names no usable folder. That is a
+ *                  configuration the user made, and it is answered with a
+ *                  degraded result, never with an empty healthy one (see
+ *                  outlookFetchOpen for why that distinction is load-bearing).
+ *
+ * Parsed defensively here so every later step sees a clean list: a non-array
+ * is the off switch, and non-string entries, empty and whitespace-only
+ * segments, stray and doubled slashes and duplicate paths all fall out.
+ * Returns null (off) or an array of lowercase segment arrays.
+ */
+function outlookIncludedFolderPaths(settings) {
+  const raw = settings ? settings.outlookIncludedFolderPaths : undefined;
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const segs = entry.split('/').map((p) => p.trim().toLowerCase()).filter((p) => p !== '');
+    if (!segs.length) continue;
+    const key = segs.join('/');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(segs);
+  }
+  return out;
+}
+// Does one composed folder path sit inside one of the included paths? Both
+// sides are arrays of lowercase segments, root first, and the comparison is
+// segment by segment, never a string prefix: 'Inbox' covers 'Inbox/Receipts'
+// and never 'Inboxes' or 'Inbox Archive'.
+function outlookFolderPathIncluded(segments, includes) {
+  for (const inc of includes || []) {
+    if (inc.length > segments.length) continue;
+    let hit = true;
+    for (let i = 0; i < inc.length; i++) {
+      if (inc[i] !== segments[i]) { hit = false; break; }
+    }
+    if (hit) return true;
+  }
+  return false;
+}
+// The flat folder list Graph returned -> the set of folder ids the include
+// list covers. Pure: (id, displayName, parentFolderId) rows in, ids out, so
+// the subtree and the segment-boundary rules are a test and not a mailbox.
+//
+// `rootId` is msgfolderroot, the mailbox root. Every path is composed by
+// walking PARENTS up from the folder, and a folder whose chain does not
+// reach the root is dropped: that is what anchors 'Inbox' to the real Inbox
+// instead of to any folder named Inbox nested somewhere. The hop bound is
+// the size of the map, so a parent chain that loops ends instead of hanging,
+// without imposing a depth limit a real mailbox could hit.
+function outlookIncludedFolderIds(folders, rootId, includes) {
+  const byId = new Map();
+  for (const f of Array.isArray(folders) ? folders : []) {
+    const id = f && f.id != null ? String(f.id) : '';
+    if (!id || id === rootId) continue;
+    byId.set(id, {
+      name: String((f && f.displayName) || '').trim().toLowerCase(),
+      parent: f && f.parentFolderId != null ? String(f.parentFolderId) : '',
+    });
+  }
+  const ids = new Set();
+  for (const id of byId.keys()) {
+    const segs = [];
+    let cur = id;
+    let anchored = false;
+    for (let hop = 0; hop < byId.size; hop++) {
+      const node = byId.get(cur);
+      if (!node) break;
+      segs.unshift(node.name);
+      if (node.parent === rootId) { anchored = true; break; }
+      cur = node.parent;
+    }
+    if (anchored && outlookFolderPathIncluded(segs, includes)) ids.add(id);
+  }
+  return ids;
+}
+// Resolve the include list against the live mailbox, at fetch time, with no
+// cache: two flat calls and no recursion. msgfolderroot and the well-known
+// names it belongs to work regardless of the mailbox locale, and the delta
+// function is the one documented way to get EVERY folder of a mailbox in a
+// single paged collection - childFolders returns immediate children only.
+// Both are covered by Mail.Read, which the read sign-in already grants.
+//
+// The page bound THROWS instead of returning what it has. A half-resolved
+// folder set would filter mail the user asked for out of the healthy result,
+// and reconcile would then stamp it done; a throw becomes a degraded result,
+// which touches nothing.
+const OUTLOOK_FOLDER_PAGE_CAP = 20;
+async function outlookResolveIncludedFolderIds(s, deps, includes) {
+  const root = await graphRequest(s, deps, { url: `${GRAPH_BASE}/me/mailFolders/msgfolderroot?$select=id` });
+  const rootId = root && root.id != null ? String(root.id) : '';
+  if (!rootId) throw outlookError('unreachable', 'Microsoft Graph did not name the mailbox root folder.');
+  const folders = [];
+  let url = `${GRAPH_BASE}/me/mailFolders/delta?$select=displayName,parentFolderId`;
+  for (let page = 0; url; page++) {
+    if (page >= OUTLOOK_FOLDER_PAGE_CAP) {
+      throw outlookError('unreachable', 'This mailbox has more folders than one sync can list.', 'Nothing was changed. Report this: the folder list did not finish.');
+    }
+    const data = await graphRequest(s, deps, { url, headers: { Prefer: 'odata.maxpagesize=200' } });
+    for (const f of Array.isArray(data.value) ? data.value : []) folders.push(f);
+    url = graphNextLink(data['@odata.nextLink']);
+  }
+  return outlookIncludedFolderIds(folders, rootId, includes);
+}
 async function outlookFetchOpen(settings, deps) {
   const s = settings || {};
   if (!trimmed(s.outlookClientId)) return degraded('outlook', 'no-token', 'Outlook is not connected (no client id).');
   if (!outlookSignedIn(s)) return degraded('outlook', 'no-token', 'Outlook is not signed in.');
+  const includes = outlookIncludedFolderPaths(s);
+  // Configured to read nothing. This is degraded and NOT an empty healthy
+  // result, and the difference is the whole reason the branch exists: a
+  // healthy empty set is the cockpit's "everything here is finished" signal,
+  // so reconcileStaleIds would read every Outlook note in the vault as
+  // vanished and stamp status: done on all of them in one sync. Degraded
+  // means no fetch, no reconcile, no note touched, and one line on the board
+  // saying what to do.
+  if (includes && !includes.length) {
+    return degraded('outlook', 'misconfigured', 'No Outlook folder is included, so no mail was read.',
+      'List the folder paths you want in outlookIncludedFolderPaths in this plugin\'s data.json, then reload Obsidian.');
+  }
   try {
+    let folderIds = null;
+    if (includes) {
+      folderIds = await outlookResolveIncludedFolderIds(s, deps, includes);
+      // The list named only folders this mailbox does not have. Same hazard,
+      // same answer: a configuration failure is never an empty mailbox.
+      if (!folderIds.size) {
+        return degraded('outlook', 'misconfigured', 'No folder in this mailbox matches outlookIncludedFolderPaths, so no mail was read.',
+          'Check the spelling and give the full path from the mailbox root (Inbox/Receipts), then reload Obsidian.');
+      }
+    }
     const items = [];
+    // Ids the mailbox still carries that this run filtered out. They are not
+    // finished and they are not gone, so they ride back on the result and
+    // are unioned into openIds where it is built (upsertSource).
+    const retainedIds = [];
     let url = `${GRAPH_BASE}/me/messages?${outlookMessagesQuery()}`;
     let refused = false;
     for (let page = 0; page < 10 && url; page++) {
       const data = await graphRequest(s, deps, { url });
       for (const m of Array.isArray(data.value) ? data.value : []) {
         const it = outlookItemFromMessage(m);
-        if (it.id) items.push(it);
+        if (!it.id) continue;
+        if (folderIds && !folderIds.has(String(it.listId || ''))) { retainedIds.push(it.id); continue; }
+        items.push(it);
       }
       const next = data['@odata.nextLink'];
       url = graphNextLink(next);
@@ -2565,13 +2710,21 @@ async function outlookFetchOpen(settings, deps) {
       // what is left behind is a window onto the mailbox, not the mailbox.
       if (next && !url) { refused = true; break; }
     }
+    // Every ok result carries what this run filtered out, the incomplete ones
+    // included: a retained id is open at the source whatever the walk's
+    // completeness, and openIds must hold it either way.
+    const ok = (warning, complete) => {
+      const res = okResult('outlook', items, warning, complete);
+      if (retainedIds.length) res.retainedIds = retainedIds;
+      return res;
+    };
     if (refused) {
-      return okResult('outlook', items, 'sync incomplete, the next page was offered from another host and refused, so nothing was marked done.', false);
+      return ok('sync incomplete, the next page was offered from another host and refused, so nothing was marked done.', false);
     }
     // Still holding a link after the last allowed page: the cap was reached
     // and there is more flagged mail than was read.
-    if (url) return okResult('outlook', items, truncatedWarning(items.length), false);
-    return okResult('outlook', items);
+    if (url) return ok(truncatedWarning(items.length), false);
+    return ok();
   } catch (e) {
     return degraded('outlook', (e && e.reason) || 'unreachable', (e && e.message) || 'Outlook is unreachable.', e && e.hint);
   }
@@ -7395,6 +7548,7 @@ class IcorPlannerPlugin extends Plugin {
     // The mailbox generation these ids belong to (IMAP only). Same contract
     // as `scope`: it rides on the result and is stored beside each shadow.
     const uidValidity = (result && result.uidValidity) || null;
+    const retainedIds = result && result.retainedIds; // filtered, not finished: the union below
     const folder = this.paths().sourceFolder(source);
     const s = this.withSecrets(); // shallow: s._shadow is the live map
     const allItems = collectItems(this.app, this.paths().root);
@@ -7427,6 +7581,11 @@ class IcorPlannerPlugin extends Plugin {
     }
     const advancedParents = [];
     const openIds = new Set();
+    // `retainedIds`: ids the fetch SAW at the source and deliberately left out
+    // of `items` - today, mail outside the included Outlook folders. They are
+    // filtered, not finished, so they are unioned in HERE, where openIds is
+    // built, and therefore reach reconcileStaleIds AND pruneShadows alike.
+    for (const id of retainedIds || []) openIds.add(String(id));
     // Notes this pass moved to the trash because the source no longer has
     // the task. One notice at the end, never one per task.
     let trashed = 0;
@@ -12161,6 +12320,7 @@ module.exports.__test = {
   outlookTokens, outlookTokenSink, saveOutlookTokens, clearOutlookTokens, ensureAccessToken, graphRequest, graphHttpError,
   GRAPH_ORIGIN, graphNextLink,
   outlookMessagesQuery, outlookPriorityRank, outlookItemFromMessage, outlookFetchOpen, outlookSetClosed, outlookStatusText,
+  outlookIncludedFolderPaths, outlookFolderPathIncluded, outlookIncludedFolderIds, outlookResolveIncludedFolderIds, OUTLOOK_FOLDER_PAGE_CAP,
   graphCalendarWindow, graphCalendarQuery, graphInstant, graphAllDay, graphEventDef, outlookCalendarFetchFeed,
   calendarFeedConnector, calendarFeedReady, ensureGraphCalendarFeed, GRAPH_FEED_ID, noteIdPart,
 };
