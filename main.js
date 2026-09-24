@@ -266,6 +266,11 @@ const DEFAULT_SETTINGS = {
   outlookExpiresAt: '',
   outlookAccount: '',
   outlookScopes: '',
+  // More than one mailbox: one record per Microsoft account, hand-edited
+  // here and read on the next reload (outlookAccountList). Empty means the
+  // one reserved `default` account, which IS the seven fields above, so a
+  // vault that never touches this key behaves exactly as it did before.
+  outlookAccounts: [],
   // The calendars (v0.8.0): one entry per feed,
   //   { id, name, url, color: 1..4, enabled, kind: 'ics' }.
   // The single icsUrl of earlier releases becomes the first entry on load
@@ -403,6 +408,11 @@ function secretKey(suffix) {
   return SECRET_KEY_PREFIX + (slug || 'unnamed');
 }
 function fieldSecretKey(field) {
+  // A second mailbox's copy of one of the four Outlook fields
+  // (`outlookRefreshToken__work`) keys off the same suffix with the account
+  // id folded in. Anything else that is not in the table still throws.
+  const acct = outlookAccountFieldParts(field);
+  if (acct) return secretKey(outlookAccountSecretSuffix(acct.accountId, acct.field));
   if (!SECRET_FIELDS[field]) throw new Error(`not a secret field: ${field}`);
   return secretKey(SECRET_FIELDS[field]);
 }
@@ -529,7 +539,7 @@ function migrateSecrets(settings, vault) {
   let changed = false;
   if (Object.prototype.hasOwnProperty.call(s, 'icsUrl')) { delete s.icsUrl; changed = true; }
   if (!vault || !vault.available()) return { changed, moved };
-  for (const field of SECRET_FIELD_NAMES) {
+  for (const field of secretFieldNames(s)) {
     const v = trimmed(s[field]);
     if (!v) continue;
     if (!vault.set(fieldSecretKey(field), v)) continue;
@@ -556,7 +566,7 @@ function migrateSecrets(settings, vault) {
 // Whether the settings object still carries a secret in any field or feed.
 function settingsHoldSecrets(settings) {
   const s = settings || {};
-  if (SECRET_FIELD_NAMES.some((field) => trimmed(s[field]))) return true;
+  if (secretFieldNames(s).some((field) => trimmed(s[field]))) return true;
   // Through the accessor: with no vault given it answers the entry's own address.
   return Array.isArray(s.calendars) && s.calendars.some((f) => f && typeof f === 'object' && !!feedUrl(f));
 }
@@ -571,7 +581,7 @@ async function migrateSecretsSettled(settings, vault) {
   if (!vault || !vault.available() || vault.immediate) return r;
   const s = settings || {};
   const slots = [];
-  for (const field of SECRET_FIELD_NAMES) {
+  for (const field of secretFieldNames(s)) {
     const v = trimmed(s[field]);
     if (v) slots.push({ obj: s, prop: field, name: field, key: fieldSecretKey(field), value: v });
   }
@@ -610,7 +620,7 @@ function withSecrets(settings, vault) {
   Object.defineProperty(s, '_live', { value: settings || null, enumerable: false });
   Object.defineProperty(s, '_vault', { value: vault || null, enumerable: false });
   if (!vault || !vault.available()) return s;
-  for (const field of SECRET_FIELD_NAMES) {
+  for (const field of secretFieldNames(s)) {
     if (trimmed(s[field])) continue;
     const v = vault.get(fieldSecretKey(field));
     if (v) s[field] = v;
@@ -848,7 +858,7 @@ class EnvFileStore {
 function dataJsonStore(settings) {
   const s = settings || {};
   const slot = (id) => {
-    for (const field of SECRET_FIELD_NAMES) if (fieldSecretKey(field) === id) return { obj: s, prop: field };
+    for (const field of secretFieldNames(s)) if (fieldSecretKey(field) === id) return { obj: s, prop: field };
     for (const f of (Array.isArray(s.calendars) ? s.calendars : [])) {
       if (f && typeof f === 'object' && f.id && calendarSecretKey(f.id) === id) return { obj: f, prop: 'url' };
     }
@@ -910,6 +920,20 @@ function secretSlots(settings) {
     const id = fieldSecretKey(field);
     return { id, label: SECRET_SLOT_LABELS[field], envKey: envKeyFor(id), ids: [field].concat(SECRET_SLOT_COMPANIONS[field] || []).map(fieldSecretKey) };
   });
+  // One more pair per extra mailbox, labelled by the account. Same shape as
+  // the calendar loop below, so the key list, the env file and the move
+  // between backends treat a second sign-in exactly like the first. An
+  // account the list no longer names still gets its rows, labelled by id,
+  // so its keys can be cleared from the UI (Flint, M2).
+  for (const a of outlookSecretAccountIds(settings)) {
+    const label = a.listed ? a.label : `${a.id}, not listed`;
+    for (const field of ['outlookRefreshToken', 'outlookAccessToken']) {
+      const own = outlookAccountField(a.id, field);
+      const id = fieldSecretKey(own);
+      const ids = [own].concat((SECRET_SLOT_COMPANIONS[field] || []).map((c) => outlookAccountField(a.id, c)));
+      slots.push({ id, label: `${SECRET_SLOT_LABELS[field]} (${label})`, envKey: envKeyFor(id), ids: ids.map(fieldSecretKey) });
+    }
+  }
   for (const f of calendarFeeds(settings)) {
     if (!f || !f.id || f.kind === 'graph') continue;
     const id = calendarSecretKey(f.id);
@@ -2379,6 +2403,187 @@ async function deviceCodePoll({ clientId, tenant, deviceCode, interval, expiresI
   throw expired();
 }
 
+/* ---- more than one mailbox (hand-edited, data.json only) ----
+ * `outlookAccounts` in data.json: one record per Microsoft account.
+ *
+ *   [ { "id": "default", "label": "Personal" },
+ *     { "id": "work", "label": "Work",
+ *       "clientId": "...", "tenant": "organizations",
+ *       "includedFolderPaths": ["Inbox"] } ]
+ *
+ * There is no settings UI for the LIST (stage 1's lesson: a row per mailbox
+ * object does not survive three accounts). The list is typed into data.json
+ * and picked up on the next Obsidian reload; only the sign-in itself, which
+ * cannot happen in a text file, has a button.
+ *
+ * ABSENT means one account, and that account is the sign-in that already
+ * exists. The id `default` is RESERVED and reads the flat outlook* settings
+ * fields it has always read - the client id, the tenant, the scopes, the
+ * included folder paths and the four secret keys all stay exactly where they
+ * are. So a data.json with no `outlookAccounts` key behaves byte-identically
+ * to the release before this one, and nobody re-authenticates.
+ */
+const OUTLOOK_DEFAULT_ACCOUNT = 'default';
+// Lowercase, digits and dashes: the alphabet the secret store accepts, so an
+// account id needs no escaping on its way into a key.
+const OUTLOOK_ACCOUNT_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+// The four secret-typed fields of one sign-in. Held per account in the FLAT
+// settings namespace under a suffixed name (`outlookRefreshToken__work`) so
+// that every secret walker already in this file - withSecrets, migrateSecrets,
+// settingsHoldSecrets, the env-file mover - carries them without knowing an
+// account exists. A token in a nested object would be invisible to all four.
+const OUTLOOK_ACCOUNT_SECRET_FIELDS = ['outlookRefreshToken', 'outlookAccessToken', 'outlookExpiresAt', 'outlookAccount'];
+const OUTLOOK_ACCOUNT_FIELD_SEP = '__';
+function outlookAccountId(raw) {
+  // Validated, never transformed. The secret key is literally the id, so a
+  // silent lowercase would make two spellings of a record one account and
+  // give the second one the first one's tokens.
+  const v = typeof raw === 'string' ? raw.trim() : '';
+  return OUTLOOK_ACCOUNT_ID_RE.test(v) ? v : '';
+}
+// The flat settings field holding one account's copy of a secret field.
+// `default` keeps the bare legacy name, which is the whole no-re-auth trick.
+function outlookAccountField(accountId, field) {
+  return accountId === OUTLOOK_DEFAULT_ACCOUNT ? field : `${field}${OUTLOOK_ACCOUNT_FIELD_SEP}${accountId}`;
+}
+// The inverse, and it must be strict: anything that is not one of the four
+// known fields followed by a valid account id is NOT a secret field, so
+// fieldSecretKey goes on throwing for it.
+function outlookAccountFieldParts(field) {
+  const raw = String(field == null ? '' : field);
+  const at = raw.indexOf(OUTLOOK_ACCOUNT_FIELD_SEP);
+  if (at < 0) return null;
+  const base = raw.slice(0, at);
+  const id = outlookAccountId(raw.slice(at + OUTLOOK_ACCOUNT_FIELD_SEP.length));
+  if (!id || id === OUTLOOK_DEFAULT_ACCOUNT || !OUTLOOK_ACCOUNT_SECRET_FIELDS.includes(base)) return null;
+  return { field: base, accountId: id };
+}
+// The store key suffix: `outlook-refresh-token` for the reserved default,
+// `outlook-work-refresh-token` for anyone else. Derived from the same
+// SECRET_FIELDS table, so a suffix renamed upstream renames here too.
+function outlookAccountSecretSuffix(accountId, field) {
+  const base = SECRET_FIELDS[field];
+  if (!base) return '';
+  return accountId === OUTLOOK_DEFAULT_ACCOUNT ? base : base.replace(/^outlook-/, `outlook-${accountId}-`);
+}
+function normalizeOutlookAccount(rec, id, settings) {
+  const r = rec && typeof rec === 'object' ? rec : {};
+  const s = settings || {};
+  const isDefault = id === OUTLOOK_DEFAULT_ACCOUNT;
+  // The reserved default IS the flat settings fields, so its record may add
+  // only what is new (label, folder, enabled) and can never override the
+  // credentials or the folder filter. Otherwise the list would say one thing
+  // and the fetch - which reads the settings object itself - would do another.
+  const pick = (key, legacy) => (isDefault ? s[legacy] : r[key]);
+  const tenant = trimmed(pick('tenant', 'outlookTenant'));
+  return {
+    id,
+    label: trimmed(r.label) || (isDefault ? 'Outlook' : id),
+    clientId: trimmed(pick('clientId', 'outlookClientId')),
+    tenant: OUTLOOK_TENANTS.includes(tenant) ? tenant : 'common',
+    scopes: trimmed(pick('scopes', 'outlookScopes')),
+    // Stage 1's filter, per account. Absent on a record means absent for that
+    // mailbox - the filter was never switched on there - and never an
+    // inherited copy of another mailbox's paths.
+    includedFolderPaths: pick('includedFolderPaths', 'outlookIncludedFolderPaths'),
+    enabled: r.enabled !== false,
+  };
+}
+// Every account, `default` always first and always present. Unusable records
+// (no id, a duplicate id, not an object) fall out here so no later step has
+// to think about them.
+function outlookAccountList(settings) {
+  const s = settings || {};
+  const raw = Array.isArray(s.outlookAccounts) ? s.outlookAccounts : [];
+  const out = [];
+  const seen = new Set();
+  for (const rec of raw) {
+    if (!rec || typeof rec !== 'object') continue;
+    const id = outlookAccountId(rec.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(normalizeOutlookAccount(rec, id, s));
+  }
+  if (!seen.has(OUTLOOK_DEFAULT_ACCOUNT)) {
+    out.unshift(normalizeOutlookAccount(null, OUTLOOK_DEFAULT_ACCOUNT, s));
+  }
+  return out;
+}
+// Never the WRONG account. An id nothing lists any more - a note or a feed
+// left behind by a record that was deleted from data.json - resolves to a
+// blank, disabled account of that id, so every consumer reads "not signed in"
+// instead of quietly falling back to the first mailbox and reading, or
+// writing a flag to, somebody else's mail.
+function outlookAccountById(settings, accountId) {
+  const id = outlookAccountId(accountId) || OUTLOOK_DEFAULT_ACCOUNT;
+  const found = outlookAccountList(settings).find((a) => a.id === id);
+  if (found) return found;
+  return { id, label: id, clientId: '', tenant: 'common', scopes: '', includedFolderPaths: undefined, enabled: false };
+}
+// One account seen through the flat shape every Outlook function already
+// reads. This is the lever the whole stage rests on: outlookFetchOpen,
+// ensureAccessToken, graphRequest, outlookSetClosed and the folder filter are
+// unchanged, because the account is projected onto the field names they
+// already use rather than threaded through their signatures.
+//
+// `default` IS the flat settings, so it is returned untouched: no copy, no
+// projection, and the existing sign-in path is byte-for-byte what it was.
+function outlookAccountView(settings, account) {
+  const s = settings || {};
+  if (!account || account.id === OUTLOOK_DEFAULT_ACCOUNT) return s;
+  const v = Object.assign({}, s, {
+    outlookClientId: account.clientId,
+    outlookTenant: account.tenant,
+    outlookScopes: account.scopes,
+    outlookIncludedFolderPaths: account.includedFolderPaths,
+  });
+  for (const f of OUTLOOK_ACCOUNT_SECRET_FIELDS) v[f] = trimmed(s[outlookAccountField(account.id, f)]);
+  // withSecrets hangs these off the settings copy so a rotated token can
+  // reach the real settings and the store. The projection is one more copy,
+  // so it has to carry them on or a refresh would write to a throwaway.
+  Object.defineProperty(v, '_live', { value: s._live || s, enumerable: false });
+  Object.defineProperty(v, '_vault', { value: s._vault || null, enumerable: false });
+  Object.defineProperty(v, '_account', { value: account.id, enumerable: false });
+  return v;
+}
+// The account ids whose secrets the walkers must carry: every extra account
+// the list names, THEN every id a settings key names that the list does not
+// (Flint, M2 2026-09-12). A record deleted from data.json before Sign out
+// was pressed leaves its four `__<id>` keys behind - in the store with no
+// row to clear them from, or, after the failed write P-1 exists for, in
+// data.json as a key no walker could see or blank again. The names follow
+// the data as well as the list, so an orphan is moved, audited, listed and
+// blanked by the same rules as a live account. Bare flat keys are the
+// reserved default and add nothing; the parser is the strict one.
+function outlookSecretAccountIds(settings) {
+  const s = settings || {};
+  const out = [];
+  const seen = new Set([OUTLOOK_DEFAULT_ACCOUNT]);
+  for (const a of outlookAccountList(s)) {
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);
+    out.push({ id: a.id, label: a.label, listed: true });
+  }
+  for (const key of Object.keys(s)) {
+    const parts = outlookAccountFieldParts(key);
+    if (!parts || seen.has(parts.accountId)) continue;
+    seen.add(parts.accountId);
+    out.push({ id: parts.accountId, label: parts.accountId, listed: false });
+  }
+  return out;
+}
+// Every secret-typed settings field, the fixed table plus one set per extra
+// account, listed or orphaned. The walkers that move, read and audit
+// secrets take this instead of the bare table, so a second mailbox's
+// refresh token is subject to exactly the same rules as the first one's.
+function secretFieldNames(settings) {
+  const extra = [];
+  for (const a of outlookSecretAccountIds(settings)) {
+    for (const f of OUTLOOK_ACCOUNT_SECRET_FIELDS) extra.push(outlookAccountField(a.id, f));
+  }
+  return extra.length ? SECRET_FIELD_NAMES.concat(extra) : SECRET_FIELD_NAMES;
+}
+
 /* ---- the stored sign-in ---- */
 function outlookSignedIn(settings) {
   const s = settings || {};
@@ -2402,7 +2607,9 @@ function outlookTokens(settings) {
 // run reads the rotated token, never the one Microsoft just retired.
 function outlookTokenSink(s) {
   const view = s || {};
-  return { live: view._live || view, vault: view._vault || null, view };
+  // Which account's keys a write lands on. The view knows (outlookAccountView
+  // stamps it); the flat settings are the reserved default.
+  return { live: view._live || view, vault: view._vault || null, view, account: view._account || OUTLOOK_DEFAULT_ACCOUNT };
 }
 // Persist what a token response carried. The refresh token rotates: a new
 // one overwrites the stored one; an absent one leaves it untouched.
@@ -2412,8 +2619,11 @@ function saveOutlookTokens(sink, tokens, now) {
   const t = tokens || {};
   const at = (now == null ? Date.now() : now) + Math.max(0, Number(t.expiresIn) || 0) * 1000;
   let held = true;
+  // The store key is the account's; the view stays flat, because the view is
+  // what the rest of this run reads through.
+  const acct = k.account || OUTLOOK_DEFAULT_ACCOUNT;
   const put = (field, value) => {
-    held = writeSecret(live, k.vault, field, value) && held;
+    held = writeSecret(live, k.vault, outlookAccountField(acct, field), value) && held;
     if (k.view && k.view !== live) k.view[field] = value;
   };
   put('outlookAccessToken', t.accessToken ? String(t.accessToken) : '');
@@ -2429,8 +2639,9 @@ function saveOutlookTokens(sink, tokens, now) {
 function clearOutlookTokens(sink) {
   const k = sink || {};
   const live = k.live || {};
-  for (const f of ['outlookRefreshToken', 'outlookAccessToken', 'outlookExpiresAt', 'outlookAccount']) {
-    writeSecret(live, k.vault, f, '');
+  const acct = k.account || OUTLOOK_DEFAULT_ACCOUNT;
+  for (const f of OUTLOOK_ACCOUNT_SECRET_FIELDS) {
+    writeSecret(live, k.vault, outlookAccountField(acct, f), '');
     if (k.view && k.view !== live) k.view[f] = '';
   }
   if (!(k.vault && k.vault.available()) && typeof live._persist === 'function') live._persist();
@@ -12323,4 +12534,9 @@ module.exports.__test = {
   outlookIncludedFolderPaths, outlookFolderPathIncluded, outlookIncludedFolderIds, outlookResolveIncludedFolderIds, OUTLOOK_FOLDER_PAGE_CAP,
   graphCalendarWindow, graphCalendarQuery, graphInstant, graphAllDay, graphEventDef, outlookCalendarFetchFeed,
   calendarFeedConnector, calendarFeedReady, ensureGraphCalendarFeed, GRAPH_FEED_ID, noteIdPart,
+  // More than one mailbox (stage 2).
+  OUTLOOK_DEFAULT_ACCOUNT, OUTLOOK_ACCOUNT_SECRET_FIELDS,
+  outlookAccountId, outlookAccountField, outlookAccountFieldParts, outlookAccountSecretSuffix,
+  normalizeOutlookAccount, outlookAccountList, outlookAccountById,
+  outlookAccountView, secretFieldNames,
 };
