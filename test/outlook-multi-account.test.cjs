@@ -219,11 +219,11 @@ test('THE GATE: one account\'s healthy fetch never reconciles another account\'s
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const body = main.slice(main.indexOf('async upsertSource('), main.indexOf('async readBody('));
   const call = 'reconcileStaleIds(source, allItems, openIds, (it) => scopeAgrees(s._shadow[shadowKey(source, accountId, it.id)], scope)\n'
-    + '        && (!accountId || itemAccountId(it) === accountId))';
-  assert.ok(body.indexOf(call) > -1, 'the predicate the sync passes: the query scope first, then the account');
-  const inScope = (accountId, shadows, scope) => (it) => T.scopeAgrees(shadows[T.shadowKey('outlook', accountId, it.id)], scope)
-    && (!accountId || T.itemAccountId(it) === accountId);
-  const stale = (open, accountId, shadows, scope) => T.reconcileStaleIds('outlook', all, new Set(open), inScope(accountId, shadows || {}, scope || null)).map((x) => x.id);
+    + '        && (!accountId || itemAccountId(it) === accountId) && !accountMissing)';
+  assert.ok(body.indexOf(call) > -1, 'the predicate the sync passes: the query scope first, then the account, then the stamp\'s fallback');
+  const inScope = (accountId, shadows, scope, accountMissing) => (it) => T.scopeAgrees(shadows[T.shadowKey('outlook', accountId, it.id)], scope)
+    && (!accountId || T.itemAccountId(it) === accountId) && !accountMissing;
+  const stale = (open, accountId, shadows, scope, accountMissing) => T.reconcileStaleIds('outlook', all, new Set(open), inScope(accountId, shadows || {}, scope || null, !!accountMissing)).map((x) => x.id);
   // The default account syncs and its own two are still open: nothing at all
   // is stale, and the Work notes are NOT seen as vanished.
   assert.deepEqual(stale(['a1', 'a2'], 'default'), []);
@@ -233,6 +233,9 @@ test('THE GATE: one account\'s healthy fetch never reconciles another account\'s
   assert.deepEqual(stale(['a1'], 'default'), ['a2']);
   // No account is the single-sign-in behaviour, unchanged.
   assert.deepEqual(stale(['a1'], null).sort(), ['a2', 'b1', 'b2']);
+  // No account while more than one is listed is a run that lost its stamp:
+  // it owns no note (the sync-level gate is outlook-account-stamp.test.cjs).
+  assert.deepEqual(stale(['a1'], null, {}, null, true), []);
   // A manual item is never returned, whatever account it claims.
   assert.deepEqual(T.reconcileStaleIds('manual', all, new Set(), inScope('default', {}, null)), []);
   // And upstream's half of the predicate still holds beside the account's:
@@ -264,7 +267,10 @@ test('SOURCE: the upsert scopes its existing map, its shadow keys and its reconc
   assert.match(body, /const accountId = account \? account\.id : null;/);
   assert.match(body, /if \(accountId && itemAccountId\(it\) !== accountId\) continue;/, 'the existing map is scoped');
   assert.match(body, /const account = \(result && result\.account\) \|\| null;/, 'the account is read off the result syncNow stamped on it');
-  assert.match(body, /reconcileStaleIds\(source, allItems, openIds, \(it\) => scopeAgrees\(s\._shadow\[shadowKey\(source, accountId, it\.id\)\], scope\)\n\s*&& \(!accountId \|\| itemAccountId\(it\) === accountId\)\)/);
+  assert.match(body, /reconcileStaleIds\(source, allItems, openIds, \(it\) => scopeAgrees\(s\._shadow\[shadowKey\(source, accountId, it\.id\)\], scope\)\n\s*&& \(!accountId \|\| itemAccountId\(it\) === accountId\) && !accountMissing\)/);
+  // The stamp's fallback: a multi-account run that lost
+  // its account owns no note. Behaviour in outlook-account-stamp.test.cjs.
+  assert.match(body, /const accountMissing = source === 'outlook' && !accountId && outlookAccountList\(s\)\.length > 1;/);
   const sync = main.slice(main.indexOf('async syncNow('), main.indexOf('async upsertSource('));
   assert.match(sync, /if \(account\) result\.account = account;\n\s*if \(result\.ok\) await this\.upsertSource\(source, result\);/,
     'syncNow stamps the run\'s account on its result right before upstream\'s own call');

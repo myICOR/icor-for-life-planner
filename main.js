@@ -8059,10 +8059,16 @@ class IcorPlannerPlugin extends Plugin {
     // A source with more than one sign-in adds a fourth: the note must belong
     // to the mailbox this run fetched, or account A's healthy fetch reads
     // account B's notes as vanished and stamps done on every one of them.
+    // And a run that cannot NAME its mailbox owns no note at all: the account
+    // rides on the result syncNow stamps, and an upstream that one day copies
+    // or freezes the result before its call drops the stamp without a sound,
+    // leaving a null that would otherwise read as "every Outlook note is
+    // mine". With one sign-in the null means what it always meant.
+    const accountMissing = source === 'outlook' && !accountId && outlookAccountList(s).length > 1;
     const complete = !(result && result.complete === false);
     const stale = complete && items.length > 0
       ? reconcileStaleIds(source, allItems, openIds, (it) => scopeAgrees(s._shadow[shadowKey(source, accountId, it.id)], scope)
-        && (!accountId || itemAccountId(it) === accountId))
+        && (!accountId || itemAccountId(it) === accountId) && !accountMissing)
       : [];
     // Absence alone cannot tell "completed there" from "deleted there", and
     // Tom's rule needs them told apart: the notes are a mirror, so a deleted
