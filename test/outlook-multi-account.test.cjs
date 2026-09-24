@@ -26,6 +26,7 @@
  *     item, not from whichever account is first in the list;
  *   - a disabled or unreachable account DEGRADES and never returns a healthy
  *     empty result, which would stamp done on every note it owns;
+ *   - the folder move: idempotent, held whole on a collision, blind to an
  *     account the settings no longer list, and verified by the SET of
  *     external ids rather than by a count.
  *
@@ -64,6 +65,7 @@ test('no outlookAccounts key at all is exactly one account, `default`, reading t
   assert.equal(list[0].clientId, CLIENT, 'the client id already in data.json');
   assert.equal(list[0].tenant, 'consumers', "the tenant already in data.json, not the 'common' default");
   assert.equal(list[0].scopes, 'Mail.Read Calendars.Read');
+  assert.equal(list[0].folder, '', 'no subfolder: the notes stay exactly where they are');
   assert.equal(list[0].enabled, true);
   // The projection for the reserved default is the settings object ITSELF,
   // so the existing sign-in path is not merely equivalent, it is the same.
@@ -276,6 +278,7 @@ test('SOURCE: the upsert scopes its existing map, its shadow keys and its reconc
     'syncNow stamps the run\'s account on its result right before upstream\'s own call');
   assert.match(body, /pruneShadows\(s\._shadow, source, new Set\(existing\.keys\(\)\), openIds, nowMs, undefined, accountId\)/);
   assert.ok(!/`\$\{source\}:\$\{/.test(body), 'every shadow key goes through shadowKey');
+  assert.match(body, /this\.paths\(\)\.sourceFolder\(source, account && account\.folder\)/, 'notes are written into the account folder');
   // The reopen retry is scoped too: it walks every item in the vault.
   const reopen = body.slice(body.indexOf('if (s.completeOnSource) {'));
   assert.match(reopen, /if \(accountId && itemAccountId\(it\) !== accountId\) continue;/);
@@ -558,6 +561,86 @@ test('RUN: with one account the status message is exactly what it always was - n
 });
 
 /* -------------------------------------------------------------------------
+ * 8. FOLDERS, AND THE ONE STEP COPYING main.js BACK DOES NOT UNDO
+ * ---------------------------------------------------------------------- */
+
+test('a folder is one safe segment, and an unusable one leaves the notes where they are', () => {
+  assert.equal(T.outlookAccountFolder('Work'), 'Work');
+  assert.equal(T.outlookAccountFolder('  Work  '), 'Work');
+  for (const bad of ['', '   ', '.', '..', 'a/b', 'a\\b', '../x', 'a:b', 'a?b', 'a*b', null, undefined, 7]) {
+    assert.equal(T.outlookAccountFolder(bad), '', String(bad));
+  }
+  const p = T.plannerPaths({ plannerFolder: '02 Planner' });
+  assert.equal(p.sourceFolder('outlook'), '02 Planner/Outlook');
+  assert.equal(p.sourceFolder('outlook', ''), '02 Planner/Outlook', 'no folder is the source folder itself');
+  assert.equal(p.sourceFolder('outlook', 'Work'), '02 Planner/Outlook/Work');
+  assert.equal(p.sourceFolder('outlook', '../../etc'), '02 Planner/Outlook', 'a traversal never escapes the room');
+  assert.equal(p.sourceFolder('manual'), '02 Planner/Manual');
+});
+
+test('THE MIGRATION: symmetric, idempotent, and blind to an account the settings no longer list', () => {
+  const items = [
+    item({ id: 'a1', path: '02 Planner/Outlook/A.md' }),                                  // default, at the root
+    item({ id: 'a2', path: '02 Planner/Outlook/Personal/B.md' }),                          // default, already moved
+    item({ id: 'b1', path: '02 Planner/Outlook/C.md', sourceAccount: 'work' }),            // work, at the root
+    item({ id: 'z1', path: '02 Planner/Outlook/D.md', sourceAccount: 'gone' }),            // an account nobody lists
+    Object.assign(item({ id: 't1', path: '02 Planner/Todoist/E.md' }), { source: 'todoist' }),
+  ];
+  const folders = { default: '02 Planner/Outlook/Personal', work: '02 Planner/Outlook/Work' };
+  const plan = T.outlookFolderPlan(items, folders, new Set(items.map((i) => i.path)));
+  assert.deepEqual(plan.moves, [
+    { from: '02 Planner/Outlook/A.md', to: '02 Planner/Outlook/Personal/A.md', id: 'a1' },
+    { from: '02 Planner/Outlook/C.md', to: '02 Planner/Outlook/Work/C.md', id: 'b1' },
+  ], 'symmetric by design: the first account moves too');
+  assert.deepEqual(plan.collisions, []);
+  assert.equal(plan.skipped, 2, 'the note already in place, and the account nobody lists');
+  // Idempotent: running the plan again over the moved set asks for nothing.
+  const after = items.map((i) => {
+    const m = plan.moves.find((x) => x.from === i.path);
+    return m ? Object.assign({}, i, { path: m.to }) : i;
+  });
+  const again = T.outlookFolderPlan(after, folders, new Set(after.map((i) => i.path)));
+  assert.deepEqual(again.moves, [], 'a second run moves nothing, so an interrupted run resumes rather than repeats');
+});
+
+test('THE MIGRATION: a taken target is a collision, and one collision holds the WHOLE plan', () => {
+  const items = [
+    item({ id: 'a1', path: '02 Planner/Outlook/A.md' }),
+    item({ id: 'a2', path: '02 Planner/Outlook/B.md' }),
+  ];
+  const existing = new Set(['02 Planner/Outlook/A.md', '02 Planner/Outlook/B.md', '02 Planner/Outlook/Personal/A.md']);
+  const plan = T.outlookFolderPlan(items, { default: '02 Planner/Outlook/Personal' }, existing);
+  assert.deepEqual(plan.collisions.map((c) => c.id), ['a1'], 'never overwritten');
+  assert.deepEqual(plan.moves.map((m) => m.id), ['a2'], 'the plan still reports what WOULD move');
+  // Two notes whose basenames collide inside one plan collide with each other.
+  const twins = [
+    item({ id: 'a1', path: '02 Planner/Outlook/A.md' }),
+    item({ id: 'b1', path: '02 Planner/Outlook/Nested/A.md', sourceAccount: 'work' }),
+  ];
+  const t = T.outlookFolderPlan(twins, { default: '02 Planner/Outlook/X', work: '02 Planner/Outlook/X' }, new Set());
+  assert.equal(t.moves.length, 1);
+  assert.equal(t.collisions.length, 1, 'the second claim on one path is a collision, not an overwrite');
+});
+
+test('SOURCE: the move is link-aware, held whole, verified by id set, and a no-op until a folder is named', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('async migrateOutlookFolders('), main.indexOf('async syncNow('));
+  assert.ok(body.length > 200);
+  assert.match(body, /if \(!accounts\.some\(\(a\) => a\.folder\)\) return/, 'not one vault read until a folder is named');
+  assert.match(body, /await this\.app\.fileManager\.renameFile\(file, normalizePath\(m\.to\)\)/, 'the link-aware rename');
+  assert.ok(!/vault\.rename\(|vault\.delete|adapter\.remove|vault\.create\(/.test(body), 'never a raw rename, a delete or a recreate');
+  assert.match(body, /if \(plan\.collisions\.length\) \{[\s\S]*?return \{ moved: 0,/, 'a collision moves nothing at all');
+  assert.match(body, /const verified = a\.size === b\.size && \[\.\.\.a\]\.every\(\(k\) => b\.has\(k\)\)/,
+    'the SET of ids is the check: a count still matches when one note has overwritten another');
+  // and it runs before anything reads the vault for a sync (the verified
+  // gate that sits between the two calls has its own tests below)
+  const sync = main.slice(main.indexOf('async syncNow('), main.indexOf('async upsertSource('));
+  const mig = sync.indexOf('await this.migrateOutlookFolders()');
+  assert.ok(mig > 0 && mig < sync.indexOf('await this.ensureFolders()'), 'the move runs first');
+  assert.ok(mig < sync.indexOf('this.withSecrets()'), 'and before the settings are resolved for a fetch');
+});
+
+/* -------------------------------------------------------------------------
  * 9. THE CALENDAR FEED, AND THE OAUTH CALLBACK
  * ---------------------------------------------------------------------- */
 
@@ -711,13 +794,149 @@ test('a `default` record adds what is new and can never override the flat creden
   });
   const a = T.outlookAccountById(s, 'default');
   assert.equal(a.label, 'Personal', 'the label is the record\'s');
+  assert.equal(a.folder, 'Personal', 'and so is the folder');
   assert.equal(a.clientId, CLIENT, 'the client id is the flat one');
   assert.equal(a.tenant, 'consumers', 'and so is the tenant');
   assert.equal(a.includedFolderPaths, undefined, 'and the filter is read off the flat key by the fetch');
   assert.equal(T.outlookAccountView(s, a), s, 'still the settings object itself');
 });
 
+/* -------------------------------------------------------------------------
+ * 10. THE MIGRATION, ACTUALLY RUN
+ *
+ * The plan above is pure. This runs the executor against a fake vault,
+ * because a file move is the one step in this feature that copying main.js
+ * back does not undo, and a source scan is not evidence that it works.
+ * ---------------------------------------------------------------------- */
+
 const PluginClass = require(T.__mainPath);
+const { TFile, TFolder } = T.__obsidian;
+
+// A vault with real TFolder/TFile instances, so collectItems walks it the way
+// Obsidian's does. `files` is path -> frontmatter object.
+function fakeVault(files) {
+  const calls = { renamed: [], folders: [] };
+  const byPath = new Map();
+  const folder = (p) => {
+    if (byPath.has(p)) return byPath.get(p);
+    const f = new TFolder();
+    f.path = p; f.children = [];
+    byPath.set(p, f);
+    if (p.includes('/')) folder(p.slice(0, p.lastIndexOf('/'))).children.push(f);
+    return f;
+  };
+  const addFile = (p, fm) => {
+    const f = new TFile();
+    f.path = p; f.extension = 'md'; f.basename = p.slice(p.lastIndexOf('/') + 1, -3);
+    f.__fm = fm;
+    byPath.set(p, f);
+    folder(p.slice(0, p.lastIndexOf('/'))).children.push(f);
+    return f;
+  };
+  for (const p of Object.keys(files)) addFile(p, files[p]);
+  const app = {
+    vault: {
+      getAbstractFileByPath: (p) => byPath.get(p) || null,
+      createFolder: async (p) => { calls.folders.push(p); folder(p); },
+    },
+    fileManager: {
+      renameFile: async (f, to) => {
+        if (byPath.has(to)) throw new Error('file already exists');
+        calls.renamed.push([f.path, to]);
+        const parent = folder(f.path.slice(0, f.path.lastIndexOf('/')));
+        parent.children = parent.children.filter((c) => c !== f);
+        byPath.delete(f.path);
+        f.path = to; f.basename = to.slice(to.lastIndexOf('/') + 1, -3);
+        byPath.set(to, f);
+        folder(to.slice(0, to.lastIndexOf('/'))).children.push(f);
+      },
+    },
+    metadataCache: { getFileCache: (f) => ({ frontmatter: f.__fm }) },
+  };
+  return { app, calls, byPath };
+}
+const note = (id, acct) => Object.assign(
+  { type: 'planner-item', source: 'outlook', external_id: id, status: 'open' },
+  acct ? { source_account: acct } : {});
+
+function plugin(settings, app) {
+  const p = Object.create(PluginClass.prototype);
+  p.settings = settings;
+  p.app = app;
+  return p;
+}
+
+test('RUN: no account names a folder, so nothing is read and nothing moves', async () => {
+  const { app, calls } = fakeVault({
+    '02 Planner/Outlook/A.md': note('m1'),
+    '02 Planner/Outlook/B.md': note('m2'),
+  });
+  const p = plugin(base({ plannerFolder: '02 Planner' }), app);
+  const r = await p.migrateOutlookFolders();
+  assert.deepEqual(r, { moved: 0, collisions: [], skipped: 0, verified: true });
+  assert.deepEqual(calls.renamed, [], 'installing this build moves nothing');
+  assert.deepEqual(calls.folders, []);
+});
+
+test('RUN: symmetric - the first account\'s notes move too, links follow, and a second run is a no-op', async () => {
+  const files = {
+    '02 Planner/Outlook/A.md': note('m1'),
+    '02 Planner/Outlook/B.md': note('m2'),
+    '02 Planner/Outlook/C.md': note('m3', 'work'),
+    '02 Planner/Todoist/T.md': { type: 'planner-item', source: 'todoist', external_id: 't1', status: 'open' },
+  };
+  const { app, calls } = fakeVault(files);
+  const settings = base({
+    plannerFolder: '02 Planner',
+    outlookAccounts: [{ id: 'default', label: 'Personal', folder: 'Personal' }, WORK],
+  });
+  const p = plugin(settings, app);
+  const r = await p.migrateOutlookFolders(false);
+  assert.equal(r.moved, 3);
+  assert.equal(r.verified, true, 'every external_id still present, under the same account');
+  assert.deepEqual(r.collisions, []);
+  assert.deepEqual(calls.renamed, [
+    ['02 Planner/Outlook/A.md', '02 Planner/Outlook/Personal/A.md'],
+    ['02 Planner/Outlook/B.md', '02 Planner/Outlook/Personal/B.md'],
+    ['02 Planner/Outlook/C.md', '02 Planner/Outlook/Work/C.md'],
+  ]);
+  assert.ok(calls.folders.includes('02 Planner/Outlook/Personal'), 'the folders are made first');
+  assert.ok(calls.folders.includes('02 Planner/Outlook/Work'));
+  // The Todoist note was never considered.
+  assert.ok(!calls.renamed.some(([from]) => from.includes('Todoist')));
+  // Idempotent: an interrupted run is RESUMED by running again, not repeated.
+  const second = await p.migrateOutlookFolders(false);
+  assert.equal(second.moved, 0);
+  assert.equal(calls.renamed.length, 3, 'nothing moved twice');
+});
+
+test('RUN: a taken target name moves NOTHING at all, and the notes are left exactly as they were', async () => {
+  const { app, calls } = fakeVault({
+    '02 Planner/Outlook/A.md': note('m1'),
+    '02 Planner/Outlook/B.md': note('m2'),
+    '02 Planner/Outlook/Personal/A.md': { type: 'note' }, // a file in the way
+  });
+  const p = plugin(base({ plannerFolder: '02 Planner', outlookAccounts: [{ id: 'default', folder: 'Personal' }] }), app);
+  const r = await p.migrateOutlookFolders(false);
+  assert.equal(r.moved, 0, 'the whole plan is held: half a move is the state nobody can reason about');
+  assert.equal(r.collisions.length, 1);
+  assert.deepEqual(calls.renamed, []);
+  assert.ok(app.vault.getAbstractFileByPath('02 Planner/Outlook/A.md'), 'nothing was deleted or overwritten');
+  assert.ok(app.vault.getAbstractFileByPath('02 Planner/Outlook/B.md'));
+});
+
+test('RUN: a note whose account nothing lists any more is left where it is', async () => {
+  const { app, calls } = fakeVault({
+    '02 Planner/Outlook/A.md': note('m1'),
+    '02 Planner/Outlook/Z.md': note('m9', 'deleted-account'),
+  });
+  const p = plugin(base({ plannerFolder: '02 Planner', outlookAccounts: [{ id: 'default', folder: 'Personal' }] }), app);
+  const r = await p.migrateOutlookFolders(false);
+  assert.deepEqual(calls.renamed, [['02 Planner/Outlook/A.md', '02 Planner/Outlook/Personal/A.md']]);
+  assert.equal(r.skipped, 1);
+  assert.ok(app.vault.getAbstractFileByPath('02 Planner/Outlook/Z.md'), 'never moved, never touched, never deleted');
+});
+
 /* -------------------------------------------------------------------------
  * 12. ORPHANED TOKEN FIELDS ARE STILL SECRETS
  * ---------------------------------------------------------------------- */

@@ -1005,9 +1005,14 @@ function plannerPaths(settings) {
     root,
     // One cache file for ALL calendar events (never per-event notes).
     cache: `${root}/Calendar Events.md`,
-    sourceFolder: (sourceId) => {
+    // `sub` is one account's own subfolder name (Outlook, stage 2); '' or
+    // absent is the source folder itself, which is where every note written
+    // before accounts existed still lives.
+    sourceFolder: (sourceId, sub) => {
       const src = SOURCES[sourceId];
-      return src && src.folder ? `${root}/${src.folder}` : null;
+      if (!src || !src.folder) return null;
+      const leaf = outlookAccountFolder(sub);
+      return leaf ? `${root}/${src.folder}/${leaf}` : `${root}/${src.folder}`;
     },
     // A folder boundary, not a prefix: '02 Planner2/x.md' is outside '02 Planner'.
     isInside: (path) => typeof path === 'string' && path.startsWith(`${root}/`),
@@ -2406,8 +2411,8 @@ async function deviceCodePoll({ clientId, tenant, deviceCode, interval, expiresI
 /* ---- more than one mailbox (hand-edited, data.json only) ----
  * `outlookAccounts` in data.json: one record per Microsoft account.
  *
- *   [ { "id": "default", "label": "Personal" },
- *     { "id": "work", "label": "Work",
+ *   [ { "id": "default", "label": "Personal", "folder": "Personal" },
+ *     { "id": "work", "label": "Work", "folder": "Work",
  *       "clientId": "...", "tenant": "organizations",
  *       "includedFolderPaths": ["Inbox"] } ]
  *
@@ -2422,6 +2427,11 @@ async function deviceCodePoll({ clientId, tenant, deviceCode, interval, expiresI
  * included folder paths and the four secret keys all stay exactly where they
  * are. So a data.json with no `outlookAccounts` key behaves byte-identically
  * to the release before this one, and nobody re-authenticates.
+ *
+ * `folder` is a SUBFOLDER of the source folder, and '' means the source
+ * folder itself (where the notes are today). It is stated explicitly and is
+ * never derived from `label`, because a folder derived from a display name
+ * would move machine-tended notes every time the name was edited.
  */
 const OUTLOOK_DEFAULT_ACCOUNT = 'default';
 // Lowercase, digits and dashes: the alphabet the secret store accepts, so an
@@ -2466,6 +2476,15 @@ function outlookAccountSecretSuffix(accountId, field) {
   if (!base) return '';
   return accountId === OUTLOOK_DEFAULT_ACCOUNT ? base : base.replace(/^outlook-/, `outlook-${accountId}-`);
 }
+// A folder NAME, not a path: one segment, no separators, no dot entries.
+// A record that states an unusable folder is read as stating none, so a typo
+// leaves the notes where they are rather than moving them somewhere odd.
+function outlookAccountFolder(raw) {
+  const v = (typeof raw === 'string' ? raw : '').trim().replace(/^\/+|\/+$/g, '');
+  if (!v || v === '.' || v === '..') return '';
+  if (/[\\/:*?"<>|]/.test(v)) return '';
+  return v;
+}
 function normalizeOutlookAccount(rec, id, settings) {
   const r = rec && typeof rec === 'object' ? rec : {};
   const s = settings || {};
@@ -2479,6 +2498,7 @@ function normalizeOutlookAccount(rec, id, settings) {
   return {
     id,
     label: trimmed(r.label) || (isDefault ? 'Outlook' : id),
+    folder: outlookAccountFolder(r.folder),
     clientId: trimmed(pick('clientId', 'outlookClientId')),
     tenant: OUTLOOK_TENANTS.includes(tenant) ? tenant : 'common',
     scopes: trimmed(pick('scopes', 'outlookScopes')),
@@ -2523,7 +2543,7 @@ function outlookAccountById(settings, accountId) {
   const id = raw || OUTLOOK_DEFAULT_ACCOUNT;
   const found = outlookAccountList(settings).find((a) => a.id === id);
   if (found) return found;
-  return { id, label: id, clientId: '', tenant: 'common', scopes: '', includedFolderPaths: undefined, enabled: false };
+  return { id, label: id, folder: '', clientId: '', tenant: 'common', scopes: '', includedFolderPaths: undefined, enabled: false };
 }
 // One account seen through the flat shape every Outlook function already
 // reads. This is the lever the whole feature rests on: outlookFetchOpen,
@@ -2601,6 +2621,49 @@ function outlookExtraRuns(settings) {
     runs.push({ source: 'outlook', account: a, view: outlookAccountView(settings, a) });
   }
   return runs;
+}
+/* ---- moving existing notes into their account's folder ----
+ * Ian's ruling is symmetric: every mailbox gets a subfolder, the first one
+ * included, so notes written before accounts existed move. A file move is the
+ * one thing in this build that copying main.js back does not undo, so the
+ * decision is a pure function with no vault access at all, and the executor
+ * below does nothing the plan did not say.
+ *
+ * Four rules, and they are requirements rather than preferences:
+ *   - idempotent: a note already in its account's folder is not in the plan,
+ *     so an interrupted run is resumed by running again, never repeated;
+ *   - never destructive: a target path that is already taken is a COLLISION,
+ *     and one collision holds the whole plan rather than moving the rest, so
+ *     a half-moved set never has to be reasoned about;
+ *   - an account the settings no longer list is left alone entirely - its
+ *     notes are not moved, not touched, not deleted;
+ *   - the move itself goes through FileManager.renameFile (the executor), so
+ *     every wikilink elsewhere in the vault follows the note.
+ *
+ * `items` are planner items (source, id, path, sourceAccount). `folderFor` is
+ * accountId -> the folder that account's notes belong in. Returns
+ * { moves: [{ from, to, id }], collisions: [{ from, to, id }], skipped }.
+ */
+function outlookFolderPlan(items, folderFor, existingPaths) {
+  const taken = existingPaths instanceof Set ? existingPaths : new Set(existingPaths || []);
+  const moves = [];
+  const collisions = [];
+  let skipped = 0;
+  const claimed = new Set();
+  for (const it of items || []) {
+    if (!it || it.source !== 'outlook' || !it.path) continue;
+    const acct = itemAccountId(it);
+    if (!Object.prototype.hasOwnProperty.call(folderFor, acct)) { skipped += 1; continue; }
+    const base = String(it.path).slice(String(it.path).lastIndexOf('/') + 1);
+    const to = `${folderFor[acct]}/${base}`;
+    if (to === it.path) { skipped += 1; continue; }
+    // Already taken by a file that is not this one, or by an earlier move in
+    // this same plan: report, never overwrite.
+    if (taken.has(to) || claimed.has(to)) { collisions.push({ from: it.path, to, id: it.id }); continue; }
+    claimed.add(to);
+    moves.push({ from: it.path, to, id: it.id });
+  }
+  return { moves, collisions, skipped };
 }
 // A sign-in that never came back is dropped after this. The PKCE verifier is
 // single-use and the code it pairs with expires sooner than this anyway.
@@ -7793,6 +7856,68 @@ class IcorPlannerPlugin extends Plugin {
     // And Weeks (0.14.0): one note per ISO week. The note itself is created
     // on demand, the room is created here so it is visible from day one.
     await mk(p.weeks);
+    // One subfolder per Outlook account that names one. The source folder
+    // itself is made above, so an account with no folder needs nothing.
+    for (const a of outlookAccountList(this.settings)) {
+      if (a.folder) await mk(p.sourceFolder('outlook', a.folder));
+    }
+  }
+
+  // Move Outlook notes into their account's folder. Runs before every sync
+  // and is a NO-OP - not one vault read - until an account names a folder, so
+  // installing this build moves nothing. The move happens on the reload after
+  // the folder is written into data.json, which makes the one irreversible
+  // step in this feature something the member asked for by name.
+  //
+  // Returns { moved, collisions, skipped, verified } and never throws.
+  async migrateOutlookFolders(report) {
+    const accounts = outlookAccountList(this.settings);
+    if (!accounts.some((a) => a.folder)) return { moved: 0, collisions: [], skipped: 0, verified: true };
+    const p = this.paths();
+    const folderFor = {};
+    for (const a of accounts) folderFor[a.id] = p.sourceFolder('outlook', a.folder);
+    const before = collectItems(this.app, p.root).filter((it) => it.source === 'outlook');
+    const paths = new Set();
+    const walk = (f) => { for (const c of (f && f.children) || []) { if (c instanceof TFolder) walk(c); else paths.add(c.path); } };
+    const root = this.app.vault.getAbstractFileByPath(p.root);
+    if (root instanceof TFolder) walk(root);
+    const plan = outlookFolderPlan(before, folderFor, paths);
+    // One taken target holds the WHOLE plan. Half a move is the state nobody
+    // can reason about afterwards, and notes are never overwritten here.
+    if (plan.collisions.length) {
+      const first = plan.collisions[0];
+      new Notice(`Planner: ${plan.collisions.length} Outlook note${plan.collisions.length === 1 ? '' : 's'} cannot move because the target name is taken (${first.to}). Nothing was moved. Rename or remove the file in the way, then sync again.`, 15000);
+      return { moved: 0, collisions: plan.collisions, skipped: plan.skipped, verified: true };
+    }
+    if (!plan.moves.length) return { moved: 0, collisions: [], skipped: plan.skipped, verified: true };
+    await this.ensureFolders();
+    let moved = 0;
+    for (const m of plan.moves) {
+      const file = this.app.vault.getAbstractFileByPath(m.from);
+      if (!(file instanceof TFile)) continue;
+      try {
+        // renameFile, never vault.rename and never delete-and-recreate: this
+        // is the one call that rewrites the wikilinks pointing at the note.
+        await this.app.fileManager.renameFile(file, normalizePath(m.to));
+        moved += 1;
+      } catch (e) {
+        new Notice(`Planner: could not move ${m.from} (${(e && e.message) || e}). The notes already moved are fine; sync again to finish.`, 12000);
+        break;
+      }
+    }
+    // The verification that matters is the SET of external ids, not the
+    // count: a count still matches when one note has overwritten another.
+    const after = collectItems(this.app, p.root).filter((it) => it.source === 'outlook');
+    const ids = (list) => new Set(list.map((it) => `${itemAccountId(it)} ${it.id}`));
+    const a = ids(before);
+    const b = ids(after);
+    const verified = a.size === b.size && [...a].every((k) => b.has(k));
+    if (!verified) {
+      new Notice(`Planner: after moving Outlook notes the vault holds ${b.size} of them where it held ${a.size}. Nothing was deleted by the move; check ${p.sourceFolder('outlook')} before syncing again.`, 20000);
+    } else if (moved && report !== false) {
+      new Notice(`Planner: moved ${moved} Outlook note${moved === 1 ? '' : 's'} into their account folder. Links were updated.`, 8000);
+    }
+    return { moved, collisions: [], skipped: plan.skipped, verified };
   }
 
   async syncNow(manual) {
@@ -7802,6 +7927,11 @@ class IcorPlannerPlugin extends Plugin {
     try {
       // One confirming GET per absent task per sync, not per code path.
       this._goneProbed = new Set();
+      // Before anything else: a note must be in its account's folder before
+      // that account's run reads the vault, or the run would find no note at
+      // the new path and write a second copy of it there. A no-op - not one
+      // vault read - until an account names a folder in data.json.
+      await this.migrateOutlookFolders();
       await this.ensureFolders();
       if (this.secrets.mode === 'env-file') await this.envStore.load();
       const s = this.withSecrets();
@@ -7914,7 +8044,7 @@ class IcorPlannerPlugin extends Plugin {
     const account = (result && result.account) || null;
     const accountId = account ? account.id : null;
     const retainedIds = result && result.retainedIds; // filtered, not finished: the union below
-    const folder = this.paths().sourceFolder(source);
+    const folder = this.paths().sourceFolder(source, account && account.folder);
     const s = this.withSecrets(); // shallow: s._shadow is the live map
     const allItems = collectItems(this.app, this.paths().root);
     const existing = new Map(); // external id -> item
@@ -12835,9 +12965,9 @@ module.exports.__test = {
   // More than one mailbox.
   OUTLOOK_DEFAULT_ACCOUNT, OUTLOOK_ACCOUNT_SECRET_FIELDS, OUTLOOK_PENDING_TTL_MS,
   outlookAccountId, outlookAccountField, outlookAccountFieldParts, outlookAccountSecretSuffix,
-  normalizeOutlookAccount, outlookAccountList, outlookAccountById,
+  outlookAccountFolder, normalizeOutlookAccount, outlookAccountList, outlookAccountById,
   outlookAccountView, outlookFeedView, secretFieldNames, outlookExtraRuns, mergeSyncStatus,
-  outlookWriteAccountScopes, itemAccountId, shadowKey, shadowPrefix,
+  outlookWriteAccountScopes, outlookFolderPlan, itemAccountId, shadowKey, shadowPrefix,
   graphFeedId, graphFeedAccountId,
   traySectionKey, traySourceSections, PlannerTrayView,
 };
