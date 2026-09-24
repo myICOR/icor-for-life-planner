@@ -2583,6 +2583,25 @@ function secretFieldNames(settings) {
   }
   return extra.length ? SECRET_FIELD_NAMES.concat(extra) : SECRET_FIELD_NAMES;
 }
+// A sign-in that never came back is dropped after this. The PKCE verifier is
+// single-use and the code it pairs with expires sooner than this anyway.
+const OUTLOOK_PENDING_TTL_MS = 10 * 60 * 1000;
+// What a finished sign-in grants, written back where that account reads it.
+// The reserved default writes the flat field it has always written; an extra
+// account writes the key on its own record in `outlookAccounts`.
+function outlookWriteAccountScopes(settings, accountId, scopes) {
+  const s = settings || {};
+  const id = outlookAccountId(accountId) || OUTLOOK_DEFAULT_ACCOUNT;
+  const v = trimmed(scopes);
+  if (id === OUTLOOK_DEFAULT_ACCOUNT) s.outlookScopes = v;
+  if (!Array.isArray(s.outlookAccounts)) return;
+  for (const rec of s.outlookAccounts) {
+    if (rec && typeof rec === 'object' && outlookAccountId(rec.id) === id) {
+      if (id !== OUTLOOK_DEFAULT_ACCOUNT || rec.scopes !== undefined) rec.scopes = v;
+      return;
+    }
+  }
+}
 // The settings as ONE graph calendar feed's account sees them. Declared here
 // with the rest of the projection; the feed id / accountId pair it reads is
 // defined with the calendar code.
@@ -8087,19 +8106,51 @@ class IcorPlannerPlugin extends Plugin {
     return { visibleWeekStarts: weeks };
   }
 
+  // The sign-ins waiting for a reply, keyed by their own state nonce. One
+  // redirect URI and one protocol handler serve every account, because the
+  // nonce is what Microsoft hands back untouched and it is already generated,
+  // already sent and already checked. `_outlookPendingState` is the one the
+  // open modal belongs to, which is all the device-code path needs.
+  outlookPendingMap() {
+    if (!(this._outlookPending instanceof Map)) this._outlookPending = new Map();
+    return this._outlookPending;
+  }
+  // An abandoned sign-in must not sit in the map for the session: the PKCE
+  // verifier is single-use and short-lived, and so is the code it pairs with.
+  outlookSweepPending(now) {
+    const map = this.outlookPendingMap();
+    const t = Number(now) || Date.now();
+    for (const [k, v] of map) if (!v || t - (Number(v.startedAt) || 0) > OUTLOOK_PENDING_TTL_MS) map.delete(k);
+    return map;
+  }
+  outlookClearPending() {
+    this.outlookPendingMap().clear();
+    this._outlookPendingState = null;
+  }
+
   async outlookSignIn(opts) {
     const o = opts || {};
-    const clientId = trimmed(this.settings.outlookClientId);
-    if (!clientId) { new Notice('Planner: paste your Application (client) ID under Outlook first.'); return; }
+    const account = outlookAccountById(this.settings, o.accountId) || outlookAccountById(this.settings, OUTLOOK_DEFAULT_ACCOUNT);
+    const clientId = trimmed(account.clientId);
+    if (!clientId) {
+      new Notice(account.id === OUTLOOK_DEFAULT_ACCOUNT
+        ? 'Planner: paste your Application (client) ID under Outlook first.'
+        : `Planner: the "${account.label}" account in data.json has no clientId. Add one, reload, then sign in.`, 10000);
+      return;
+    }
     // Mail.ReadWrite is asked for only once Complete on source is on: the
     // one feature that writes a flag is the one that earns the permission.
     const write = o.write === true || this.settings.completeOnSource === true;
-    const tenant = outlookTenant(this.settings);
+    const tenant = account.tenant;
     const scopes = outlookScopeString(write);
     const { verifier, challenge } = await pkcePair();
     const state = randomState();
     const url = authorizeUrl({ clientId, tenant, scopes, redirectUri: OUTLOOK_REDIRECT_URI, state, challenge });
-    this._outlookPending = { state, verifier, clientId, tenant, scopes, onDone: typeof o.onDone === 'function' ? o.onDone : null };
+    this.outlookSweepPending().set(state, {
+      state, verifier, clientId, tenant, scopes, accountId: account.id, label: account.label,
+      startedAt: Date.now(), onDone: typeof o.onDone === 'function' ? o.onDone : null,
+    });
+    this._outlookPendingState = state;
     if (this._outlookModal) this._outlookModal.close();
     this._outlookModal = new OutlookSignInModal(this.app, this, { url });
     this._outlookModal.open();
@@ -8110,7 +8161,12 @@ class IcorPlannerPlugin extends Plugin {
   // obsidian:// URL: code and state on success, error and error_description
   // when Microsoft declined.
   async outlookAuthCallback(params) {
-    const pending = this._outlookPending;
+    const map = this.outlookSweepPending();
+    // Routed on the nonce the reply carries. A miss leaves `pending` null and
+    // parseAuthCallback answers with the message it already had for exactly
+    // this case ("No sign-in was waiting for this reply").
+    const replyState = trimmed(params && params.state);
+    const pending = (replyState && map.get(replyState)) || null;
     const modal = this._outlookModal;
     const parsed = parseAuthCallback(params, pending ? pending.state : null);
     if (!parsed.ok) {
@@ -8118,7 +8174,7 @@ class IcorPlannerPlugin extends Plugin {
       if (modal) modal.setStatus(text, true); else new Notice(text, 10000);
       return;
     }
-    this._outlookPending = null;
+    map.delete(pending.state);
     if (modal) modal.setStatus('Signed in. Finishing up...', false);
     try {
       const tokens = await tokenExchange({
@@ -8136,7 +8192,7 @@ class IcorPlannerPlugin extends Plugin {
   // The fallback: a code typed on any device, polled here until Microsoft
   // confirms, gives up, or the modal is closed.
   async outlookDeviceSignIn() {
-    const pending = this._outlookPending;
+    const pending = this._outlookPendingState ? this.outlookPendingMap().get(this._outlookPendingState) : null;
     const modal = this._outlookModal;
     if (!pending || !modal) return;
     try {
@@ -8144,9 +8200,9 @@ class IcorPlannerPlugin extends Plugin {
       modal.showDeviceCode(dc);
       const tokens = await deviceCodePoll(
         { clientId: pending.clientId, tenant: pending.tenant, deviceCode: dc.deviceCode, interval: dc.interval, expiresIn: dc.expiresIn },
-        { cancelled: () => modal.closed || this._outlookPending !== pending },
+        { cancelled: () => modal.closed || this.outlookPendingMap().get(pending.state) !== pending },
       );
-      this._outlookPending = null;
+      this.outlookPendingMap().delete(pending.state);
       await this.outlookFinishSignIn(tokens, pending);
     } catch (e) {
       if (e && e.reason === 'cancelled') return;
@@ -8157,16 +8213,21 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   async outlookFinishSignIn(tokens, pending) {
-    const sink = { live: this.settings, vault: this.secrets };
+    const accountId = (pending && pending.accountId) || OUTLOOK_DEFAULT_ACCOUNT;
+    const sink = { live: this.settings, vault: this.secrets, account: accountId };
     saveOutlookTokens(sink, tokens);
-    this.settings.outlookScopes = trimmed(tokens.scope) || (pending && pending.scopes) || '';
+    outlookWriteAccountScopes(this.settings, accountId, trimmed(tokens.scope) || (pending && pending.scopes) || '');
     let account = '';
     try {
-      const me = await graphRequest(this.withSecrets(), undefined, { url: `${GRAPH_BASE}/me?$select=userPrincipalName,mail,displayName` });
+      // Through this account's own view, so /me is asked with the token just
+      // stored for it and never with the first account's.
+      const view = outlookAccountView(this.withSecrets(), outlookAccountById(this.settings, accountId));
+      const me = await graphRequest(view, undefined, { url: `${GRAPH_BASE}/me?$select=userPrincipalName,mail,displayName` });
       account = trimmed(me.mail) || trimmed(me.userPrincipalName) || trimmed(me.displayName);
     } catch { /* the account line is a nicety; the tokens are what matter */ }
-    writeSecret(this.settings, this.secrets, 'outlookAccount', account || 'Microsoft account');
-    ensureGraphCalendarFeed(this.settings);
+    writeSecret(this.settings, this.secrets, outlookAccountField(accountId, 'outlookAccount'), account || 'Microsoft account');
+    if (accountId === OUTLOOK_DEFAULT_ACCOUNT) ensureGraphCalendarFeed(this.settings);
+    else ensureGraphCalendarFeed(this.settings, accountId, pending && pending.label);
     delete this.syncStatus.outlook;
     await this.saveSettings();
     if (this._outlookModal) { this._outlookModal.close(); this._outlookModal = null; }
@@ -8179,10 +8240,16 @@ class IcorPlannerPlugin extends Plugin {
   // stay, like a removed token elsewhere; the Outlook calendar row stays
   // and says it wants a sign-in. Revoking on Microsoft's side is the
   // member's own click, linked from the settings tab.
-  async outlookSignOut() {
-    clearOutlookTokens({ live: this.settings, vault: this.secrets });
-    this.settings.outlookScopes = '';
-    this._outlookPending = null;
+  async outlookSignOut(accountId) {
+    const id = outlookAccountId(accountId) || OUTLOOK_DEFAULT_ACCOUNT;
+    // The reserved default clears exactly as it always did; only an extra
+    // account needs the widened call.
+    if (id === OUTLOOK_DEFAULT_ACCOUNT) clearOutlookTokens({ live: this.settings, vault: this.secrets });
+    else clearOutlookTokens({ live: this.settings, vault: this.secrets, account: id });
+    outlookWriteAccountScopes(this.settings, id, '');
+    // Only this account's pending sign-in is dropped: another mailbox may
+    // have one in flight in a browser tab.
+    for (const [k, v] of this.outlookPendingMap()) if (v && v.accountId === id) this.outlookPendingMap().delete(k);
     delete this.syncStatus.outlook;
     await this.saveSettings();
     this.recomputeCalendarDefs();
@@ -12064,33 +12131,44 @@ class IcorPlannerSettingTab extends PluginSettingTab {
           this.plugin.settings.outlookTenant = OUTLOOK_TENANTS.includes(v) ? v : 'common';
           await this.plugin.saveSettings();
         }));
-    const acct = new Setting(containerEl).setName('Microsoft account');
-    acct.descEl.setAttribute('aria-live', 'polite');
-    let signInBtn = null;
-    let signOutBtn = null;
-    const renderOutlookStatus = () => {
-      const r = this.plugin.withSecrets();
-      acct.setDesc(outlookStatusText(r));
-      const signed = outlookSignedIn(r);
-      if (signInBtn) {
-        signInBtn.setButtonText(signed ? 'Sign in again' : 'Sign in');
-        signInBtn.setDisabled(!trimmed(r.outlookClientId));
-        if (!signed) signInBtn.setCta(); else signInBtn.removeCta();
-      }
-      if (signOutBtn) signOutBtn.setDisabled(!signed);
-    };
-    acct.addButton((b) => {
-      signInBtn = b;
-      b.onClick(() => this.plugin.outlookSignIn({ onDone: () => this.display() }));
-    });
-    acct.addButton((b) => {
-      signOutBtn = b;
-      b.setButtonText('Sign out').onClick(async () => {
-        await this.plugin.outlookSignOut();
-        this.display();
+    // One row per account, because a sign-in is the one thing that cannot
+    // happen in a text file. The LIST itself is not editable here: accounts
+    // are typed into outlookAccounts in data.json and read on reload, which
+    // is what keeps this block two or three rows instead of one per mailbox.
+    const outlookAccts = outlookAccountList(this.plugin.settings);
+    const statusRenderers = [];
+    for (const a of outlookAccts) {
+      const acct = new Setting(containerEl)
+        .setName(outlookAccts.length > 1 ? `Microsoft account: ${a.label}` : 'Microsoft account');
+      acct.descEl.setAttribute('aria-live', 'polite');
+      let signInBtn = null;
+      let signOutBtn = null;
+      const renderOutlookStatus = () => {
+        const r = outlookAccountView(this.plugin.withSecrets(), a);
+        acct.setDesc(outlookStatusText(r));
+        const signed = outlookSignedIn(r);
+        if (signInBtn) {
+          signInBtn.setButtonText(signed ? 'Sign in again' : 'Sign in');
+          signInBtn.setDisabled(!trimmed(r.outlookClientId));
+          if (!signed) signInBtn.setCta(); else signInBtn.removeCta();
+        }
+        if (signOutBtn) signOutBtn.setDisabled(!signed);
+      };
+      acct.addButton((b) => {
+        signInBtn = b;
+        b.onClick(() => this.plugin.outlookSignIn({ accountId: a.id, onDone: () => this.display() }));
       });
-    });
-    renderOutlookStatus();
+      acct.addButton((b) => {
+        signOutBtn = b;
+        b.setButtonText('Sign out').onClick(async () => {
+          await this.plugin.outlookSignOut(a.id);
+          this.display();
+        });
+      });
+      renderOutlookStatus();
+      statusRenderers.push(renderOutlookStatus);
+    }
+    const renderOutlookStatus = () => { for (const f of statusRenderers) f(); };
     const revoke = new Setting(containerEl)
       .setName('Manage or revoke access')
       .setDesc('Signing out only removes the token from this vault. To fully revoke access on Microsoft\'s side, visit myaccount.microsoft.com (Apps & services), or account.live.com/consent/Manage for a personal account.');
@@ -12564,9 +12642,10 @@ module.exports.__test = {
   graphCalendarWindow, graphCalendarQuery, graphInstant, graphAllDay, graphEventDef, outlookCalendarFetchFeed,
   calendarFeedConnector, calendarFeedReady, ensureGraphCalendarFeed, GRAPH_FEED_ID, noteIdPart,
   // More than one mailbox (stage 2).
-  OUTLOOK_DEFAULT_ACCOUNT, OUTLOOK_ACCOUNT_SECRET_FIELDS,
+  OUTLOOK_DEFAULT_ACCOUNT, OUTLOOK_ACCOUNT_SECRET_FIELDS, OUTLOOK_PENDING_TTL_MS,
   outlookAccountId, outlookAccountField, outlookAccountFieldParts, outlookAccountSecretSuffix,
   normalizeOutlookAccount, outlookAccountList, outlookAccountById,
   outlookAccountView, outlookFeedView, secretFieldNames,
+  outlookWriteAccountScopes,
   graphFeedId, graphFeedAccountId,
 };

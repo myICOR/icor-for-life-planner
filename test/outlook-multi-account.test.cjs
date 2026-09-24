@@ -216,6 +216,42 @@ test('a graph feed is ready by ITS OWN account\'s sign-in', () => {
   assert.equal(c.ready({ id: 'outlook-graph-work', kind: 'graph', accountId: 'work' }, signedIn), true);
 });
 
+test('SOURCE: the callback is routed on the state nonce, with a TTL, behind the one handler', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  // One handler, one redirect URI: a per-account redirect URI would mean a
+  // per-account Entra registration.
+  assert.equal((main.match(/registerObsidianProtocolHandler\(/g) || []).length, 1);
+  assert.match(main, /const OUTLOOK_REDIRECT_URI = 'obsidian:\/\/icor-for-life-planner\/auth';/);
+  const cb = main.slice(main.indexOf('async outlookAuthCallback('), main.indexOf('async outlookDeviceSignIn('));
+  assert.match(cb, /const pending = \(replyState && map\.get\(replyState\)\) \|\| null;/, 'routed on the nonce');
+  assert.match(cb, /map\.delete\(pending\.state\);/, 'and the entry is consumed');
+  const signIn = main.slice(main.indexOf('async outlookSignIn('), main.indexOf('// The protocol handler'));
+  assert.match(signIn, /this\.outlookSweepPending\(\)\.set\(state, \{/, 'swept before every new sign-in');
+  assert.match(signIn, /accountId: account\.id/);
+  assert.match(main, /const OUTLOOK_PENDING_TTL_MS = 10 \* 60 \* 1000;/);
+  // The no-match branch is the one that was already correct.
+  assert.match(main, /No sign-in was waiting for this reply\./);
+});
+
+test('the granted scopes are written where that account reads them back', () => {
+  const s = base({ outlookAccounts: [WORK] });
+  T.outlookWriteAccountScopes(s, 'work', 'Mail.Read Mail.ReadWrite');
+  assert.equal(T.outlookAccountById(s, 'work').scopes, 'Mail.Read Mail.ReadWrite');
+  assert.equal(T.outlookHasWriteScope(T.outlookAccountView(s, T.outlookAccountById(s, 'work'))), true);
+  assert.equal(s.outlookScopes, 'Mail.Read Calendars.Read', 'the first account is not touched');
+  T.outlookWriteAccountScopes(s, 'default', 'Mail.Read');
+  assert.equal(s.outlookScopes, 'Mail.Read', 'the reserved default writes the flat field it always wrote');
+  T.outlookWriteAccountScopes(s, 'work', '');
+  assert.equal(T.outlookHasWriteScope(T.outlookAccountView(s, T.outlookAccountById(s, 'work'))), false, 'sign-out revokes it');
+});
+
+test('no scope crept in: an extra mailbox asks for exactly what the first one asked for', () => {
+  // A forced re-consent is a blocker the member must hear about before it
+  // ships, so the constants are pinned rather than eyeballed.
+  assert.deepEqual(T.OUTLOOK_SCOPES_READ, ['offline_access', 'openid', 'profile', 'Mail.Read', 'Calendars.Read']);
+  assert.deepEqual(T.OUTLOOK_SCOPES_WRITE, ['offline_access', 'openid', 'profile', 'Mail.Read', 'Mail.ReadWrite', 'Calendars.Read']);
+});
+
 test('a junk account record cannot make the plugin read a mailbox it should not', () => {
   const s = base({
     outlookAccounts: [
