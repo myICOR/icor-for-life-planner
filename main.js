@@ -2583,6 +2583,20 @@ function secretFieldNames(settings) {
   }
   return extra.length ? SECRET_FIELD_NAMES.concat(extra) : SECRET_FIELD_NAMES;
 }
+// The sign-ins BEYOND the first. The first account of every source is the
+// run syncNow already makes from the registry; these are the extra mailboxes,
+// each with a view of the settings that resolves its own credentials. An
+// account switched off in data.json contributes no run and is therefore never
+// fetched and never reconciled - its notes go inert, exactly like mail from
+// an excluded folder.
+function outlookExtraRuns(settings) {
+  const runs = [];
+  for (const a of outlookAccountList(settings)) {
+    if (a.id === OUTLOOK_DEFAULT_ACCOUNT || !a.enabled) continue;
+    runs.push({ source: 'outlook', account: a, view: outlookAccountView(settings, a) });
+  }
+  return runs;
+}
 // A sign-in that never came back is dropped after this. The PKCE verifier is
 // single-use and the code it pairs with expires sooner than this anyway.
 const OUTLOOK_PENDING_TTL_MS = 10 * 60 * 1000;
@@ -2608,6 +2622,14 @@ function outlookWriteAccountScopes(settings, accountId, scopes) {
 function outlookFeedView(settings, feed) {
   const s = settings || {};
   return outlookAccountView(s, outlookAccountById(s, graphFeedAccountId(feed)));
+}
+// Two runs of one source folded into the one status row the tray reads.
+// Unhealthy wins and is reported first; the counts add up.
+function mergeSyncStatus(prior, next) {
+  if (!prior) return next;
+  const count = (Number(prior.count) || 0) + (Number(next.count) || 0);
+  const worse = prior.ok ? next : prior;
+  return Object.assign({}, worse, { ok: prior.ok && next.ok, count, at: next.at });
 }
 
 /* ---- the stored sign-in ---- */
@@ -2900,6 +2922,12 @@ async function outlookResolveIncludedFolderIds(s, deps, includes) {
 }
 async function outlookFetchOpen(settings, deps) {
   const s = settings || {};
+  // An account switched off in data.json reads nothing, and says so through
+  // the DEGRADED path rather than a healthy empty result: a healthy empty set
+  // is the cockpit's "everything here is finished" signal, which would stamp
+  // done on every note this mailbox owns.
+  const own = outlookAccountById(s, s._account || OUTLOOK_DEFAULT_ACCOUNT);
+  if (own && !own.enabled) return degraded('outlook', 'misconfigured', 'This Outlook account is switched off in outlookAccounts, so no mail was read.', 'Set "enabled": true on it in this plugin\'s data.json, then reload Obsidian.');
   if (!trimmed(s.outlookClientId)) return degraded('outlook', 'no-token', 'Outlook is not connected (no client id).');
   if (!outlookSignedIn(s)) return degraded('outlook', 'no-token', 'Outlook is not signed in.');
   const includes = outlookIncludedFolderPaths(s);
@@ -2970,7 +2998,10 @@ async function outlookFetchOpen(settings, deps) {
 // Refused here, before any call, when the sign-in never granted the write
 // permission; the toggle's own hint says how to grant it.
 async function outlookSetClosed(settings, item, closed, deps) {
-  const s = settings || {};
+  // The flag must land in the mailbox the note came from. The item names its
+  // account (source_account, absent = default), so the view is resolved HERE
+  // rather than at the call site, which goes on handing over plain settings.
+  const s = outlookAccountView(settings || {}, outlookAccountById(settings || {}, itemAccountId(item)));
   if (!outlookSignedIn(s)) throw new Error('Outlook is not signed in');
   if (!outlookHasWriteScope(s)) throw new Error('Outlook has not granted the Mail.ReadWrite permission yet: sign in again under Outlook in the settings');
   await graphRequest(s, deps, {
@@ -4911,6 +4942,10 @@ function itemFromFrontmatter(fm, path, basename) {
     url: fm.url ? String(fm.url) : null,
     tags: Array.isArray(fm.tags) ? fm.tags.map(String) : [],
     sourceStatus: fm.source_status != null ? String(fm.source_status) : null,
+    // Which sign-in of a multi-account source this note came from. ABSENT
+    // MEANS `default` (itemAccountId), which is what makes every note
+    // written before accounts existed correct with no write at all.
+    sourceAccount: fm.source_account != null && fm.source_account !== '' ? String(fm.source_account) : null,
     listId: fm.list_id != null ? String(fm.list_id) : null,
     plannedDay: fm.planned_day ? String(fm.planned_day).slice(0, 10) : null,
     plannedHalf: fm.planned_half === 'am' || fm.planned_half === 'pm' ? fm.planned_half : null,
@@ -5050,6 +5085,24 @@ function manualItemFrontmatter(title, id, nowIso) {
   };
 }
 
+// The account a note belongs to. ABSENT MEANS `default`: the field is written
+// only for the second mailbox onward, so the notes that existed before this
+// release are correct without ever being opened.
+function itemAccountId(item) {
+  const v = item && item.sourceAccount != null ? String(item.sourceAccount).trim() : '';
+  return v || OUTLOOK_DEFAULT_ACCOUNT;
+}
+// The shadow map's key. `default` and every single-account source keep the
+// bare `source:id` shape, so the shadows already in data.json - the records
+// that let an uncheck reach the mailbox - keep working untouched.
+function shadowKey(source, accountId, id) {
+  const a = accountId ? String(accountId) : OUTLOOK_DEFAULT_ACCOUNT;
+  return a === OUTLOOK_DEFAULT_ACCOUNT ? `${source}:${id}` : `${source}@${a}:${id}`;
+}
+function shadowPrefix(source, accountId) {
+  const a = accountId ? String(accountId) : OUTLOOK_DEFAULT_ACCOUNT;
+  return a === OUTLOOK_DEFAULT_ACCOUNT ? `${source}:` : `${source}@${a}:`;
+}
 // Which of `allItems` a HEALTHY fetch of `source` proves are finished.
 //
 // The guard that matters is the first one: a source only ever reconciles its
@@ -5305,10 +5358,13 @@ function ghostItemsFor(items) {
 // pruned by two rules instead: no note carries the id any more, or the done
 // shadow is older than `maxDoneAgeMs`. Returns the keys to drop.
 const DONE_SHADOW_MAX_AGE_MS = 90 * 86400000;
-function pruneShadows(shadowMap, source, existingIds, openIds, nowMs, maxDoneAgeMs) {
+function pruneShadows(shadowMap, source, existingIds, openIds, nowMs, maxDoneAgeMs, accountId) {
   const maxAge = Number.isFinite(maxDoneAgeMs) ? maxDoneAgeMs : DONE_SHADOW_MAX_AGE_MS;
   const drop = [];
-  const prefix = `${source}:`;
+  // Scoped to the account whose ids were passed in: a run that fetched one
+  // mailbox must not prune the shadows of another, which its `existingIds`
+  // and `openIds` cannot possibly contain.
+  const prefix = shadowPrefix(source, accountId);
   for (const key of Object.keys(shadowMap || {})) {
     if (!key.startsWith(prefix)) continue;
     const id = key.slice(prefix.length);
@@ -7736,16 +7792,43 @@ class IcorPlannerPlugin extends Plugin {
       if (this.secrets.mode === 'env-file') await this.envStore.load();
       const s = this.withSecrets();
       // Every task connector starts at once, in registry order; results are
-      // awaited and applied in that same order.
+      // awaited and applied in that same order. A source with more than one
+      // sign-in contributes one run per enabled account (syncRuns), each on
+      // its own view of the settings; every other source is exactly one run
+      // with no account, which is what it has always been.
       const runs = SYNCED_SOURCES.map((k) => [k, CONNECTORS[k].fetchOpen(s)]);
-      for (const [source, promise] of runs) {
+      // A source with more than one sign-in contributes one EXTRA run per
+      // account beyond the first: same connector, same registry, a view of
+      // the settings that resolves that account's credentials. The line above
+      // is every source's first account and is unchanged.
+      const accounts = runs.map(([k]) => (k === 'outlook' ? outlookAccountById(s, OUTLOOK_DEFAULT_ACCOUNT) : null));
+      for (const r of outlookExtraRuns(s)) {
+        runs.push([r.source, CONNECTORS[r.source].fetchOpen(r.view)]);
+        accounts.push(r.account);
+      }
+      const started = new Set();
+      for (let i = 0; i < runs.length; i += 1) {
+        const [source, promise] = runs[i];
+        const account = accounts[i];
         const result = await promise;
-        this.syncStatus[source] = {
-          ok: result.ok, reason: result.reason || null, message: result.message || null,
+        // One status row per source, however many runs fed it: the tray, the
+        // manual-sync notices and the board all key off the source id. The
+        // first unhealthy run is the one reported, and its message names the
+        // mailbox so "which one" is answerable from the row.
+        const label = account && account.id !== OUTLOOK_DEFAULT_ACCOUNT ? `${account.label}: ` : '';
+        const next = {
+          ok: result.ok, reason: result.reason || null,
+          message: result.message ? `${label}${result.message}` : null,
           hint: result.hint || null, docUrl: result.docUrl || null,
           warning: result.warning || null, complete: result.complete !== false,
           count: result.items.length, at: new Date().toISOString(),
         };
+        this.syncStatus[source] = started.has(source) ? mergeSyncStatus(this.syncStatus[source], next) : next;
+        started.add(source);
+        // The run's mailbox rides on its own result: the upsert takes exactly
+        // what upstream hands it and still knows whose notes it may touch.
+        // Absent for every source with one sign-in.
+        if (account) result.account = account;
         if (result.ok) await this.upsertSource(source, result);
       }
       // A sync the user pressed for, with a source misconfigured: say what
@@ -7807,13 +7890,21 @@ class IcorPlannerPlugin extends Plugin {
     // The mailbox generation these ids belong to (IMAP only). Same contract
     // as `scope`: it rides on the result and is stored beside each shadow.
     const uidValidity = (result && result.uidValidity) || null;
+    // The account this run fetched (syncNow stamps it on the result), or null
+    // for a source with one sign-in. Everything below that could reach
+    // another mailbox's notes - the folder written into, the `existing` map,
+    // the shadow keys, reconcile and the shadow prune - is scoped by it.
+    const account = (result && result.account) || null;
+    const accountId = account ? account.id : null;
     const retainedIds = result && result.retainedIds; // filtered, not finished: the union below
     const folder = this.paths().sourceFolder(source);
     const s = this.withSecrets(); // shallow: s._shadow is the live map
     const allItems = collectItems(this.app, this.paths().root);
     const existing = new Map(); // external id -> item
     for (const it of allItems) {
-      if (it.source === source) existing.set(it.id, it);
+      if (it.source !== source) continue;
+      if (accountId && itemAccountId(it) !== accountId) continue;
+      existing.set(it.id, it);
     }
     const index = buildItemIndex(allItems);
     // A renumbered mailbox first: the notes follow their mail onto the new
@@ -7823,8 +7914,8 @@ class IcorPlannerPlugin extends Plugin {
     const remapped = remapByMessageId(source, items, existing, s._shadow);
     for (const r of remapped) {
       if (!r.prior || !r.prior.file) continue;
-      const oldKey = `${source}:${r.from}`;
-      const newKey = `${source}:${r.to}`;
+      const oldKey = shadowKey(source, accountId, r.from);
+      const newKey = shadowKey(source, accountId, r.to);
       // `external_id` is the identity the plugin reads; the id in the
       // filename is display, and renaming a note would churn Sync, links and
       // the cache for no gain (Flint, 2026-09-17, Q3).
@@ -7852,15 +7943,20 @@ class IcorPlannerPlugin extends Plugin {
       openIds.add(t.id);
       const prior = existing.get(t.id);
       if (!prior) {
-        await this.createItemFile(folder, source, t);
-        const fresh = s._shadow[`${source}:${t.id}`];
+        // The reserved default takes the legacy call; a note from an extra
+        // account is also stamped with the mailbox it came from. Two calls on
+        // purpose: upstream pins the legacy line to the byte
+        // (incomplete-sync.test.cjs:231), so it stays literal.
+        if (accountId && accountId !== OUTLOOK_DEFAULT_ACCOUNT) await this.createItemFile(folder, source, t, accountId);
+        else await this.createItemFile(folder, source, t);
+        const fresh = s._shadow[shadowKey(source, accountId, t.id)];
         if (fresh) {
           if (uidValidity) fresh.uidvalidity = uidValidity;
           if (t.messageId) fresh.messageId = t.messageId;
         }
         continue;
       }
-      const key = `${source}:${t.id}`;
+      const key = shadowKey(source, accountId, t.id);
       const shadow = s._shadow[key] || null;
       const body = await this.readBody(prior.file);
       const sourceVals = { title: t.title, due: t.due || null, priority: t.priority, description: (t.description || '').trim() };
@@ -7926,7 +8022,7 @@ class IcorPlannerPlugin extends Plugin {
         if (!openIds.has(child.id) || !child.doneLocal || !child.file) continue;
         await this.app.fileManager.processFrontMatter(child.file, (fm) => { fm.done_local = false; });
         this.markSyncWrite(child.file);
-        const ck = `${source}:${child.id}`;
+        const ck = shadowKey(source, accountId, child.id);
         if (s._shadow[ck]) s._shadow[ck].done = false;
       }
     }
@@ -7950,9 +8046,14 @@ class IcorPlannerPlugin extends Plugin {
     //
     // The upserts above ran either way, so the board stays live while a source
     // is over its ceiling; only the writes that say "done" stand down.
+    //
+    // A source with more than one sign-in adds a fourth: the note must belong
+    // to the mailbox this run fetched, or account A's healthy fetch reads
+    // account B's notes as vanished and stamps done on every one of them.
     const complete = !(result && result.complete === false);
     const stale = complete && items.length > 0
-      ? reconcileStaleIds(source, allItems, openIds, (it) => scopeAgrees(s._shadow[`${source}:${it.id}`], scope))
+      ? reconcileStaleIds(source, allItems, openIds, (it) => scopeAgrees(s._shadow[shadowKey(source, accountId, it.id)], scope)
+        && (!accountId || itemAccountId(it) === accountId))
       : [];
     // Absence alone cannot tell "completed there" from "deleted there", and
     // Tom's rule needs them told apart: the notes are a mirror, so a deleted
@@ -7968,7 +8069,7 @@ class IcorPlannerPlugin extends Plugin {
       }
       // Still open at the source, only outside what the fetch asked for.
       if (openThere.has(it.id)) continue;
-      const key = `${source}:${it.id}`;
+      const key = shadowKey(source, accountId, it.id);
       s._shadow[key] = Object.assign({}, s._shadow[key] || {
         due: it.due, priority: it.priority, description: '',
       }, { done: true, doneAt: nowMs });
@@ -7993,6 +8094,7 @@ class IcorPlannerPlugin extends Plugin {
     if (s.completeOnSource) {
       for (const it of allItems) {
         if (it.source !== source || openIds.has(it.id) || it.reopenPending !== true) continue;
+        if (accountId && itemAccountId(it) !== accountId) continue;
         // The note is already in the trash: there is nothing left to retry,
         // and this is exactly the loop whose 404 toast came back every five
         // minutes on a deleted task.
@@ -8003,7 +8105,7 @@ class IcorPlannerPlugin extends Plugin {
         // the loop whose 404 came back every five minutes.
         const late = await this.probeGoneIds(source, [it]);
         if (late.has(it.id)) { await this.removeGoneItem(source, it); trashed += 1; continue; }
-        const key = `${source}:${it.id}`;
+        const key = shadowKey(source, accountId, it.id);
         if (s._shadow[key] && s._shadow[key].done === false) continue; // already sent
         try {
           await this.applyDoneOnSource(it, false);
@@ -8020,7 +8122,7 @@ class IcorPlannerPlugin extends Plugin {
     if (rnote) new Notice(rnote, 8000);
     const gnote = goneNotice(SOURCES[source].label, trashed);
     if (gnote) new Notice(gnote, 8000);
-    for (const key of pruneShadows(s._shadow, source, new Set(existing.keys()), openIds, nowMs)) {
+    for (const key of pruneShadows(s._shadow, source, new Set(existing.keys()), openIds, nowMs, undefined, accountId)) {
       delete s._shadow[key];
     }
   }
@@ -8318,7 +8420,7 @@ class IcorPlannerPlugin extends Plugin {
     // relying on "it has no shadow entry, so it falls out below": that is true
     // today and would stop being true the moment anything else seeds a shadow.
     if (!isSyncedSource(item.source)) return;
-    const key = `${item.source}:${item.id}`;
+    const key = shadowKey(item.source, itemAccountId(item), item.id);
     const sh = s._shadow[key];
     // No baseline yet: the next sync seeds it. A pending reopen is the one
     // signal that must act without a shadow (older installs, or a note the
@@ -8399,7 +8501,7 @@ class IcorPlannerPlugin extends Plugin {
   // The name is built from two strings the source chose, and both pass
   // safeBasename: an id is API-assigned and plain in practice, and the note
   // is confined to the folder whatever it carries.
-  async createItemFile(folder, source, t) {
+  async createItemFile(folder, source, t, accountId) {
     let base = `${safeBasename(t.title)} (${source}-${noteIdPart(t.id)})`;
     let path = normalizePath(`${folder}/${base}.md`);
     if (this.app.vault.getAbstractFileByPath(path)) {
@@ -8410,6 +8512,10 @@ class IcorPlannerPlugin extends Plugin {
       'type: planner-item',
       `source: ${source}`,
       `external_id: "${String(t.id).replace(/"/g, '')}"`,
+      // Written ONLY for the second mailbox onward. Absent means `default`
+      // (itemAccountId), so the notes that already exist are correct without
+      // being opened, and a single-account vault's notes never gain a field.
+      ...(accountId && accountId !== OUTLOOK_DEFAULT_ACCOUNT ? [`source_account: ${JSON.stringify(String(accountId))}`] : []),
       `title: ${JSON.stringify(t.title)}`,
       'status: open',
       `due: ${t.due || null}`,
@@ -8434,7 +8540,7 @@ class IcorPlannerPlugin extends Plugin {
     const body = (t.description || '').trim();
     try {
       const created = await this.app.vault.create(path, fmLines.join('\n') + (body ? body + '\n' : ''));
-      this.settings._shadow[`${source}:${t.id}`] = {
+      this.settings._shadow[shadowKey(source, accountId, t.id)] = {
         due: t.due || null, priority: t.priority, description: body, done: false,
       };
       this.markSyncWrite(created || path);
@@ -12645,7 +12751,7 @@ module.exports.__test = {
   OUTLOOK_DEFAULT_ACCOUNT, OUTLOOK_ACCOUNT_SECRET_FIELDS, OUTLOOK_PENDING_TTL_MS,
   outlookAccountId, outlookAccountField, outlookAccountFieldParts, outlookAccountSecretSuffix,
   normalizeOutlookAccount, outlookAccountList, outlookAccountById,
-  outlookAccountView, outlookFeedView, secretFieldNames,
-  outlookWriteAccountScopes,
+  outlookAccountView, outlookFeedView, secretFieldNames, outlookExtraRuns, mergeSyncStatus,
+  outlookWriteAccountScopes, itemAccountId, shadowKey, shadowPrefix,
   graphFeedId, graphFeedAccountId,
 };

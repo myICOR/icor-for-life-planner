@@ -15,6 +15,17 @@
  *     layer (secretFieldNames), so a second refresh token is moved, audited
  *     and blanked by exactly the same rules as the first. A token the
  *     walkers cannot see is a token that stays in data.json;
+ *   - THE CORRUPTION GATE: reconcileStaleIds, pruneShadows and the upsert's
+ *     `existing` map are scoped by account. Two mailboxes both reporting
+ *     source: 'outlook' means account A's healthy fetch reads account B's
+ *     notes as vanished and stamps status: done on every one of them;
+ *   - `source_account` absent MEANS `default`, and is
+ *     WRITTEN only from the second mailbox on, so the notes that already
+ *     exist are correct without being opened;
+ *   - a flag write goes to the mailbox the note came from, resolved from the
+ *     item, not from whichever account is first in the list;
+ *   - a disabled or unreachable account DEGRADES and never returns a healthy
+ *     empty result, which would stamp done on every note it owns;
  *     account the settings no longer list, and verified by the SET of
  *     external ids rather than by a count.
  *
@@ -175,6 +186,164 @@ test('a rotated token is written to the account it belongs to, never to the firs
   T.clearOutlookTokens({ live, vault, account: 'work' });
   assert.equal(store.get('icor-for-life-planner-outlook-work-refresh-token'), undefined);
   assert.equal(store.get('icor-for-life-planner-outlook-refresh-token'), 'rt-1', 'the other mailbox stays signed in');
+});
+
+/* -------------------------------------------------------------------------
+ * 4. THE CORRUPTION GATE
+ * ---------------------------------------------------------------------- */
+
+test('source_account is absent for the notes that already exist, and absent MEANS default', () => {
+  assert.equal(T.itemAccountId(item({})), 'default');
+  assert.equal(T.itemAccountId(item({ sourceAccount: null })), 'default');
+  assert.equal(T.itemAccountId(item({ sourceAccount: '  ' })), 'default');
+  assert.equal(T.itemAccountId(item({ sourceAccount: 'work' })), 'work');
+  // And it is read off the frontmatter, so a note that carries it is claimed.
+  const fm = { type: 'planner-item', source: 'outlook', external_id: 'm1', source_account: 'work' };
+  assert.equal(T.itemFromFrontmatter(fm, 'p.md', 'p').sourceAccount, 'work');
+  assert.equal(T.itemFromFrontmatter({ type: 'planner-item', source: 'outlook', external_id: 'm1' }, 'p.md', 'p').sourceAccount, null);
+});
+
+test('THE GATE: one account\'s healthy fetch never reconciles another account\'s notes', () => {
+  const all = [
+    item({ id: 'a1', path: '02 Planner/Outlook/Personal/a1.md' }),                        // default, no field
+    item({ id: 'a2', path: '02 Planner/Outlook/Personal/a2.md', sourceAccount: 'default' }),
+    item({ id: 'b1', path: '02 Planner/Outlook/Work/b1.md', sourceAccount: 'work' }),
+    item({ id: 'b2', path: '02 Planner/Outlook/Work/b2.md', sourceAccount: 'work' }),
+    Object.assign(item({ id: 't1' }), { source: 'todoist' }),
+  ];
+  // Since 0.13.0 reconcileStaleIds is upstream's, untouched: it takes an
+  // `inScope` predicate, and the account rule lives in the predicate
+  // upsertSource hands it. So the gate is on that predicate AS THE CALL SITE
+  // BUILDS IT: pinned to the byte here, then exercised through the real
+  // reconcileStaleIds below.
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('async upsertSource('), main.indexOf('async readBody('));
+  const call = 'reconcileStaleIds(source, allItems, openIds, (it) => scopeAgrees(s._shadow[shadowKey(source, accountId, it.id)], scope)\n'
+    + '        && (!accountId || itemAccountId(it) === accountId))';
+  assert.ok(body.indexOf(call) > -1, 'the predicate the sync passes: the query scope first, then the account');
+  const inScope = (accountId, shadows, scope) => (it) => T.scopeAgrees(shadows[T.shadowKey('outlook', accountId, it.id)], scope)
+    && (!accountId || T.itemAccountId(it) === accountId);
+  const stale = (open, accountId, shadows, scope) => T.reconcileStaleIds('outlook', all, new Set(open), inScope(accountId, shadows || {}, scope || null)).map((x) => x.id);
+  // The default account syncs and its own two are still open: nothing at all
+  // is stale, and the Work notes are NOT seen as vanished.
+  assert.deepEqual(stale(['a1', 'a2'], 'default'), []);
+  // The work account syncs and one of ITS items has gone.
+  assert.deepEqual(stale(['b1'], 'work'), ['b2']);
+  // A default run where its own item really has gone still closes it.
+  assert.deepEqual(stale(['a1'], 'default'), ['a2']);
+  // No account is the single-sign-in behaviour, unchanged.
+  assert.deepEqual(stale(['a1'], null).sort(), ['a2', 'b1', 'b2']);
+  // A manual item is never returned, whatever account it claims.
+  assert.deepEqual(T.reconcileStaleIds('manual', all, new Set(), inScope('default', {}, null)), []);
+  // And upstream's half of the predicate still holds beside the account's:
+  // a note last seen by another query is that query's business, not this one's.
+  assert.deepEqual(stale(['b1'], 'work', { 'outlook@work:b2': { scope: 'old-filter' } }, 'new-filter'), []);
+  assert.deepEqual(stale(['b1'], 'work', { 'outlook@work:b2': { scope: 'new-filter' } }, 'new-filter'), ['b2']);
+});
+
+test('the shadow key keeps its legacy shape for default, and the pruner is scoped by account', () => {
+  assert.equal(T.shadowKey('outlook', null, 'm1'), 'outlook:m1');
+  assert.equal(T.shadowKey('outlook', 'default', 'm1'), 'outlook:m1', 'the shadows already in data.json keep working');
+  assert.equal(T.shadowKey('todoist', null, '7'), 'todoist:7');
+  assert.equal(T.shadowKey('outlook', 'work', 'm1'), 'outlook@work:m1');
+  assert.equal(T.shadowPrefix('outlook', 'work'), 'outlook@work:');
+  const shadows = { 'outlook:a1': { done: false }, 'outlook@work:b1': { done: false }, 'todoist:7': { done: false } };
+  // The default run knows nothing of b1: without the scope it would drop the
+  // work shadow, and an uncheck on that card could then never reach Outlook.
+  assert.deepEqual(T.pruneShadows(shadows, 'outlook', new Set(['a1']), new Set(['a1']), 0, undefined, 'default'), []);
+  assert.deepEqual(T.pruneShadows(shadows, 'outlook', new Set(['b1']), new Set(['b1']), 0, undefined, 'work'), []);
+  // and each still prunes its own
+  assert.deepEqual(T.pruneShadows(shadows, 'outlook', new Set(), new Set(), 0, undefined, 'work'), ['outlook@work:b1']);
+  assert.deepEqual(T.pruneShadows(shadows, 'outlook', new Set(), new Set(), 0, undefined, 'default'), ['outlook:a1']);
+});
+
+test('SOURCE: the upsert scopes its existing map, its shadow keys and its reconcile by account', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('async upsertSource('), main.indexOf('async readBody('));
+  assert.ok(body.length > 100);
+  assert.match(body, /const accountId = account \? account\.id : null;/);
+  assert.match(body, /if \(accountId && itemAccountId\(it\) !== accountId\) continue;/, 'the existing map is scoped');
+  assert.match(body, /const account = \(result && result\.account\) \|\| null;/, 'the account is read off the result syncNow stamped on it');
+  assert.match(body, /reconcileStaleIds\(source, allItems, openIds, \(it\) => scopeAgrees\(s\._shadow\[shadowKey\(source, accountId, it\.id\)\], scope\)\n\s*&& \(!accountId \|\| itemAccountId\(it\) === accountId\)\)/);
+  const sync = main.slice(main.indexOf('async syncNow('), main.indexOf('async upsertSource('));
+  assert.match(sync, /if \(account\) result\.account = account;\n\s*if \(result\.ok\) await this\.upsertSource\(source, result\);/,
+    'syncNow stamps the run\'s account on its result right before upstream\'s own call');
+  assert.match(body, /pruneShadows\(s\._shadow, source, new Set\(existing\.keys\(\)\), openIds, nowMs, undefined, accountId\)/);
+  assert.ok(!/`\$\{source\}:\$\{/.test(body), 'every shadow key goes through shadowKey');
+  // The reopen retry is scoped too: it walks every item in the vault.
+  const reopen = body.slice(body.indexOf('if (s.completeOnSource) {'));
+  assert.match(reopen, /if \(accountId && itemAccountId\(it\) !== accountId\) continue;/);
+});
+
+test('SOURCE: source_account is written only from the second mailbox on', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('async createItemFile('), main.indexOf('// Applies the merge result'));
+  assert.match(body, /accountId && accountId !== OUTLOOK_DEFAULT_ACCOUNT \? \[`source_account: \$\{JSON\.stringify\(String\(accountId\)\)\}`\] : \[\]/,
+    'the default account writes no field, so the notes that exist are never touched');
+  assert.match(body, /this\.settings\._shadow\[shadowKey\(source, accountId, t\.id\)\]/);
+});
+
+/* -------------------------------------------------------------------------
+ * 5. A WRITE GOES TO THE MAILBOX THE NOTE CAME FROM
+ * ---------------------------------------------------------------------- */
+
+test('the flag write is routed by the item, not by whichever account is first', async () => {
+  const seen = [];
+  const requestUrl = async (req) => { seen.push(req); return { status: 200, json: {}, text: '{}', headers: {} }; };
+  const s = T.withSecrets(base({
+    outlookAccounts: [WORK], outlookRefreshToken__work: 'rt-2', outlookAccessToken__work: 'at-2',
+    outlookExpiresAt__work: String(Date.now() + 3600000), outlookScopes: 'Mail.Read Mail.ReadWrite',
+  }), new T.SecretVault(null));
+  // The work account granted only Mail.Read, so a flag write must be refused
+  // on ITS scopes and not on the first account's.
+  await assert.rejects(
+    T.outlookSetClosed(s, { id: 'm-work', sourceAccount: 'work' }, true, { requestUrl }),
+    /Mail\.ReadWrite/, 'the refusal reads the work account\'s granted scopes');
+  assert.equal(seen.length, 0, 'and it is refused before any call');
+  // The default account did grant it, and the call carries ITS token.
+  await T.outlookSetClosed(s, { id: 'm-default' }, true, { requestUrl });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].headers.Authorization, 'Bearer at-1');
+});
+
+test('SOURCE: the registry call site is unchanged; the connector resolves the account', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  // The upstream gate on applyDoneOnSource still holds byte for byte.
+  assert.match(main, /await c\.setClosed\(this\.withSecrets\(\), item, closed\);/);
+  const body = main.slice(main.indexOf('async function outlookSetClosed('), main.indexOf('// The settings tab\'s one line on the sign-in'));
+  assert.match(body, /outlookAccountView\(settings \|\| \{\}, outlookAccountById\(settings \|\| \{\}, itemAccountId\(item\)\)\)/);
+});
+
+/* -------------------------------------------------------------------------
+ * 6. NOTHING EVER RETURNS A HEALTHY EMPTY RESULT
+ * ---------------------------------------------------------------------- */
+
+test('an account switched off degrades; it never returns an empty healthy result', async () => {
+  const off = Object.assign({}, WORK, { enabled: false });
+  const s = base({ outlookAccounts: [off], outlookRefreshToken__work: 'rt-2' });
+  const view = T.outlookAccountView(T.withSecrets(s, new T.SecretVault(null)), T.outlookAccountById(s, 'work'));
+  const r = await T.outlookFetchOpen(view, { requestUrl: async () => { throw new Error('no call may be made'); } });
+  assert.equal(r.ok, false, 'a healthy empty set would stamp done on every note this mailbox owns');
+  assert.equal(r.reason, 'misconfigured');
+  assert.match(r.message, /switched off/);
+  assert.deepEqual(r.items, []);
+  // A disabled account also contributes no run at all.
+  assert.deepEqual(T.outlookExtraRuns(s).map((x) => x.account.id), []);
+});
+
+test('the extra runs are the mailboxes past the first, and the status rows fold into one', () => {
+  const s = base({ outlookAccounts: [{ id: 'default', folder: 'Personal' }, WORK, { id: 'third', clientId: CLIENT2 }] });
+  assert.deepEqual(T.outlookExtraRuns(s).map((x) => x.account.id), ['work', 'third'], 'default is the run syncNow already makes');
+  assert.deepEqual(T.outlookExtraRuns(s).map((x) => x.source), ['outlook', 'outlook']);
+  // Two healthy runs add up; one unhealthy run wins and is what the tray says.
+  const ok1 = { ok: true, reason: null, message: null, count: 3, at: 'A' };
+  const ok2 = { ok: true, reason: null, message: null, count: 4, at: 'B' };
+  assert.deepEqual(T.mergeSyncStatus(ok1, ok2), { ok: true, reason: null, message: null, count: 7, at: 'B' });
+  const bad = { ok: false, reason: 'no-token', message: 'Work: Outlook is not signed in.', count: 0, at: 'B' };
+  assert.equal(T.mergeSyncStatus(ok1, bad).ok, false);
+  assert.match(T.mergeSyncStatus(ok1, bad).message, /^Work: /, 'the row names the mailbox');
+  assert.equal(T.mergeSyncStatus(bad, ok2).message, bad.message, 'the FIRST unhealthy run is the one reported');
+  assert.equal(T.mergeSyncStatus(null, ok1), ok1);
 });
 
 /* -------------------------------------------------------------------------
