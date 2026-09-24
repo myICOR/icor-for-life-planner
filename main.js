@@ -11569,54 +11569,54 @@ class PlannerTrayView extends ItemView {
       // a whitespace-only hunk over sixty lines is the rebase cost this
       // patch is trying not to pay.
       for (const part of traySourceSections(resolved, key, items)) {
-      const configured = part.configured;
-      const list = items
-        .filter((i) => i.source === key && part.member(i) && !i.plannedDay && !isDone(i) && !i.weeklyGoal)
-        .sort((a, b) => {
-          const br = bucketRank[dueBucketOf(a.due, today)] - bucketRank[dueBucketOf(b.due, today)];
-          if (br) return br;
-          if (a.priority !== b.priority) return a.priority - b.priority;
-          return (a.due || '9999').localeCompare(b.due || '9999');
+        const configured = part.configured;
+        const list = items
+          .filter((i) => i.source === key && part.member(i) && !i.plannedDay && !isDone(i) && !i.weeklyGoal)
+          .sort((a, b) => {
+            const br = bucketRank[dueBucketOf(a.due, today)] - bucketRank[dueBucketOf(b.due, today)];
+            if (br) return br;
+            if (a.priority !== b.priority) return a.priority - b.priority;
+            return (a.due || '9999').localeCompare(b.due || '9999');
+          });
+
+        const sec = el.createDiv({ cls: 'iplan-tray-section' });
+        const headRow = sec.createDiv({ cls: 'iplan-tray-section-head is-clickable' });
+        headRow.appendChild(sourceMarkEl(key));
+        headRow.createSpan({ text: ` ${part.label.toUpperCase()}` });
+        headRow.createSpan({ cls: 'iplan-tray-count', text: String(list.length) });
+        const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
+        if (this.collapsed[part.key]) sec.addClass('is-collapsed');
+        headRow.addEventListener('click', () => {
+          this.collapsed[part.key] = !this.collapsed[part.key];
+          sec.classList.toggle('is-collapsed', this.collapsed[part.key]);
         });
 
-      const sec = el.createDiv({ cls: 'iplan-tray-section' });
-      const headRow = sec.createDiv({ cls: 'iplan-tray-section-head is-clickable' });
-      headRow.appendChild(sourceMarkEl(key));
-      headRow.createSpan({ text: ` ${part.label.toUpperCase()}` });
-      headRow.createSpan({ cls: 'iplan-tray-count', text: String(list.length) });
-      const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
-      if (this.collapsed[part.key]) sec.addClass('is-collapsed');
-      headRow.addEventListener('click', () => {
-        this.collapsed[part.key] = !this.collapsed[part.key];
-        sec.classList.toggle('is-collapsed', this.collapsed[part.key]);
-      });
-
-      // The one authority on what this section is allowed to claim.
-      const total = key === MANUAL_SOURCE
-        ? items.filter((i) => i.source === MANUAL_SOURCE).length
-        : undefined;
-      const state = trayEmptyState(key, configured, st, list.length, total, resolved.secretsInStore === true);
-      if (state && (state.kind === 'unconfigured' || state.kind === 'unconfigured-device')) {
-        const note = body.createDiv({ cls: 'iplan-tray-note is-unconfigured' });
-        note.createSpan({ text: state.text });
-        const connect = note.createEl('button', {
-          cls: 'iplan-action',
-          attr: { type: 'button', 'aria-label': `Connect ${part.label}` },
-          text: state.kind === 'unconfigured-device' ? TRAY_COPY.connectDeviceAction : TRAY_COPY.connectAction,
-        });
-        connect.addEventListener('click', () => this.plugin.openPluginSettings());
-      } else if (state) {
-        const note = body.createDiv({ cls: 'iplan-tray-note', text: state.text });
-        if (state.hint) {
-          const hintEl = note.createDiv({ cls: 'iplan-tray-note-hint', text: state.hint });
-          if (state.docUrl) {
-            hintEl.appendText(' ');
-            const a = hintEl.createEl('a', { text: 'Open', href: state.docUrl });
-            a.addEventListener('click', (e) => { e.preventDefault(); window.open(state.docUrl, '_external'); });
+        // The one authority on what this section is allowed to claim.
+        const total = key === MANUAL_SOURCE
+          ? items.filter((i) => i.source === MANUAL_SOURCE).length
+          : undefined;
+        const state = trayEmptyState(key, configured, st, list.length, total, resolved.secretsInStore === true);
+        if (state && (state.kind === 'unconfigured' || state.kind === 'unconfigured-device')) {
+          const note = body.createDiv({ cls: 'iplan-tray-note is-unconfigured' });
+          note.createSpan({ text: state.text });
+          const connect = note.createEl('button', {
+            cls: 'iplan-action',
+            attr: { type: 'button', 'aria-label': `Connect ${part.label}` },
+            text: state.kind === 'unconfigured-device' ? TRAY_COPY.connectDeviceAction : TRAY_COPY.connectAction,
+          });
+          connect.addEventListener('click', () => this.plugin.openPluginSettings());
+        } else if (state) {
+          const note = body.createDiv({ cls: 'iplan-tray-note', text: state.text });
+          if (state.hint) {
+            const hintEl = note.createDiv({ cls: 'iplan-tray-note-hint', text: state.hint });
+            if (state.docUrl) {
+              hintEl.appendText(' ');
+              const a = hintEl.createEl('a', { text: 'Open', href: state.docUrl });
+              a.addEventListener('click', (e) => { e.preventDefault(); window.open(state.docUrl, '_external'); });
+            }
           }
         }
-      }
-      for (const it of list) body.appendChild(renderCard(this.plugin, it, 'tray', this));
+        for (const it of list) body.appendChild(renderCard(this.plugin, it, 'tray', this));
       }
     }
 
