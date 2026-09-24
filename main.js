@@ -924,7 +924,7 @@ function secretSlots(settings) {
   // the calendar loop below, so the key list, the env file and the move
   // between backends treat a second sign-in exactly like the first. An
   // account the list no longer names still gets its rows, labelled by id,
-  // so its keys can be cleared from the UI (Flint, M2).
+  // so its keys can be cleared from the UI.
   for (const a of outlookSecretAccountIds(settings)) {
     const label = a.listed ? a.label : `${a.id}, not listed`;
     for (const field of ['outlookRefreshToken', 'outlookAccessToken']) {
@@ -2411,8 +2411,8 @@ async function deviceCodePoll({ clientId, tenant, deviceCode, interval, expiresI
  *       "clientId": "...", "tenant": "organizations",
  *       "includedFolderPaths": ["Inbox"] } ]
  *
- * There is no settings UI for the LIST (stage 1's lesson: a row per mailbox
- * object does not survive three accounts). The list is typed into data.json
+ * There is no settings UI for the LIST (a settings row per mailbox object
+ * does not survive three accounts). The list is typed into data.json
  * and picked up on the next Obsidian reload; only the sign-in itself, which
  * cannot happen in a text file, has a button.
  *
@@ -2482,7 +2482,7 @@ function normalizeOutlookAccount(rec, id, settings) {
     clientId: trimmed(pick('clientId', 'outlookClientId')),
     tenant: OUTLOOK_TENANTS.includes(tenant) ? tenant : 'common',
     scopes: trimmed(pick('scopes', 'outlookScopes')),
-    // Stage 1's filter, per account. Absent on a record means absent for that
+    // The folder filter, per account. Absent on a record means absent for that
     // mailbox - the filter was never switched on there - and never an
     // inherited copy of another mailbox's paths.
     includedFolderPaths: pick('includedFolderPaths', 'outlookIncludedFolderPaths'),
@@ -2521,7 +2521,7 @@ function outlookAccountById(settings, accountId) {
   return { id, label: id, clientId: '', tenant: 'common', scopes: '', includedFolderPaths: undefined, enabled: false };
 }
 // One account seen through the flat shape every Outlook function already
-// reads. This is the lever the whole stage rests on: outlookFetchOpen,
+// reads. This is the lever the whole feature rests on: outlookFetchOpen,
 // ensureAccessToken, graphRequest, outlookSetClosed and the folder filter are
 // unchanged, because the account is projected onto the field names they
 // already use rather than threaded through their signatures.
@@ -2547,14 +2547,14 @@ function outlookAccountView(settings, account) {
   return v;
 }
 // The account ids whose secrets the walkers must carry: every extra account
-// the list names, THEN every id a settings key names that the list does not
-// (Flint, M2 2026-09-12). A record deleted from data.json before Sign out
-// was pressed leaves its four `__<id>` keys behind - in the store with no
-// row to clear them from, or, after the failed write P-1 exists for, in
-// data.json as a key no walker could see or blank again. The names follow
-// the data as well as the list, so an orphan is moved, audited, listed and
-// blanked by the same rules as a live account. Bare flat keys are the
-// reserved default and add nothing; the parser is the strict one.
+// the list names, THEN every id a settings key names that the list does not.
+// A record deleted from data.json before Sign out was pressed leaves its
+// four `__<id>` keys behind - in the store with no row to clear them from,
+// or, after a store write that failed and left the value in data.json, as a
+// key no walker could see or blank again. The names follow the data as well
+// as the list, so an orphan is moved, audited, listed and blanked by the
+// same rules as a live account. Bare flat keys are the reserved default and
+// add nothing; the parser is the strict one.
 function outlookSecretAccountIds(settings) {
   const s = settings || {};
   const out = [];
@@ -7904,8 +7904,8 @@ class IcorPlannerPlugin extends Plugin {
     const uidValidity = (result && result.uidValidity) || null;
     // The account this run fetched (syncNow stamps it on the result), or null
     // for a source with one sign-in. Everything below that could reach
-    // another mailbox's notes - the folder written into, the `existing` map,
-    // the shadow keys, reconcile and the shadow prune - is scoped by it.
+    // another mailbox's notes - the `existing` map, the shadow keys,
+    // reconcile and the shadow prune - is scoped by it.
     const account = (result && result.account) || null;
     const accountId = account ? account.id : null;
     const retainedIds = result && result.retainedIds; // filtered, not finished: the union below
@@ -12769,7 +12769,7 @@ module.exports.__test = {
   outlookIncludedFolderPaths, outlookFolderPathIncluded, outlookIncludedFolderIds, outlookResolveIncludedFolderIds, OUTLOOK_FOLDER_PAGE_CAP,
   graphCalendarWindow, graphCalendarQuery, graphInstant, graphAllDay, graphEventDef, outlookCalendarFetchFeed,
   calendarFeedConnector, calendarFeedReady, ensureGraphCalendarFeed, GRAPH_FEED_ID, noteIdPart,
-  // More than one mailbox (stage 2).
+  // More than one mailbox.
   OUTLOOK_DEFAULT_ACCOUNT, OUTLOOK_ACCOUNT_SECRET_FIELDS, OUTLOOK_PENDING_TTL_MS,
   outlookAccountId, outlookAccountField, outlookAccountFieldParts, outlookAccountSecretSuffix,
   normalizeOutlookAccount, outlookAccountList, outlookAccountById,
