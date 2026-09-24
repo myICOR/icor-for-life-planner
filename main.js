@@ -7813,9 +7813,12 @@ class IcorPlannerPlugin extends Plugin {
         const result = await promise;
         // One status row per source, however many runs fed it: the tray, the
         // manual-sync notices and the board all key off the source id. The
-        // first unhealthy run is the one reported, and its message names the
-        // mailbox so "which one" is answerable from the row.
-        const label = account && account.id !== OUTLOOK_DEFAULT_ACCOUNT ? `${account.label}: ` : '';
+        // first unhealthy run is the one reported. With more than one account
+        // listed, EVERY run's message - the default's included - is prefixed
+        // with its mailbox label, so "which one" is answerable from the row
+        // wherever the tray repeats it. With one account the message is
+        // exactly what it always was. `account` is null for every other source.
+        const label = account && outlookAccountList(s).length > 1 ? `${account.label}: ` : '';
         const next = {
           ok: result.ok, reason: result.reason || null,
           message: result.message ? `${label}${result.message}` : null,

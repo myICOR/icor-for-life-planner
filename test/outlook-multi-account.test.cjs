@@ -347,6 +347,70 @@ test('the extra runs are the mailboxes past the first, and the status rows fold 
 });
 
 /* -------------------------------------------------------------------------
+ * 7. THE STATUS ROW NAMES THE MAILBOX
+ * ---------------------------------------------------------------------- */
+
+// The folded status row is one row per source, repeated by the tray under
+// every account section of that source, which is honest only if its message
+// names the mailbox that failed. With more than one listed account, every
+// run's message carries its label, the default's included; with one account
+// the message is byte-identical to what it always was.
+function syncPlugin(settings, fetchOpen) {
+  const PluginClass = require(T.__mainPath);
+  const p = Object.create(PluginClass.prototype);
+  p.settings = settings;
+  p.app = { vault: { getAbstractFileByPath: () => null }, workspace: { getLeavesOfType: () => [] } };
+  p.syncing = false;
+  p.syncStatus = {};
+  p.secrets = { mode: 'data-json', available: () => false };
+  p.emitModelChanged = () => {};
+  p.persistSettings = async () => {};
+  p.connectorDeps = () => ({});
+  p.scheduleCalendarCacheWrite = () => {};
+  p.calendarDefsByFeed = {};
+  p.calendarFeedSyncedAt = {};
+  p.migrateOutlookFolders = async () => ({ moved: 0, collisions: [], skipped: 0, verified: true });
+  p.ensureFolders = async () => {};
+  p.withSecrets = () => settings;
+  p.upsertSource = async () => {};
+  return async () => {
+    const real = T.CONNECTORS.outlook.fetchOpen;
+    T.CONNECTORS.outlook.fetchOpen = fetchOpen;
+    try { await p.syncNow(false); } finally { T.CONNECTORS.outlook.fetchOpen = real; }
+    return p.syncStatus.outlook;
+  };
+}
+const DOWN = 'Outlook is unreachable. Check the network and try again.';
+// The default's view is the settings object itself (its token is `rt-1`);
+// the extra account's view carries its own token.
+const defaultDown = async (view) => (view.outlookRefreshToken === 'rt-2'
+  ? T.okResult('outlook', [])
+  : T.degraded('outlook', 'unreachable', DOWN, 'Try again.'));
+
+test('RUN: the first mailbox down and the second healthy - the one status row names the first mailbox', async () => {
+  const settings = base({ outlookAccounts: [{ id: 'default', label: 'Personal' }, WORK], outlookRefreshToken__work: 'rt-2', plannerFolder: '02 Planner', calendars: [] });
+  const row = await syncPlugin(settings, defaultDown)();
+  assert.equal(row.ok, false);
+  assert.equal(row.reason, 'unreachable');
+  assert.equal(row.message, `Personal: ${DOWN}`, "the default account's message carries its label when there is more than one account");
+  // The reverse: the extra account's row carries its own label.
+  const workDown = async (view) => (view.outlookRefreshToken === 'rt-2'
+    ? T.degraded('outlook', 'unreachable', DOWN, 'Try again.')
+    : T.okResult('outlook', []));
+  assert.equal((await syncPlugin(settings, workDown)()).message, `Work: ${DOWN}`);
+});
+
+test('RUN: with one account the status message is exactly what it always was - no prefix', async () => {
+  const settings = base({ plannerFolder: '02 Planner', calendars: [] });
+  assert.equal(T.outlookAccountList(settings).length, 1);
+  const row = await syncPlugin(settings, async () => T.degraded('outlook', 'unreachable', DOWN, 'Try again.'))();
+  assert.equal(row.message, DOWN, "byte-identical to the single-account row; upstream's message assertions still hold");
+  // And a lone `default` record, labelled, is still one account: no prefix.
+  const lone = Object.assign({}, settings, { outlookAccounts: [{ id: 'default', label: 'Personal' }] });
+  assert.equal((await syncPlugin(lone, async () => T.degraded('outlook', 'unreachable', DOWN))()).message, DOWN);
+});
+
+/* -------------------------------------------------------------------------
  * 9. THE CALENDAR FEED, AND THE OAUTH CALLBACK
  * ---------------------------------------------------------------------- */
 
