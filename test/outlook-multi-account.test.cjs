@@ -366,6 +366,65 @@ test('SOURCE: outlookProbeGone resolves its view from the item, the same line ou
   assert.ok(!/const s = settings \|\| \{\};/.test(body), 'the settings are never read as given');
 });
 
+test('the gone probe hands the connector the shadow under the item\'s own account key, and asks once per account', async () => {
+  // probeGoneIds keyed both its once-per-sync set and the shadow it hands
+  // the connector by the bare `source:id`. A second mailbox's note has no
+  // shadow under that key, so the connector was handed null (or, for an id
+  // both mailboxes carry, the DEFAULT account's shadow), and a second
+  // mailbox's probe of an id the default had already asked about was
+  // skipped as a repeat. Both keys go through shadowKey with the item's own
+  // account, exactly as removeGoneItem's does.
+  const PluginClass = require(T.__mainPath);
+  const p = Object.create(PluginClass.prototype);
+  const settings = base({
+    outlookAccounts: [{ id: 'default', label: 'Personal' }, WORK], outlookRefreshToken__work: 'rt-2',
+    _shadow: {
+      'outlook:m1': { due: null, priority: 3, description: 'personal', done: false },
+      'outlook@work:m1': { due: null, priority: 3, description: 'work', done: false },
+      'outlook@work:m2': { due: '2026-09-30', priority: 2, description: 'work only', done: false },
+    },
+  });
+  p.settings = settings;
+  p.withSecrets = () => settings;
+  p._goneProbed = new Set();
+  const asked = [];
+  const real = T.CONNECTORS.outlook.probeGone;
+  T.CONNECTORS.outlook.probeGone = async (s, it, deps) => { asked.push({ id: it.id, shadow: deps.shadow }); return true; };
+  try {
+    const gone = await p.probeGoneIds('outlook', [
+      item({ id: 'm1' }),
+      item({ id: 'm1', sourceAccount: 'work' }),
+      item({ id: 'm2', sourceAccount: 'work' }),
+    ]);
+    assert.deepEqual([...gone].sort(), ['m1', 'm2']);
+    assert.equal(asked.length, 3, 'the work mailbox\'s m1 is not a repeat of the personal mailbox\'s m1');
+    assert.equal(asked[0].shadow.description, 'personal', 'a note without the field is the default account, as ever');
+    assert.equal(asked[1].shadow.description, 'work', 'the work note is handed the work shadow, not the default\'s');
+    assert.equal(asked[2].shadow.description, 'work only', 'a work-only id finds its shadow instead of null');
+    // Once per sync still holds, per account.
+    const again = await p.probeGoneIds('outlook', [item({ id: 'm2', sourceAccount: 'work' })]);
+    assert.equal(asked.length, 3, 'a repeat within the sync is not asked twice');
+    assert.equal(again.size, 0);
+  } finally { T.CONNECTORS.outlook.probeGone = real; }
+});
+
+test('THE GATE, widened: no bare `source:id` shadow key anywhere in the plugin class', () => {
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const start = main.indexOf('class IcorPlannerPlugin extends Plugin {');
+  const cls = main.slice(start, main.indexOf('\nclass ', start + 1));
+  assert.ok(cls.length > 1000, 'the plugin class must still be findable');
+  // The upsert's own gate (section 4) covers upsertSource. This one covers
+  // every method of the class: a key built as `${source}:${id}` by hand is
+  // the default account's shape and nobody else's, so it never reaches a
+  // second mailbox's shadow. shadowKey yields the same bytes for the default
+  // and the namespaced key for everyone else.
+  assert.equal((cls.match(/`\$\{[\w.]+\}:\$\{/g) || []).length, 0, 'every shadow key in the plugin class goes through shadowKey');
+  const probe = cls.slice(cls.indexOf('async probeGoneIds('), cls.indexOf('async applyDoneOnSource('));
+  assert.match(probe, /const key = shadowKey\(source, itemAccountId\(it\), it\.id\);/, 'the probe keys by the item\'s own account');
+  assert.match(probe, /this\._goneProbed\.has\(key\)/);
+  assert.match(probe, /s\._shadow\[key\]/);
+});
+
 /* -------------------------------------------------------------------------
  * 6. NOTHING EVER RETURNS A HEALTHY EMPTY RESULT
  * ---------------------------------------------------------------------- */

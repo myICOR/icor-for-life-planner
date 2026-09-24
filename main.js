@@ -8186,13 +8186,17 @@ class IcorPlannerPlugin extends Plugin {
     if (!this._goneProbed) this._goneProbed = new Set();
     const s = this.withSecrets();
     for (const it of goneProbeBatch(items, GONE_PROBE_MAX_PER_SYNC)) {
-      if (this._goneProbed.has(`${source}:${it.id}`)) continue;
-      this._goneProbed.add(`${source}:${it.id}`);
+      // Keyed by the item's own account, like removeGoneItem: a second
+      // mailbox's note has its shadow under the namespaced key, and the same
+      // id in two mailboxes is two questions, not one repeat.
+      const key = shadowKey(source, itemAccountId(it), it.id);
+      if (this._goneProbed.has(key)) continue;
+      this._goneProbed.add(key);
       let probe = null;
       // The shadow rides along: it carries what the connector needs to tell
       // "this id is gone" from "this id cannot be asked about any more"
       // (IMAP's UIDVALIDITY today). A connector that needs none ignores it.
-      const probeDeps = Object.assign({}, deps || {}, { shadow: s._shadow ? (s._shadow[`${source}:${it.id}`] || null) : null });
+      const probeDeps = Object.assign({}, deps || {}, { shadow: s._shadow ? (s._shadow[key] || null) : null });
       try { probe = await CONNECTORS[source].probeGone(s, it, probeDeps); } catch { probe = null; }
       const verdict = absenceVerdict(probe);
       if (verdict === 'gone') gone.add(it.id);
