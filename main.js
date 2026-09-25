@@ -1005,9 +1005,9 @@ function plannerPaths(settings) {
     root,
     // One cache file for ALL calendar events (never per-event notes).
     cache: `${root}/Calendar Events.md`,
-    // `sub` is one account's own subfolder name (Outlook, stage 2); '' or
-    // absent is the source folder itself, which is where every note written
-    // before accounts existed still lives.
+    // `sub` is one account's own subfolder name (an Outlook account record's
+    // `folder`); '' or absent is the source folder itself, which is where
+    // every note written before accounts existed still lives.
     sourceFolder: (sourceId, sub) => {
       const src = SOURCES[sourceId];
       if (!src || !src.folder) return null;
@@ -2623,7 +2623,7 @@ function outlookExtraRuns(settings) {
   return runs;
 }
 /* ---- moving existing notes into their account's folder ----
- * Ian's ruling is symmetric: every mailbox gets a subfolder, the first one
+ * Folders are symmetric: every mailbox gets a subfolder, the first one
  * included, so notes written before accounts existed move. A file move is the
  * one thing in this build that copying main.js back does not undo, so the
  * decision is a pure function with no vault access at all, and the executor
