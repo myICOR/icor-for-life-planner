@@ -7908,7 +7908,7 @@ class IcorPlannerPlugin extends Plugin {
     // The verification that matters is the SET of external ids, not the
     // count: a count still matches when one note has overwritten another.
     const after = collectItems(this.app, p.root).filter((it) => it.source === 'outlook');
-    const ids = (list) => new Set(list.map((it) => `${itemAccountId(it)} ${it.id}`));
+    const ids = (list) => new Set(list.map((it) => `${itemAccountId(it)}\0${it.id}`));
     const a = ids(before);
     const b = ids(after);
     const verified = a.size === b.size && [...a].every((k) => b.has(k));
