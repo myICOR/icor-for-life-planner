@@ -10911,7 +10911,7 @@ function trayConnectionState(settings) {
   };
 }
 
-/* ---- one tray section per Outlook account (2026-09-12) ----
+/* ---- one tray section per Outlook account when more than one is listed ----
  *
  * A source with one sign-in renders the section it always has: keyed and
  * labelled by the source, admitting every item of the source, so a data.json
@@ -11567,9 +11567,6 @@ class PlannerTrayView extends ItemView {
       // One section per source, or one per account of a source with more
       // than one sign-in (traySourceSections). `part` is what differs: the
       // head label, the membership, the collapse key, the configured answer.
-      // The body below is not re-indented on purpose: it is upstream's, and
-      // a whitespace-only hunk over sixty lines is the rebase cost this
-      // patch is trying not to pay.
       for (const part of traySourceSections(resolved, key, items)) {
         const configured = part.configured;
         const list = items
