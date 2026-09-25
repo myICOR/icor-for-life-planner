@@ -10942,9 +10942,11 @@ function traySourceSections(settings, source, items) {
   if (source !== 'outlook') return [whole];
   const listed = outlookAccountList(settings);
   if (listed.length < 2) return [whole];
-  // outlookAccountById's own resolution of a note's account: a valid id is
-  // taken as written, anything else is the default.
-  const accountOf = (it) => outlookAccountId(itemAccountId(it)) || OUTLOOK_DEFAULT_ACCOUNT;
+  // The same resolver the sync uses, so the tray files a note where the sync
+  // reads it: only an ABSENT source_account means the default. A present but
+  // invalid id is an account nothing lists (outlookAccountById), so its note
+  // gets a trailing not-signed-in section of its own, never the first mailbox.
+  const accountOf = (it) => itemAccountId(it);
   const accounts = listed.slice();
   const seen = new Set(accounts.map((a) => a.id));
   for (const it of items || []) {

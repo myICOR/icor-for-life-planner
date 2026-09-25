@@ -324,19 +324,22 @@ test('the one Outlook status row is shown under every section of the source; an 
 });
 
 /* ---- 5. an account the list no longer names ---- */
-test('a note whose account nothing lists any more still renders, in a trailing section under its id, and an invalid id folds into the default', () => {
+test('a note whose account nothing lists any more still renders, in a trailing section under its id; an invalid id is unlisted too, never the first mailbox', () => {
   const items = fixtureItems();
   items.push(item('outlook', 'gone-1', { source_account: 'gone' }));
   items.push(item('outlook', 'bad-1', { source_account: 'Not An Id' }));
   const parts = T.traySourceSections(TWO_ACCOUNTS, 'outlook', items);
-  assert.deepEqual(parts.map((p) => p.key), ['outlook', 'outlook@us', 'outlook@gone']);
+  assert.deepEqual(parts.map((p) => p.key), ['outlook', 'outlook@us', 'outlook@gone', 'outlook@Not An Id']);
   assert.equal(parts[2].label, 'Outlook · gone');
   assert.equal(parts[2].configured, false, 'a blank account is never signed in');
+  assert.equal(parts[3].label, 'Outlook · Not An Id');
+  assert.equal(parts[3].configured, false, 'an invalid id is an account nothing lists: not signed in, and not the default');
   const out = sections(trayFor(TWO_ACCOUNTS, items).root).filter((s) => s.mark.includes('outlook'));
-  assert.deepEqual(out.map((s) => s.head), [' OUTLOOK · IRLPERSONAL', ' OUTLOOK · USPERSONAL', ' OUTLOOK · GONE']);
-  assert.deepEqual(out.map((s) => s.count), [13, 8, 1]);
-  assert.ok(out[0].cards.includes('02 Planner/outlook/bad-1.md'), 'the invalid id resolves as outlookAccountById resolves it: default');
+  assert.deepEqual(out.map((s) => s.head), [' OUTLOOK · IRLPERSONAL', ' OUTLOOK · USPERSONAL', ' OUTLOOK · GONE', ' OUTLOOK · NOT AN ID']);
+  assert.deepEqual(out.map((s) => s.count), [12, 8, 1, 1]);
+  assert.ok(!out[0].cards.includes('02 Planner/outlook/bad-1.md'), 'the first mailbox never shows a note with an invalid source_account');
   assert.deepEqual(out[2].cards, ['02 Planner/outlook/gone-1.md']);
+  assert.deepEqual(out[3].cards, ['02 Planner/outlook/bad-1.md'], 'the invalid id resolves as outlookAccountById resolves it: an unlisted account of that id');
   // Every Outlook note is in exactly one section.
   const all = out.flatMap((s) => s.cards);
   assert.equal(all.length, new Set(all).size);
