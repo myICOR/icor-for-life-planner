@@ -283,6 +283,80 @@ test('a write that answers 404 is the same discovery: the note goes, the retry d
   }, false);
 });
 
+/* ---- 1b. the done notes from before 0.15.0 are asked about once -------- */
+
+// Until 0.15.0 absence meant "completed" and nothing else, so a task deleted
+// at the source before then left its note marked done. A done note is never
+// absent-and-open, so the probe above never reached it: the member trashed
+// them by hand (member report, item G).
+test('THE BACKLOG: a done note whose task was deleted before 0.15.0 is asked about once', async () => {
+  const deleted = note('old-deleted', { status: 'done', done_local: true });
+  const closed = note('old-closed', { status: 'done', done_local: true });
+  const reopenedOffQuery = note('old-open', { status: 'done', done_local: true });
+  const alive = note('alive');
+  const { p, trashed } = plugin({ _shadow: { 'clickup:alive': shadowOf('alive') } }, [deleted, closed, reopenedOffQuery, alive]);
+  const asked = [];
+  const answer = (item) => {
+    asked.push(item.id);
+    return item.id === 'old-deleted' ? true : item.id === 'old-open' ? 'open' : false;
+  };
+  await recording(async (writes) => {
+    await p.upsertSource('clickup', { items: [openTask('alive')] });
+    assert.deepEqual(trashed, [deleted.path], 'deleted there, gone here');
+    assert.equal(closed.fm.status, 'done', 'closed there, still done here');
+    assert.equal(reopenedOffQuery.fm.status, 'done', 'anything short of "no such task" leaves the note as it is');
+    assert.deepEqual(writes, [], 'the look back writes nothing to the source');
+    assert.equal(p.settings.goneSweep.clickup, true, 'the look back is finished for this source');
+    asked.length = 0;
+    p._goneProbed = new Set(); // a new sync pass
+    await p.upsertSource('clickup', { items: [openTask('alive')] });
+    assert.deepEqual(asked, [], 'and it is never repeated: a done note is not asked about every sync');
+  }, answer);
+});
+
+test('the look back spends the same per-sync budget, and picks up where it stopped', async () => {
+  const ids = Array.from({ length: 30 }, (_, i) => `d${String(i).padStart(2, '0')}`);
+  const files = ids.map((id) => note(id, { status: 'done', done_local: true }));
+  const absentOpen = note('absent-open');
+  const { p } = plugin({ _shadow: { 'clickup:alive': shadowOf('alive'), 'clickup:absent-open': shadowOf('absent-open') } }, [...files, absentOpen, note('alive')]);
+  const asked = [];
+  await recording(async () => {
+    await p.upsertSource('clickup', { items: [openTask('alive')] });
+    assert.equal(asked.length, T.GONE_PROBE_MAX_PER_SYNC, 'the absent open task and the look back share one budget');
+    assert.equal(asked[0], 'absent-open', 'the ordinary probe goes first');
+    assert.equal(p.settings.goneSweep.clickup, ids[T.GONE_PROBE_MAX_PER_SYNC - 2], 'where this pass stopped');
+    asked.length = 0;
+    p._goneProbed = new Set();
+    await p.upsertSource('clickup', { items: [openTask('alive')] });
+    assert.deepEqual(asked, ids.slice(T.GONE_PROBE_MAX_PER_SYNC - 1), 'the rest, and none twice');
+    assert.equal(p.settings.goneSweep.clickup, true);
+  }, (item) => { asked.push(item.id); return false; });
+});
+
+test('the look back is pure: task sources only, id order, open and pending notes left out', () => {
+  const items = [
+    { source: 'clickup', id: 'b', status: 'done' },
+    { source: 'clickup', id: 'a', status: 'done' },
+    { source: 'clickup', id: 'c', status: 'open' },
+    { source: 'clickup', id: 'd', status: 'done', reopenPending: true },
+    { source: 'clickup', id: 'e', status: 'done' },
+    { source: 'todoist', id: 'a', status: 'done' },
+  ];
+  const r = T.doneSweepBatch('clickup', items, new Set(['e']), undefined, 25);
+  assert.deepEqual(r.batch.map((i) => i.id), ['a', 'b'], 'done, not in the open set, not pending, sorted');
+  assert.equal(r.next, true);
+  assert.deepEqual(T.doneSweepBatch('clickup', items, new Set(), undefined, 1), { batch: [items[1]], next: 'a' });
+  assert.deepEqual(T.doneSweepBatch('clickup', items, new Set(), 'a', 25).batch.map((i) => i.id), ['b', 'e']);
+  assert.deepEqual(T.doneSweepBatch('clickup', items, new Set(), true, 25), { batch: [], next: true }, 'finished stays finished');
+  assert.deepEqual(T.doneSweepBatch('clickup', items, new Set(), 'a', 0), { batch: [], next: 'a' }, 'no budget left, no progress lost');
+  // A mail id is not a stable name: without the mailbox generation a UID
+  // that is not found is not evidence the mail was deleted.
+  const mail = [{ source: 'email', id: '7', status: 'done' }, { source: 'outlook', id: 'AAk=', status: 'done' }];
+  assert.deepEqual(T.doneSweepBatch('email', mail, new Set(), undefined, 25), { batch: [], next: true });
+  assert.deepEqual(T.doneSweepBatch('outlook', mail, new Set(), undefined, 25), { batch: [], next: true });
+  assert.deepEqual(T.doneSweepBatch('manual', items, new Set(), undefined, 25), { batch: [], next: true });
+});
+
 /* ---- 2. edits round-trip, and the source wins --------------------------- */
 
 test('title joined the shared fields; the local worksheet did not', () => {

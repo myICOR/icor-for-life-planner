@@ -4950,6 +4950,28 @@ function goneProbeBatch(items, max) {
 //                    work, so the note is left exactly as it is
 function absenceVerdict(probe) { return probe === true ? 'gone' : probe === 'open' ? 'open' : 'done'; }
 
+// The look back at DONE notes. Until 0.15.0 absence meant "completed" and
+// nothing else, so a task deleted at the source before then left a note
+// marked done, and a done note never enters the batch above. Each source asks
+// about its done notes once, in id order, out of the same per-sync budget;
+// `mark` is the persisted progress (settings.goneSweep[source]): absent
+// before the first pass, the last id asked while there is more, true when
+// finished. Task sources only: a mail id is renumbered by a mailbox rebuild
+// or a move, and an older done note has no recorded mailbox generation to
+// tell "deleted" from "renumbered", so a UID not found there is no evidence.
+const DONE_SWEEP_SOURCES = ['todoist', 'clickup'];
+function doneSweepBatch(source, allItems, openIds, mark, max) {
+  if (mark === true || !DONE_SWEEP_SOURCES.includes(source)) return { batch: [], next: true };
+  const after = typeof mark === 'string' ? mark : null;
+  const due = (allItems || [])
+    .filter((it) => it.source === source && it.status === 'done' && it.reopenPending !== true
+      && !openIds.has(it.id) && (after === null || String(it.id) > after))
+    .sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+  const batch = goneProbeBatch(due, max);
+  if (batch.length === due.length) return { batch, next: true };
+  return { batch, next: batch.length ? String(batch[batch.length - 1].id) : mark };
+}
+
 // Can this source be asked at all? A connector without a probe (manual, the
 // calendars) is never asked and never has an item trashed under this rule.
 function canProbeGone(source) {
@@ -7580,6 +7602,20 @@ class IcorPlannerPlugin extends Plugin {
         fm.synced_at = new Date().toISOString();
       });
       this.markSyncWrite(it.file);
+    }
+    // The done notes from before 0.15.0, asked about once per source with
+    // whatever budget the absent open tasks left. Only a clear "no such
+    // task" acts; closed or unknown leaves a done note exactly as it is.
+    const sweep = doneSweepBatch(source, allItems, openIds, (this.settings.goneSweep || {})[source],
+      GONE_PROBE_MAX_PER_SYNC - Math.min(stale.length, GONE_PROBE_MAX_PER_SYNC));
+    const sweptGone = await this.probeGoneIds(source, sweep.batch);
+    for (const it of sweep.batch) {
+      if (!sweptGone.has(it.id)) continue;
+      await this.removeGoneItem(source, it);
+      trashed += 1;
+    }
+    if (sweep.next !== undefined && sweep.next !== (this.settings.goneSweep || {})[source]) {
+      this.settings.goneSweep = Object.assign({}, this.settings.goneSweep, { [source]: sweep.next });
     }
     // A reopen that has not reached the source yet (the push path failed, or
     // the sync ran first): send it now. The flag is cleared only when the
@@ -12111,7 +12147,7 @@ module.exports.__test = {
   WINDOWS_TZ_TO_IANA, normalizeTzid, isIanaZone, resolveTzid, tzidUtcPrefixOffset,
   icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult, truncatedWarning,
   threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS, pushableTitle,
-  goneError, isGoneError, goneProbeBatch, absenceVerdict, canProbeGone, goneNotice,
+  goneError, isGoneError, goneProbeBatch, absenceVerdict, canProbeGone, goneNotice, doneSweepBatch,
   GONE_PROBE_MAX_PER_SYNC, todoistProbeGone, clickupProbeGone,
   htmlishToText, segmentInfo, fmtLeft, fmtDayTitle, fmtDayLabel,
   trayDefaultTab, trayVisibleTabs, trayTabLabel, trayEffectiveTab,
