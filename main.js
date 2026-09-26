@@ -9824,7 +9824,7 @@ class ImportHabitsModal extends Modal {
     contentEl.createDiv({ cls: 'iplan-settings-note', text: IMPORT_EDITS_TEXT });
     contentEl.createDiv({
       cls: 'iplan-settings-note',
-      text: `The planner note is created under ${this.plugin.habitsFolder()}/ with the schedule. Everything else in the My Life note stays. A note that already carries planner_habit is skipped.`,
+      text: `The planner note is created under ${this.plugin.habitsFolder()}/ with the schedule. Everything else in the My Life note stays. A note whose planner_habit already links to a planner habit note is skipped.`,
     });
     const chosen = new Set(this.candidates.map((c) => c.path));
     let btn = null;
@@ -12065,7 +12065,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       }));
     new Setting(containerEl)
       .setName('Import from My Life')
-      .setDesc(`${IMPORT_EDITS_TEXT} A note that already carries planner_habit is skipped.`)
+      .setDesc(`${IMPORT_EDITS_TEXT} A note whose planner_habit already links to a planner habit note is skipped.`)
       .addButton((b) => {
         importBtn = b;
         b.setButtonText('Import from My Life')

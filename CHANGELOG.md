@@ -6,6 +6,28 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.16.2] - 2026-09-26
+
+### Fixed
+- **A My Life habit note that links only to itself can be imported.** A
+  habit note whose planner_habit line named the note itself, not a planner
+  habit note, counted as already imported, so it was never offered for
+  import and never got its planner note. The import now counts a note as
+  imported only when its planner_habit links to a planner habit note that
+  exists. A My Life note whose planner note you deleted is offered again;
+  nothing is imported unless you tick it. The settings text says the same.
+  Thanks to Brian Carroll (@brijcarroll) for the fix (#28, closes #27).
+- **Done notes left by tasks deleted before 0.15.0 are cleaned up.** Before
+  0.15.0 a task deleted in Todoist or ClickUp was marked done here instead,
+  and its note stayed forever. Once per source, the planner asks Todoist and
+  ClickUp about your done task notes. A note whose task the source no longer
+  has (answer "not found") moves to the system trash, where you can restore
+  it. If you switched to another Todoist or ClickUp account, or left a
+  shared project, check the trash after the first syncs. The check uses the
+  same read-only request as the existing deletion check, within its limit
+  of 25 requests per sync, and never writes to Todoist or ClickUp. Thanks
+  to Brian Carroll (@brijcarroll) for the fix (#25, closes #24).
+
 ## [0.16.1] - 2026-09-23
 
 ### Fixed

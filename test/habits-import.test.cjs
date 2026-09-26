@@ -380,7 +380,7 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   assert.ok(/contentEl\.createDiv\(\{ cls: 'iplan-settings-note', text: IMPORT_EDITS_TEXT \}\);/.test(modal), 'the sentence above the checkboxes');
   assert.ok(modal.indexOf('IMPORT_EDITS_TEXT') < modal.indexOf('addToggle('), 'above, not below');
   const settings = main.slice(main.indexOf('class IcorPlannerSettingTab'));
-  assert.ok(/\.setName\('Import from My Life'\)\s*\n\s*\.setDesc\(`\$\{IMPORT_EDITS_TEXT\} A note that already carries planner_habit is skipped\.`\)/.test(settings), 'the same sentence under the button');
+  assert.ok(/\.setName\('Import from My Life'\)\s*\n\s*\.setDesc\(`\$\{IMPORT_EDITS_TEXT\} A note whose planner_habit already links to a planner habit note is skipped\.`\)/.test(settings), 'the same sentence under the button');
   // the floor: trashFile is an API of 1.6.6
   const manifest = JSON.parse(fs.readFileSync(require('node:path').join(__dirname, '..', 'manifest.json'), 'utf8'));
   assert.equal(manifest.minAppVersion, '1.6.6');
