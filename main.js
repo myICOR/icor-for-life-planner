@@ -6084,7 +6084,7 @@ function importPlan(notes, plannerHabits) {
   for (const h of plannerHabits || []) if (h && h.linkedBasename && !byLink.has(h.linkedBasename)) byLink.set(h.linkedBasename, h.path);
   const out = [];
   for (const n of notes || []) {
-    if (!n || !isHabitFrontmatter(n.fm) || isPlannerHabitFrontmatter(n.fm) || importDone(n.fm)) continue;
+    if (!n || !isHabitFrontmatter(n.fm) || isPlannerHabitFrontmatter(n.fm) || importDone(n.fm, plannerHabits || [])) continue;
     const basename = n.basename || basenameOf(n.path);
     if (!habitBasenameOk(basename)) continue;
     out.push({ path: n.path, basename, ...importMapping(n.fm, basename, n.path), existingPlanner: byLink.get(basename) || null });
@@ -6237,8 +6237,20 @@ const IMPORT_EDITS_TEXT = 'In each My Life note the import: removes cadence, cad
 // A My Life note is imported once it carries the back-link. Read on the
 // SOURCE, never inferred from the planner side, so a run that stopped
 // between its writes shows the note again and the import resumes it.
-function importDone(fm) {
-  return !!fm && typeof fm === 'object' && fm.planner_habit != null && String(fm.planner_habit).trim() !== '';
+//
+// With `plannerHabits` (the parsed planner notes) the back-link must also
+// NAME one of them: a link to the note itself, or to a planner note that is
+// not there, is not an import. A bare name counts when a planner note has
+// that name (every note imported before 0.14.1 carries one); a path counts
+// when it is that note's path. Case is ignored, as Obsidian ignores it.
+function importDone(fm, plannerHabits) {
+  if (!(!!fm && typeof fm === 'object' && fm.planner_habit != null && String(fm.planner_habit).trim() !== '')) return false;
+  if (plannerHabits === undefined) return true;
+  const want = (wikilinkTarget(fm.planner_habit) || '').toLowerCase();
+  if (!want) return false;
+  return (plannerHabits || []).some((h) => !!h && !!h.path && (want.includes('/')
+    ? (wikilinkTarget(h.path) || '').toLowerCase() === want
+    : basenameOf(h.path).toLowerCase() === want));
 }
 
 /* ---- the one-time link qualification (0.14.1) ---------------------------- */
@@ -8613,7 +8625,7 @@ class IcorPlannerPlugin extends Plugin {
         const src = this.app.vault.getAbstractFileByPath(c.path);
         if (!(src instanceof TFile)) { result.skipped++; continue; }
         const cache = this.app.metadataCache.getFileCache(src);
-        if (importDone(cache && cache.frontmatter)) { result.skipped++; continue; }
+        if (importDone(cache && cache.frontmatter, this.habits || [])) { result.skipped++; continue; }
         const body = await this.app.vault.read(src);
         const logBlock = habitLogBlockOf(body);
         const existing = c.existingPlanner && this.app.vault.getAbstractFileByPath(c.existingPlanner);

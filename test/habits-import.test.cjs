@@ -76,7 +76,10 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
     { path: `${MY}/Nothing.md`, basename: 'Nothing', fm: null },
     { path: `${MY}/Done.md`, basename: 'Done', fm: { type: 'habit', planner_habit: '[[Done]]' } },
   ];
-  const planner = [T.habitFromFrontmatter({ type: 'planner-habit', name: 'Walk', cadence: 'daily', linked_note: '[[Walk]]' }, '02 Planner/Habits/Walk.md', '')];
+  const planner = [
+    T.habitFromFrontmatter({ type: 'planner-habit', name: 'Walk', cadence: 'daily', linked_note: '[[Walk]]' }, '02 Planner/Habits/Walk.md', ''),
+    T.habitFromFrontmatter({ type: 'planner-habit', name: 'Done', cadence: 'daily', linked_note: '[[Done]]' }, '02 Planner/Habits/Done.md', ''),
+  ];
   const plan = T.importPlan(notes, planner);
   assert.deepEqual(plan.map((c) => c.basename), ['Bills', 'Morning pages', 'Odd', 'Old', 'Rent', 'Walk', 'Weekday'], 'Done carries the back-link; the furniture, the essay and a stray planner note are not habits; Walk is listed although a planner note links to it, because its own frontmatter does not say so yet');
   const by = Object.fromEntries(plan.map((c) => [c.basename, c]));
@@ -98,8 +101,9 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
   // the scaffold example maps by since; the name falls back to the file name
   const walk = T.importMapping({ type: 'habit', cadence: 'daily', since: '2026-08-01' }, 'Walk', `${MY}/Walk.md`);
   assert.deepEqual([walk.name, walk.cadence, walk.startedOn, walk.linkedNote], ['Walk', 'daily', '2026-08-01', `[[${MY}/Walk]]`]);
-  // with nothing linked everything lists; with nothing to list, nothing
-  assert.equal(T.importPlan(notes, []).length, 7);
+  // with no planner notes everything lists, Done too: its back-link names
+  // no planner note (item D); with nothing to list, nothing
+  assert.equal(T.importPlan(notes, []).length, 8);
   assert.equal(T.importPlan(notes, []).find((c) => c.basename === 'Walk').existingPlanner, null);
   assert.deepEqual(T.importPlan([], planner), []);
   assert.deepEqual(T.importPlan(null, null), []);
@@ -368,7 +372,7 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   assert.ok(/await this\.app\.vault\.process\(src, \(data\) => importSourceFrontmatterText\(data, plannerLink\)\);/.test(imp), 'then the frontmatter, as a text edit through vault.process: the strip, the type and the back-link in one pass');
   assert.ok(!/processFrontMatter/.test(imp), 'processFrontMatter never touches the My Life note: it would drop its comment lines');
   assert.ok(imp.indexOf('createHabit(') < imp.indexOf('moveHabitLog(data, plannerLink)') && imp.indexOf('moveHabitLog(data, plannerLink)') < imp.indexOf('importSourceFrontmatterText(data, plannerLink)'), 'in that order');
-  assert.ok(/if \(importDone\(cache && cache\.frontmatter\)\) \{ result\.skipped\+\+; continue; \}/.test(imp), 'done is read on the source');
+  assert.ok(/if \(importDone\(cache && cache\.frontmatter, this\.habits \|\| \[\]\)\) \{ result\.skipped\+\+; continue; \}/.test(imp), 'done is read on the source, and its back-link must name a planner note');
   assert.ok(!/linkedBasename/.test(imp), 'never inferred from the planner side');
   // the consent copy: one constant, both surfaces
   assert.equal(T.IMPORT_EDITS_TEXT, 'In each My Life note the import: removes cadence, cadence_days, started_on, since from the frontmatter; adds type: habit when missing and planner_habit; moves the log table into the planner note and leaves a pointer line.');
@@ -486,4 +490,42 @@ test('THE ASK: an absent month_day stays absent on import, is required by the di
   assert.ok(!/monthDayOf\(f\.month_day\) \|\| 1/.test(main), 'the import mapping never seeds the 1st');
   // applyHabitCadence may still seed the 1st on a person's cadence switch (that is the person choosing monthly, not an import)
   assert.equal(T.applyHabitCadence({ cadence: 'weekly', cadence_days: ['mon'] }, 'monthly').month_day, 1);
+});
+
+/* ---- a back-link counts only when it names a planner note ---------------- */
+
+// Member report, item D: `planner_habit` was read as "imported" whenever it
+// was non-empty, so a My Life note whose back-link named ITSELF (a bare
+// [[Walk]] inside Walk.md, with no planner note called Walk) was never
+// offered for import, and nothing ever made its planner note.
+test('THE SELF-LINK: a back-link counts only when it names a planner habit note', () => {
+  const planner = [T.habitFromFrontmatter({ type: 'planner-habit', name: 'Walk', cadence: 'daily', linked_note: `[[${MY}/Walk]]` }, `${PL}/Walk.md`, '')];
+  // the shapes the import writes, and the bare one every note before 0.14.1 carries
+  assert.equal(T.importDone({ planner_habit: `[[${PL}/Walk]]` }, planner), true);
+  assert.equal(T.importDone({ planner_habit: '[[Walk]]' }, planner), true, 'a bare link imported before 0.14.1 still counts while its planner note is there');
+  assert.equal(T.importDone({ planner_habit: `[[${PL}/walk]]` }, planner), true, 'Obsidian resolves a link without regard to case');
+  // what does not
+  assert.equal(T.importDone({ planner_habit: '[[Run]]' }, planner), false, 'a bare self-link with no planner note behind it');
+  assert.equal(T.importDone({ planner_habit: `[[${MY}/Walk]]` }, planner), false, 'a link to the My Life note itself');
+  assert.equal(T.importDone({ planner_habit: '[[Walk]]' }, []), false, 'no planner note at all');
+  assert.equal(T.importDone({ planner_habit: '[[]]' }, planner), false);
+  assert.equal(T.importDone({ type: 'habit' }, planner), false);
+  // the plan: the self-linked note is listed, the linked one is not
+  const notes = [
+    { path: `${MY}/Walk.md`, basename: 'Walk', fm: { type: 'habit', cadence: 'daily', planner_habit: '[[Walk]]' } },
+    { path: `${MY}/Run.md`, basename: 'Run', fm: { type: 'habit', cadence: 'daily', planner_habit: '[[Run]]' } },
+  ];
+  assert.deepEqual(T.importPlan(notes, planner).map((c) => c.basename), ['Run']);
+});
+
+test('THE SELF-LINK: a My Life note that links to itself is imported, not skipped', async () => {
+  const { p, files, calls } = importApp();
+  files[`${MY}/Walk.md`] = { text: '---\ntype: habit\ncadence: daily\nplanner_habit: "[[Walk]]"\n---\n\n# Walk\n', fm: { type: 'habit', cadence: 'daily', planner_habit: '[[Walk]]' } };
+  const list = p.importCandidates();
+  assert.deepEqual(list.map((c) => c.basename), ['Morning pages', 'Walk'], 'offered for import');
+  const r = await p.importHabits(list.filter((c) => c.basename === 'Walk'));
+  assert.deepEqual(r, { done: 1, skipped: 0, failed: [] });
+  assert.deepEqual(calls.create.map((c) => c.path), [`${PL}/Walk.md`], 'its planner note now exists');
+  assert.equal(files[`${MY}/Walk.md`].fm.planner_habit, `[[${PL}/Walk]]`, 'the self-link is replaced in place by the real back-link');
+  assert.deepEqual(p.importCandidates().map((c) => c.basename), ['Morning pages'], 'and a second run leaves it alone');
 });
