@@ -43,7 +43,7 @@ const {
 const BOARD_VIEW_TYPE = 'icor-for-life-planner-board';
 const TRAY_VIEW_TYPE = 'icor-for-life-planner-tray';
 // The week note's own tab (0.14.0): the weekly priorities and the daily
-// highlights of one Saturday-anchored week.
+// highlights of one ISO week.
 const WEEK_VIEW_TYPE = 'icor-for-life-planner-week';
 // The version lives in manifest.json only (this.manifest.version at runtime).
 // A second copy here drifted one release behind and nothing read it. The
@@ -288,6 +288,10 @@ const DEFAULT_SETTINGS = {
   envFilePath: DEFAULT_ENV_FILE_PATH,
   syncMinutes: 10,
   showWeekend: false,
+  // The day the board's week and the week note start on (2026-09-27):
+  // 'monday' (default, the ISO week), 'saturday' or 'sunday'. One value for
+  // both, so the board and the week note cannot disagree.
+  weekStart: 'monday',
   // How dates and times are shown (2026-09-07): moment tokens, blank by
   // default. Blank follows Obsidian's Templates setting; when that is blank
   // too the board draws the compact shapes of every earlier release. See
@@ -993,8 +997,7 @@ function plannerPaths(settings) {
     // Habit notes (0.10.0): one per habit, under the room.
     habits: `${root}/Habits`,
     isHabit: (path) => typeof path === 'string' && path.startsWith(`${root}/Habits/`),
-    // Week notes (0.14.0): one per Saturday-anchored week, named by the
-    // Saturday that starts it.
+    // Week notes (0.14.0): one per ISO week, named by the week itself.
     weeks: `${root}/Weeks`,
     isWeek: (path) => typeof path === 'string' && path.startsWith(`${root}/Weeks/`),
     weekNote: (iso) => `${root}/Weeks/${iso}.md`,
@@ -1045,13 +1048,29 @@ function localDayStr(d) {
 
 function todayStr() { return localDayStr(new Date()); }
 
-// Monday of the week containing dayStr (ISO week anchor, matches the cockpit).
-function mondayOf(dayStr) {
+// The day a week starts on: JS getDay() numbers (Sun=0 .. Sat=6).
+const WEEK_START_DAYS = { monday: 1, saturday: 6, sunday: 0 };
+function normalizeWeekStart(v) {
+  return Object.prototype.hasOwnProperty.call(WEEK_START_DAYS, v) ? v : 'monday';
+}
+
+// First day of the week containing dayStr, for the chosen start day.
+function weekStartOf(dayStr, start) {
   const [y, m, d] = dayStr.split('-').map(Number);
   const dt = new Date(y, m - 1, d);
-  const shift = (dt.getDay() + 6) % 7; // Mon=0 .. Sun=6
+  const shift = (dt.getDay() - WEEK_START_DAYS[normalizeWeekStart(start)] + 7) % 7;
   dt.setDate(dt.getDate() - shift);
   return localDayStr(dt);
+}
+
+// Monday of the week containing dayStr (ISO week anchor, matches the cockpit).
+function mondayOf(dayStr) { return weekStartOf(dayStr, 'monday'); }
+
+// Saturday and Sunday by the calendar, whatever day the week starts on.
+function isWeekendDay(dayStr) {
+  const [y, m, d] = dayStr.split('-').map(Number);
+  const dow = new Date(y, m - 1, d, 12).getDay();
+  return dow === 0 || dow === 6;
 }
 
 function addDays(dayStr, n) {
@@ -6432,19 +6451,12 @@ function habitsCountText(habits, folder) {
 }
 
 /* ========================================================================== *
- * Weeks (2026-09-15, Saturday-anchored 2026-09-26)
+ * Weeks (2026-09-15)
  *
- * One note per week at <planner folder>/Weeks/YYYY-MM-DD.md, named by the
- * ISO date of the Saturday that starts it, `type: planner-week`, with two
- * sentinel blocks in the body. It answers the two questions nothing in the
- * vault could answer before: what am I trying to achieve this week, and
- * what is the one thing that would make today a win.
- *
- * The week runs Saturday through Friday, not the ISO Monday-Sunday week: a
- * Monday-anchored week orphans a priority the moment the calendar crosses
- * Monday mid-week for anyone whose work week does not start there. The
- * filename IS the identity, so there is no separate week-number label to
- * drift out of sync with it.
+ * One note per ISO week at <planner folder>/Weeks/YYYY-Www.md, `type:
+ * planner-week`, with two sentinel blocks in the body. It answers the two
+ * questions nothing in the vault could answer before: what am I trying to
+ * achieve this week, and what is the one thing that would make today a win.
  *
  * The two words, ruled 2026-09-15:
  *
@@ -6461,7 +6473,7 @@ function habitsCountText(habits, folder) {
  * key a plugin has already written under is a migration and a label is not.
  *
  * What the plugin may write in this note: the two sentinel blocks, and the
- * `week_start` field when the note is created. Nothing else. Everything a person
+ * `week` field when the note is created. Nothing else. Everything a person
  * typed around the blocks comes back byte for byte, which is what
  * upsertLogRow and toggleChecklistItem are built for. The note may equally
  * be edited by hand or by the vault's own planner-week.py; the parser reads
@@ -6473,11 +6485,7 @@ const WEEK_PRIORITIES_SENTINEL = 'weekly-priorities';
 const WEEK_PRIORITIES_SECTION = { heading: '## Weekly priorities', schema: 'checklist' };
 const WEEK_HIGHLIGHTS_SENTINEL = 'daily-highlights';
 const WEEK_HIGHLIGHTS_SECTION = { heading: '## Daily highlights', schema: 'highlight', header: ['Date', 'Highlight', 'Done'] };
-// The week's identity is the ISO date of the Saturday that starts it, not an
-// ISO week number: a Saturday-Friday work week orphans a priority the moment
-// the calendar crosses Monday mid-week, and a plain date needs no separate
-// label to drift out of sync with the file it names.
-const WEEK_ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+const WEEK_ISO_RE = /^\d{4}-W\d{2}$/;
 // The marker set is the habit log's, so one vocabulary covers every check in
 // the plugin: Y done, N not done, _ or blank pending.
 const WEEK_HIGHLIGHT_MARKERS = ['Y', 'N', '_'];
@@ -6485,32 +6493,83 @@ const WEEK_HIGHLIGHT_MARKERS = ['Y', 'N', '_'];
 const p2 = (n) => String(n).padStart(2, '0');
 const DAY_MS = 86400000;
 
-// The Saturday that starts the week containing a local day, as YYYY-MM-DD.
-// Computed in UTC on purpose: the arithmetic is whole days and a local Date
-// crossing a DST boundary can land an hour short of the next midnight.
-function weekStartOf(dayStr) {
+// The ISO week a local day falls in, as YYYY-Www. Computed in UTC on purpose:
+// the arithmetic is whole days and a local Date crossing a DST boundary can
+// land an hour short of the next midnight.
+function isoWeekOf(dayStr) {
   const parts = String(dayStr == null ? '' : dayStr).split('-').map(Number);
   if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return null;
   const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
   if (Number.isNaN(dt.getTime())) return null;
-  // getUTCDay(): Sun=0 .. Sat=6. Days back to the Saturday on or before dt.
-  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 1) % 7));
-  return `${dt.getUTCFullYear()}-${p2(dt.getUTCMonth() + 1)}-${p2(dt.getUTCDate())}`;
+  // The Thursday of this week decides which year the week belongs to.
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7) + 3);
+  const year = dt.getUTCFullYear();
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const firstThu = new Date(Date.UTC(year, 0, 4 - ((jan4.getUTCDay() + 6) % 7) + 3));
+  const week = 1 + Math.round((dt.getTime() - firstThu.getTime()) / (7 * DAY_MS));
+  return `${year}-W${p2(week)}`;
 }
 
-// A week-start string, or null when it is not one. Every calendar date has an
-// unambiguous Saturday-anchored week, so unlike an ISO week number there is
-// no year that "does not have" one - only a malformed string, or a real date
-// that is not itself a Saturday, fails this.
-function isValidWeekStart(weekStart) {
-  const s = String(weekStart == null ? '' : weekStart).trim();
+// The Monday of an ISO week, or null when the string is not one. A week
+// number a year does not have (2026-W53) is null rather than a silent roll
+// into January: the round trip through isoWeekOf is the check.
+function mondayOfIsoWeek(iso) {
+  const s = String(iso == null ? '' : iso).trim();
   if (!WEEK_ISO_RE.test(s)) return null;
-  return weekStartOf(s) === s ? s : null;
+  const year = Number(s.slice(0, 4));
+  const week = Number(s.slice(6));
+  if (week < 1 || week > 53) return null;
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const mondayW1 = Date.UTC(year, 0, 4 - ((jan4.getUTCDay() + 6) % 7));
+  const d = new Date(mondayW1 + (week - 1) * 7 * DAY_MS);
+  const out = `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
+  return isoWeekOf(out) === s ? out : null;
 }
 
-// The seven days of a Saturday-anchored week, Saturday first.
-function weekOfDays(weekStart) {
-  return isValidWeekStart(weekStart) ? weekDays(weekStart) : [];
+// The seven days of an ISO week, Monday first.
+function isoWeekDays(iso) {
+  const monday = mondayOfIsoWeek(iso);
+  return monday ? weekDays(monday) : [];
+}
+
+// A week's key is its file name. Monday weeks keep the ISO YYYY-Www name, so
+// no existing note moves; a Saturday or Sunday week is named by the date of
+// the day that starts it. The key is the identity, the setting only decides
+// which key today belongs to.
+const WEEK_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function isWeekKey(key) {
+  const s = String(key == null ? '' : key).trim();
+  return WEEK_ISO_RE.test(s) ? mondayOfIsoWeek(s) !== null : WEEK_DATE_RE.test(s) && localDayStr(new Date(`${s}T12:00:00`)) === s;
+}
+
+// The first day of the week a key names, or null when it is not a key.
+function weekKeyStart(key) {
+  const s = String(key == null ? '' : key).trim();
+  if (WEEK_ISO_RE.test(s)) return mondayOfIsoWeek(s);
+  return isWeekKey(s) ? s : null;
+}
+
+// The key of the week containing a day, under the chosen start day.
+function weekKeyOf(dayStr, start) {
+  const first = weekStartOf(dayStr, start);
+  return normalizeWeekStart(start) === 'monday' ? isoWeekOf(first) : first;
+}
+
+// The seven days of a week key, first day first.
+function weekKeyDays(key) {
+  const first = weekKeyStart(key);
+  return first ? weekDays(first) : [];
+}
+
+// Every file name the same week may already be under. A date-named note that
+// starts on a Monday is the same week as the ISO note, so an existing note of
+// either shape is found and none is ever duplicated.
+function weekKeyAliases(key) {
+  const first = weekKeyStart(key);
+  if (!first) return [];
+  const out = [String(key).trim(), first];
+  if (weekStartOf(first, 'monday') === first) out.push(isoWeekOf(first));
+  return out.filter((k, i) => out.indexOf(k) === i);
 }
 
 /* ---- the weekly-priorities checklist ------------------------------------- */
@@ -6653,21 +6712,24 @@ function isPlannerWeekFrontmatter(fm) {
   return !!fm && typeof fm === 'object' && String(fm.type == null ? '' : fm.type).trim() === WEEK_TYPE;
 }
 
-// The week a note describes, or null for any other note. The `week_start`
-// field wins; a note whose field is missing or malformed falls back to its
-// own filename, which is the week-start date by construction.
+// The week a note describes, or null for any other note. The `week` field
+// (ISO, Monday weeks) or the `week_start` field (a date, Saturday and Sunday
+// weeks) wins; a note whose field is missing or malformed falls back to its
+// own filename, which is the week key by construction.
 function weekFromNote(fm, body, path) {
   if (!isPlannerWeekFrontmatter(fm)) return null;
-  const field = String(fm.week_start == null ? '' : fm.week_start).trim();
+  const field = String(fm.week == null ? '' : fm.week).trim();
+  const startField = String(fm.week_start == null ? '' : fm.week_start).trim();
   const base = basenameOf(path);
-  const weekStart = isValidWeekStart(field) || isValidWeekStart(base);
-  if (!weekStart) return null;
+  const iso = [field, startField, base].find((k) => k && isWeekKey(k)) || null;
+  if (!iso) return null;
   const text = stripFrontmatter(body);
   const priorities = parseChecklistBlock(text, WEEK_PRIORITIES_SENTINEL);
   return {
     path: path || null,
-    week: weekStart,
-    weekStart,
+    week: iso,
+    monday: WEEK_ISO_RE.test(iso) ? mondayOfIsoWeek(iso) : null,
+    weekStart: weekKeyStart(iso),
     priorities: priorities.items.map((i, k) => ({ index: k, done: i.done, text: i.text })),
     doneCount: priorities.items.filter((i) => i.done).length,
     highlights: weekHighlights(text),
@@ -6677,16 +6739,16 @@ function weekFromNote(fm, body, path) {
 // The note a new week starts as: the frontmatter of record, the two headings,
 // the two sentinels, and the highlights header. No rows: an empty week is an
 // empty week, and a seeded placeholder is a row nobody wrote.
-function weekTemplate(weekStart, nowIso) {
+function weekTemplate(iso, nowIso) {
   return [
     '---',
     `type: ${WEEK_TYPE}`,
-    `week_start: ${weekStart}`,
+    WEEK_ISO_RE.test(iso) ? `week: ${iso}` : `week_start: ${iso}`,
     `created_at: ${nowIso || new Date().toISOString()}`,
     'tags: []',
     '---',
     '',
-    `# ${weekStart}`,
+    `# ${iso}`,
     '',
     WEEK_PRIORITIES_SECTION.heading,
     `<!-- ${WEEK_PRIORITIES_SENTINEL}: schema=${WEEK_PRIORITIES_SECTION.schema} -->`,
@@ -6772,7 +6834,7 @@ class IcorPlannerPlugin extends Plugin {
 
     this.addCommand({ id: 'open-board', name: 'Open weekly planner', callback: () => this.openBoard() });
     this.addCommand({ id: 'open-tray', name: 'Open planner tray', callback: () => this.openTray(true) });
-    this.addCommand({ id: 'open-week', name: 'Open this week', callback: () => this.openWeek(weekStartOf(todayStr())) });
+    this.addCommand({ id: 'open-week', name: 'Open this week', callback: () => this.openWeek(this.weekKeyFor(todayStr())) });
     this.addCommand({ id: 'sync-now', name: 'Sync planner sources now', callback: () => this.syncNow(true) });
     this.addCommand({ id: 'add-manual-task', name: 'Add a task', callback: () => this.focusAddTask() });
     this.addCommand({ id: 'new-routine', name: 'New routine', callback: () => this.openNewRoutine() });
@@ -7343,7 +7405,7 @@ class IcorPlannerPlugin extends Plugin {
     await mk(p.routines);
     // And Habits (0.10.0): where New habit and the import put the notes.
     await mk(p.habits);
-    // And Weeks (0.14.0): one note per Saturday-anchored week. The note itself is created
+    // And Weeks (0.14.0): one note per ISO week. The note itself is created
     // on demand, the room is created here so it is visible from day one.
     await mk(p.weeks);
   }
@@ -8201,12 +8263,34 @@ class IcorPlannerPlugin extends Plugin {
   // same shape habitFile has. A path outside <root>/Weeks/ is refused before
   // any file is looked up.
   weekFile(iso) {
-    if (!WEEK_ISO_RE.test(String(iso == null ? '' : iso).trim())) throw new Error('not a week-start date');
-    const path = normalizePath(this.paths().weekNote(iso));
-    if (!this.paths().isWeek(path)) throw new Error('week note outside the planner Weeks folder');
-    const file = this.app.vault.getAbstractFileByPath(path);
-    return file instanceof TFile ? file : null;
+    if (!isWeekKey(iso)) throw new Error('not a week key');
+    for (const key of weekKeyAliases(iso)) {
+      const path = normalizePath(this.paths().weekNote(key));
+      if (!this.paths().isWeek(path)) throw new Error('week note outside the planner Weeks folder');
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) return file;
+    }
+    return null;
   }
+
+  // A changed week-start setting re-anchors every open board and week tab.
+  applyWeekStart() {
+    for (const l of this.app.workspace.getLeavesOfType(BOARD_VIEW_TYPE)) {
+      const v = l.view;
+      if (!(v instanceof PlannerBoardView)) continue;
+      v.weekStart = weekStartOf(v.weekStart, this.settings.weekStart);
+      v.render();
+    }
+    for (const l of this.app.workspace.getLeavesOfType(WEEK_VIEW_TYPE)) {
+      const v = l.view;
+      if (!(v instanceof PlannerWeekView)) continue;
+      v.week = weekKeyOf(weekKeyStart(v.week), this.settings.weekStart);
+      v.refresh();
+    }
+  }
+
+  // The key of the week containing a day, under the week-start setting.
+  weekKeyFor(day) { return weekKeyOf(day, this.settings.weekStart); }
 
   // This week's note, created from the template when it is missing. Creation
   // is the ONE write that touches anything outside the two sentinel blocks,
@@ -8271,7 +8355,7 @@ class IcorPlannerPlugin extends Plugin {
 
   // The week tab, on the week containing `day` (today by default).
   async openWeek(iso) {
-    const week = WEEK_ISO_RE.test(String(iso == null ? '' : iso).trim()) ? iso : weekStartOf(todayStr());
+    const week = isWeekKey(iso) ? String(iso).trim() : this.weekKeyFor(todayStr());
     const existing = this.app.workspace.getLeavesOfType(WEEK_VIEW_TYPE);
     const leaf = existing.length ? existing[0] : this.app.workspace.getLeaf('tab');
     await leaf.setViewState({ type: WEEK_VIEW_TYPE, active: true, state: { week } });
@@ -9258,13 +9342,13 @@ function showCardMenu(plugin, item, view, pos) {
 // lands at the end of the lane (order = wall-clock ms, past every hand
 // order); the next drag renormalizes via orderForInsert.
 function showPlanMenu(plugin, item, view, pos) {
-  const weekStart = (view && view.weekStart) || mondayOf(todayStr());
+  const weekStart = (view && view.weekStart) || weekStartOf(todayStr(), plugin.settings.weekStart);
   const today = todayStr();
   const days = weekDays(weekStart)
-    .filter((d, i) => plugin.settings.showWeekend || i < 5);
+    .filter((d) => plugin.settings.showWeekend || !isWeekendDay(d));
   const menu = new Menu();
   days.forEach((day, i) => {
-    const label = `${DAY_NAMES[i]} ${fmtDayNum(day)}${day === today ? ' (today)' : ''}`;
+    const label = `${fmtDayLabel(day).split(' ')[0]} ${fmtDayNum(day)}${day === today ? ' (today)' : ''}`;
     for (const half of ['am', 'pm']) {
       menu.addItem((mi) => mi
         .setTitle(`${label} · ${half === 'am' ? 'morning' : 'afternoon'}`)
@@ -9867,7 +9951,7 @@ class PlannerBoardView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
-    this.weekStart = mondayOf(todayStr());
+    this.weekStart = weekStartOf(todayStr(), plugin.settings.weekStart);
     this.mode = 'week'; // 'week' | 'day'
     this.day = todayStr();
     this.index = null;          // buildItemIndex, per render
@@ -9894,7 +9978,7 @@ class PlannerBoardView extends ItemView {
   getState() { return { weekStart: this.weekStart, mode: this.mode, day: this.day }; }
   async setState(state, result) {
     if (state) {
-      if (state.weekStart) this.weekStart = state.weekStart;
+      if (state.weekStart) this.weekStart = weekStartOf(state.weekStart, this.plugin.settings.weekStart);
       if (state.mode === 'day' || state.mode === 'week') this.mode = state.mode;
       if (state.day) this.day = state.day;
       this.render();
@@ -9903,7 +9987,7 @@ class PlannerBoardView extends ItemView {
   }
 
   setWeek(weekStart) { this.weekStart = weekStart; this.render(); }
-  setDay(day) { this.day = day; this.weekStart = mondayOf(day); this.render(); }
+  setDay(day) { this.day = day; this.weekStart = weekStartOf(day, this.plugin.settings.weekStart); this.render(); }
   setMode(mode) {
     this.mode = mode;
     if (mode === 'day' && !this.day) this.day = todayStr();
@@ -9918,7 +10002,7 @@ class PlannerBoardView extends ItemView {
     const items = collectItems(this.plugin.app, this.plugin.paths().root);
     this.index = buildItemIndex(items);
     const splitHour = this.plugin.splitHour();
-    const eventsWeekStart = isDay ? mondayOf(this.day) : this.weekStart;
+    const eventsWeekStart = isDay ? weekStartOf(this.day, this.plugin.settings.weekStart) : this.weekStart;
     const events = this.plugin.calendarDefs
       ? icsEventsForWeek(this.plugin.calendarDefs, eventsWeekStart, splitHour)
       : [];
@@ -9933,7 +10017,7 @@ class PlannerBoardView extends ItemView {
       cls: 'iplan-title',
       text: isDay
         ? fmtDayTitle(this.day, today)
-        : (this.weekStart === mondayOf(today) ? 'This Week.' : 'The Week.'),
+        : (this.weekStart === weekStartOf(today, this.plugin.settings.weekStart) ? 'This Week.' : 'The Week.'),
     });
 
     const nav = titleRow.createDiv({ cls: 'iplan-nav' });
@@ -9961,14 +10045,14 @@ class PlannerBoardView extends ItemView {
     } else {
       mkNavBtn('chevron-left', 'Previous week', () => this.setWeek(addDays(this.weekStart, -7)));
       const todayBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-nav-today', text: 'TODAY' });
-      todayBtn.addEventListener('click', () => this.setWeek(mondayOf(todayStr())));
+      todayBtn.addEventListener('click', () => this.setWeek(weekStartOf(todayStr(), this.plugin.settings.weekStart)));
       mkNavBtn('chevron-right', 'Next week', () => this.setWeek(addDays(this.weekStart, 7)));
       nav.createSpan({ cls: 'iplan-week-label', text: fmtWeekLabel(this.weekStart) });
     }
     // The week note of whatever week is on screen: the priorities and the
     // daily highlights of that week, one click from the board it plans.
     mkNavBtn('list-checks', 'Open the week note',
-      () => this.plugin.openWeek(weekStartOf(isDay ? this.day : this.weekStart)));
+      () => this.plugin.openWeek(this.plugin.weekKeyFor(isDay ? this.day : this.weekStart)));
     const syncBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-sync-btn', attr: { 'aria-label': 'Sync now' } });
     setIcon(syncBtn, 'refresh-cw');
     if (this.plugin.syncing) syncBtn.addClass('is-syncing');
@@ -10011,7 +10095,7 @@ class PlannerBoardView extends ItemView {
     /* ---- board ---- */
     const visibleDays = isDay
       ? [this.day]
-      : weekDays(this.weekStart).filter((d, i) => this.plugin.settings.showWeekend || i < 5);
+      : weekDays(this.weekStart).filter((d) => this.plugin.settings.showWeekend || !isWeekendDay(d));
     const board = el.createDiv({ cls: 'iplan-board' });
     if (isDay) board.addClass('is-day');
     board.style.setProperty('--iplan-day-count', String(visibleDays.length));
@@ -11081,7 +11165,7 @@ class LinkNoteModal extends Modal {
 }
 
 /* ========================================================================== *
- * Week view - the weekly priorities and the daily highlights of one Saturday-anchored week
+ * Week view - the weekly priorities and the daily highlights of one ISO week
  *
  * Read and edit, nothing else. Two blocks, in the order the note carries
  * them: the priorities as a checklist whose boxes write the note, and the
@@ -11098,7 +11182,7 @@ class PlannerWeekView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
-    this.week = weekStartOf(todayStr());
+    this.week = plugin.weekKeyFor(todayStr());
     this.model = null;
     this.adding = false;
     this.draft = '';
@@ -11111,8 +11195,8 @@ class PlannerWeekView extends ItemView {
 
   getState() { return { week: this.week }; }
   async setState(state, result) {
-    if (state && WEEK_ISO_RE.test(String(state.week || ''))) {
-      this.week = state.week;
+    if (state && isWeekKey(state.week)) {
+      this.week = weekKeyOf(weekKeyStart(state.week), this.plugin.settings.weekStart);
       await this.refresh();
     }
     return super.setState(state, result);
@@ -11147,8 +11231,8 @@ class PlannerWeekView extends ItemView {
     const el = this.contentEl;
     el.empty();
     const today = todayStr();
-    const days = weekOfDays(this.week);
-    const saturday = days.length ? days[0] : null;
+    const days = weekKeyDays(this.week);
+    const monday = days.length ? days[0] : null;
 
     /* ---- masthead ---- */
     const head = el.createDiv({ cls: 'iplan-masthead' });
@@ -11158,7 +11242,7 @@ class PlannerWeekView extends ItemView {
     const titleRow = head.createDiv({ cls: 'iplan-title-row' });
     titleRow.createEl('h1', {
       cls: 'iplan-title',
-      text: this.week === weekStartOf(today) ? 'This Week.' : 'The Week.',
+      text: this.week === this.plugin.weekKeyFor(today) ? 'This Week.' : 'The Week.',
     });
     const nav = titleRow.createDiv({ cls: 'iplan-nav' });
     const mkNavBtn = (icon, label, fn) => {
@@ -11166,10 +11250,10 @@ class PlannerWeekView extends ItemView {
       setIcon(b, icon);
       b.addEventListener('click', fn);
     };
-    mkNavBtn('chevron-left', 'Previous week', () => this.setWeek(weekStartOf(addDays(saturday || today, -7))));
+    mkNavBtn('chevron-left', 'Previous week', () => this.setWeek(this.plugin.weekKeyFor(addDays(monday || today, -7))));
     const todayBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-nav-today', text: 'TODAY' });
-    todayBtn.addEventListener('click', () => this.setWeek(weekStartOf(today)));
-    mkNavBtn('chevron-right', 'Next week', () => this.setWeek(weekStartOf(addDays(saturday || today, 7))));
+    todayBtn.addEventListener('click', () => this.setWeek(this.plugin.weekKeyFor(today)));
+    mkNavBtn('chevron-right', 'Next week', () => this.setWeek(this.plugin.weekKeyFor(addDays(monday || today, 7))));
     nav.createSpan({ cls: 'iplan-week-label', text: this.week });
 
     this.renderPriorities(el);
@@ -11908,6 +11992,17 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .addToggle((t) => t.setValue(this.plugin.settings.subtaskChecklist !== false)
         .onChange(async (v) => { this.plugin.settings.subtaskChecklist = v; await this.plugin.saveSettings(); }));
     new Setting(containerEl)
+      .setName('Week starts on')
+      .setDesc('The first day of the board\'s week and of the week note. Monday keeps the week note names you have today (YYYY-Www); Saturday and Sunday name the note by the date of the day the week starts. Existing week notes are never renamed.')
+      .addDropdown((dd) => dd
+        .addOptions({ monday: 'Monday', saturday: 'Saturday', sunday: 'Sunday' })
+        .setValue(normalizeWeekStart(this.plugin.settings.weekStart))
+        .onChange(async (v) => {
+          this.plugin.settings.weekStart = normalizeWeekStart(v);
+          await this.plugin.saveSettings();
+          this.plugin.applyWeekStart();
+        }));
+    new Setting(containerEl)
       .setName('Show weekend')
       .addToggle((t) => t.setValue(this.plugin.settings.showWeekend)
         .onChange(async (v) => { this.plugin.settings.showWeekend = v; await this.plugin.saveSettings(); }));
@@ -12122,7 +12217,7 @@ module.exports = IcorPlannerPlugin;
 // Headless test surface (harmless in Obsidian; the test harness reaches the
 // internals through it instead of duplicating them).
 module.exports.__test = {
-  mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel, todayStr, localDayStr,
+  mondayOf, weekStartOf, normalizeWeekStart, isWeekendDay, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel, todayStr, localDayStr,
   // display formats (2026-09-07)
   setDisplayFormatSource, displayFormats, templatesFormats, resolveDisplayFormats, fmtWithMoment, fmtTimeHM,
   decodeRfc2047, icsUnescape,
@@ -12169,7 +12264,8 @@ module.exports.__test = {
   // weeks (0.14.0): the weekly priorities and the daily highlights
   WEEK_TYPE, WEEK_VIEW_TYPE, WEEK_ISO_RE, WEEK_HIGHLIGHT_MARKERS,
   WEEK_PRIORITIES_SENTINEL, WEEK_PRIORITIES_SECTION, WEEK_HIGHLIGHTS_SENTINEL, WEEK_HIGHLIGHTS_SECTION,
-  weekStartOf, isValidWeekStart, weekOfDays,
+  isoWeekOf, mondayOfIsoWeek, isoWeekDays,
+  WEEK_DATE_RE, isWeekKey, weekKeyStart, weekKeyOf, weekKeyDays, weekKeyAliases,
   parseChecklistBlock, toggleChecklistItem, addChecklistItem,
   highlightCellText, highlightRowFor, weekHighlights, weekHighlightAfterSet, weekHighlightAfterMark,
   isPlannerWeekFrontmatter, weekFromNote, weekTemplate, weekPriorityProgress,
