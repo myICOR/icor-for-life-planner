@@ -1,11 +1,13 @@
-/* Weeks: the weekly priorities and the daily highlights of one ISO week.
+/* Weeks: the weekly priorities and the daily highlights of one
+ * Saturday-anchored week.
  *
- * One note per week at <planner folder>/Weeks/YYYY-Www.md, `type:
- * planner-week`, two sentinel blocks in the body. Everything the plugin
- * writes into that note is a pure function of the bytes already there, so
- * every rule is assertable on a string: the two names ruled on 2026-09-15,
- * the byte preservation outside the one line a write touches, and the ISO
- * week arithmetic that decides which file is this week's.
+ * One note per week at <planner folder>/Weeks/YYYY-MM-DD.md, named by the
+ * ISO date of the Saturday that starts it, `type: planner-week`, two
+ * sentinel blocks in the body. Everything the plugin writes into that note
+ * is a pure function of the bytes already there, so every rule is
+ * assertable on a string: the two names ruled on 2026-09-15, the byte
+ * preservation outside the one line a write touches, and the
+ * Saturday-anchored arithmetic that decides which file is this week's.
  *
  * What this cannot prove: that the view then paints them. The view mounts
  * the same functions, and a headless DOM is not in this suite.
@@ -22,12 +24,12 @@ const root = process.env.PLANNER_ROOT ? path.resolve(process.env.PLANNER_ROOT) :
 const NOTE = [
   '---',
   'type: planner-week',
-  'week: 2026-W38',
-  'created_at: 2026-09-14T07:00:00Z',
+  'week_start: 2026-09-19',
+  'created_at: 2026-09-19T07:00:00Z',
   'tags: []',
   '---',
   '',
-  '# 2026-W38',
+  '# 2026-09-19',
   '',
   '## Weekly priorities',
   '<!-- weekly-priorities: schema=checklist -->',
@@ -38,8 +40,8 @@ const NOTE = [
   '<!-- daily-highlights: schema=highlight -->',
   '| Date | Highlight | Done |',
   '| --- | --- | --- |',
-  '| 2026-09-15 | Record episode 3 | _ |',
-  '| 2026-09-14 | Paco review call | Y |',
+  '| 2026-09-20 | Record episode 3 | _ |',
+  '| 2026-09-19 | Paco review call | Y |',
   '',
 ].join('\n');
 
@@ -52,7 +54,7 @@ test('THE RULING: the week says priorities, the day says daily highlight, and ne
   assert.equal(T.WEEK_HIGHLIGHTS_SECTION.heading, '## Daily highlights');
   assert.deepEqual(T.WEEK_HIGHLIGHTS_SECTION.header, ['Date', 'Highlight', 'Done']);
   assert.equal(T.WEEK_TYPE, 'planner-week');
-  const template = T.weekTemplate('2026-W38', '2026-09-14T07:00:00Z');
+  const template = T.weekTemplate('2026-09-19', '2026-09-19T07:00:00Z');
   assert.ok(!/goal/i.test(template), 'the word goal never appears in a week note');
 });
 
@@ -71,50 +73,64 @@ test('THE RULING: the starred item keeps its key and loses the word', () => {
   assert.ok(!/Mark as weekly goal/.test(main), 'no surface offers to mark a weekly goal');
 });
 
-/* ---- ISO week arithmetic ------------------------------------------------ */
+/* ---- Saturday-anchored week arithmetic ----------------------------------- */
 
-test('the ISO week of a day, and the Monday back out of it', () => {
-  assert.equal(T.isoWeekOf('2026-09-15'), '2026-W38');
-  assert.equal(T.isoWeekOf('2026-09-14'), '2026-W38', 'Monday opens the week');
-  assert.equal(T.isoWeekOf('2026-09-20'), '2026-W38', 'Sunday closes it');
-  assert.equal(T.isoWeekOf('2026-09-21'), '2026-W39');
-  assert.equal(T.mondayOfIsoWeek('2026-W38'), '2026-09-14');
-  assert.equal(T.isoWeekDays('2026-W38').length, 7);
-  assert.equal(T.isoWeekDays('2026-W38')[6], '2026-09-20');
+test('the week-start of a day, Saturday through Friday', () => {
+  // 2026-09-19 is a Saturday; 2026-09-25 is the Friday that closes its week.
+  assert.equal(T.weekStartOf('2026-09-19'), '2026-09-19', 'Saturday opens the week');
+  assert.equal(T.weekStartOf('2026-09-20'), '2026-09-19', 'Sunday belongs to the Saturday before it');
+  assert.equal(T.weekStartOf('2026-09-21'), '2026-09-19', 'Monday belongs to the same week');
+  assert.equal(T.weekStartOf('2026-09-25'), '2026-09-19', 'Friday closes it');
+  assert.equal(T.weekStartOf('2026-09-26'), '2026-09-26', 'the next Saturday opens the next week');
+  assert.equal(T.weekOfDays('2026-09-19').length, 7);
+  assert.deepEqual(T.weekOfDays('2026-09-19'), [
+    '2026-09-19', '2026-09-20', '2026-09-21', '2026-09-22',
+    '2026-09-23', '2026-09-24', '2026-09-25',
+  ]);
 });
 
-test('the year boundary is the ISO one, not the calendar one', () => {
-  // 2027-01-01 is a Friday, so it belongs to the week that began 2026-12-28.
-  assert.equal(T.isoWeekOf('2027-01-01'), '2026-W53');
-  assert.equal(T.mondayOfIsoWeek('2026-W53'), '2026-12-28');
-  // 2025-12-29 is a Monday and opens the first week of 2026.
-  assert.equal(T.isoWeekOf('2025-12-29'), '2026-W01');
-  assert.equal(T.mondayOfIsoWeek('2026-W01'), '2025-12-29');
+test('the Sat->Sun->Mon boundary crossing does not drift the week', () => {
+  // A run across the boundary: Friday still the old week, Saturday the new
+  // one, and every day in between (Sun, Mon) the new week too.
+  assert.equal(T.weekStartOf('2026-09-25'), '2026-09-19', 'Friday: old week');
+  assert.equal(T.weekStartOf('2026-09-26'), '2026-09-26', 'Saturday: new week opens');
+  assert.equal(T.weekStartOf('2026-09-27'), '2026-09-26', 'Sunday: still the new week');
+  assert.equal(T.weekStartOf('2026-09-28'), '2026-09-26', 'Monday: still the new week');
+  assert.notEqual(T.weekStartOf('2026-09-25'), T.weekStartOf('2026-09-26'),
+    'the last day of one week and the first day of the next are different weeks');
 });
 
-test('a week a year does not have is null, never a silent roll into January', () => {
-  // 2025 has 52 ISO weeks. Asking for its 53rd must not answer with 2026-W01.
-  assert.equal(T.mondayOfIsoWeek('2025-W53'), null);
-  assert.equal(T.mondayOfIsoWeek('2026-W54'), null);
-  assert.equal(T.mondayOfIsoWeek('not a week'), null);
-  assert.equal(T.mondayOfIsoWeek(null), null);
-  assert.equal(T.isoWeekOf('rubbish'), null);
+test('a year boundary is just another Saturday, no special case', () => {
+  // 2027-01-01 is a Friday; its week started Saturday 2026-12-26.
+  assert.equal(T.weekStartOf('2027-01-01'), '2026-12-26');
+  assert.equal(T.weekOfDays('2026-12-26')[6], '2027-01-01');
+});
+
+test('every calendar date has a week; only shape and weekday can fail', () => {
+  // Every calendar date belongs to exactly one Saturday-anchored week, so
+  // unlike an ISO week number there is no "week the year does not have".
+  assert.equal(T.isValidWeekStart('2026-09-19'), '2026-09-19', 'a real Saturday is valid');
+  assert.equal(T.isValidWeekStart('2026-09-20'), null, 'a Sunday is not a week-start');
+  assert.equal(T.isValidWeekStart('not a date'), null);
+  assert.equal(T.isValidWeekStart(null), null);
+  assert.equal(T.weekStartOf('rubbish'), null);
+  assert.deepEqual(T.weekOfDays('2026-09-20'), [], 'a non-Saturday week-start has no days');
 });
 
 /* ---- reading the note --------------------------------------------------- */
 
 test('the note reads back as its two blocks', () => {
-  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, NOTE, '02 Planner/Weeks/2026-W38.md');
-  assert.equal(week.week, '2026-W38');
-  assert.equal(week.monday, '2026-09-14');
+  const week = T.weekFromNote({ type: 'planner-week', week_start: '2026-09-19' }, NOTE, '02 Planner/Weeks/2026-09-19.md');
+  assert.equal(week.week, '2026-09-19');
+  assert.equal(week.weekStart, '2026-09-19');
   assert.deepEqual(week.priorities.map((p) => [p.index, p.done, p.text]), [
     [0, false, 'Ship the explainer video'],
     [1, true, 'Book the sleep lab follow-up'],
   ]);
   assert.equal(week.doneCount, 1);
   assert.deepEqual(week.highlights, [
-    { date: '2026-09-15', text: 'Record episode 3', done: '_' },
-    { date: '2026-09-14', text: 'Paco review call', done: 'Y' },
+    { date: '2026-09-20', text: 'Record episode 3', done: '_' },
+    { date: '2026-09-19', text: 'Paco review call', done: 'Y' },
   ]);
   assert.equal(T.weekPriorityProgress(week), '1 of 2 done');
 });
@@ -123,15 +139,15 @@ test('any other note is not a week', () => {
   assert.equal(T.weekFromNote({ type: 'planner-item' }, NOTE, 'x.md'), null);
   assert.equal(T.weekFromNote(null, NOTE, 'x.md'), null);
   // No usable week anywhere: the field is malformed and so is the file name.
-  assert.equal(T.weekFromNote({ type: 'planner-week', week: 'soon' }, NOTE, 'Weeks/later.md'), null);
+  assert.equal(T.weekFromNote({ type: 'planner-week', week_start: 'soon' }, NOTE, 'Weeks/later.md'), null);
   // A malformed field falls back to the file name, which IS the week.
-  const fallback = T.weekFromNote({ type: 'planner-week' }, NOTE, '02 Planner/Weeks/2026-W38.md');
-  assert.equal(fallback.week, '2026-W38');
+  const fallback = T.weekFromNote({ type: 'planner-week' }, NOTE, '02 Planner/Weeks/2026-09-19.md');
+  assert.equal(fallback.week, '2026-09-19');
 });
 
 test('an empty week is an empty week', () => {
-  const empty = T.weekTemplate('2026-W38', '2026-09-14T07:00:00Z');
-  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, empty, '02 Planner/Weeks/2026-W38.md');
+  const empty = T.weekTemplate('2026-09-19', '2026-09-19T07:00:00Z');
+  const week = T.weekFromNote({ type: 'planner-week', week_start: '2026-09-19' }, empty, '02 Planner/Weeks/2026-09-19.md');
   assert.deepEqual(week.priorities, []);
   assert.deepEqual(week.highlights, []);
   assert.equal(T.weekPriorityProgress(week), 'No priorities yet.');
@@ -199,7 +215,7 @@ test('a new priority lands at the end of the block, never in the next section', 
 });
 
 test('a note with no priorities block gains one, header and all', () => {
-  const bare = '---\ntype: planner-week\nweek: 2026-W38\n---\n';
+  const bare = '---\ntype: planner-week\nweek_start: 2026-09-19\n---\n';
   const next = T.addChecklistItem(bare, T.WEEK_PRIORITIES_SENTINEL, 'First one', T.WEEK_PRIORITIES_SECTION);
   assert.match(next, /## Weekly priorities\n<!-- weekly-priorities: schema=checklist -->\n- \[ ] First one/);
   assert.ok(next.startsWith(bare), 'what was there is still there, byte for byte');
@@ -208,23 +224,23 @@ test('a note with no priorities block gains one, header and all', () => {
 /* ---- the highlights table ----------------------------------------------- */
 
 test('setting the sentence keeps the marker; marking keeps the sentence', () => {
-  const said = T.weekHighlightAfterSet(NOTE, '2026-09-14', 'Paco review call, part two');
-  assert.match(said, /\| 2026-09-14 \| Paco review call, part two \| Y \|/, 'the Y survived the words');
-  const marked = T.weekHighlightAfterMark(NOTE, '2026-09-15', 'Y');
-  assert.match(marked, /\| 2026-09-15 \| Record episode 3 \| Y \|/, 'the words survived the mark');
+  const said = T.weekHighlightAfterSet(NOTE, '2026-09-19', 'Paco review call, part two');
+  assert.match(said, /\| 2026-09-19 \| Paco review call, part two \| Y \|/, 'the Y survived the words');
+  const marked = T.weekHighlightAfterMark(NOTE, '2026-09-20', 'Y');
+  assert.match(marked, /\| 2026-09-20 \| Record episode 3 \| Y \|/, 'the words survived the mark');
 });
 
 test('a day with no row yet gains one, in place, newest on top', () => {
-  const next = T.weekHighlightAfterSet(NOTE, '2026-09-16', 'Ship it');
+  const next = T.weekHighlightAfterSet(NOTE, '2026-09-21', 'Ship it');
   const rows = T.weekHighlights(next);
-  assert.deepEqual(rows[0], { date: '2026-09-16', text: 'Ship it', done: '_' });
+  assert.deepEqual(rows[0], { date: '2026-09-21', text: 'Ship it', done: '_' });
   assert.equal(rows.length, 3, 'one row per date, and the other two are untouched');
 });
 
 test('an unknown marker reads as pending, and the marker set is the habit log\'s', () => {
   assert.deepEqual(T.WEEK_HIGHLIGHT_MARKERS, ['Y', 'N', '_']);
-  const next = T.weekHighlightAfterMark(NOTE, '2026-09-15', 'maybe');
-  assert.match(next, /\| 2026-09-15 \| Record episode 3 \| _ \|/);
+  const next = T.weekHighlightAfterMark(NOTE, '2026-09-20', 'maybe');
+  assert.match(next, /\| 2026-09-20 \| Record episode 3 \| _ \|/);
   assert.equal(T.markerState('Y'), 'done');
   assert.equal(T.markerState('N'), 'missed');
   assert.equal(T.markerState('_'), 'pending');
@@ -232,8 +248,8 @@ test('an unknown marker reads as pending, and the marker set is the habit log\'s
 
 test('a pipe or a newline in the sentence cannot break the row', () => {
   assert.equal(T.highlightCellText('a | b\nc'), 'a b c');
-  const next = T.weekHighlightAfterSet(NOTE, '2026-09-15', 'call | email\nthen ship');
-  const row = T.weekHighlights(next).find((r) => r.date === '2026-09-15');
+  const next = T.weekHighlightAfterSet(NOTE, '2026-09-20', 'call | email\nthen ship');
+  const row = T.weekHighlights(next).find((r) => r.date === '2026-09-20');
   assert.equal(row.text, 'call email then ship');
   assert.equal(row.done, '_', 'and the marker is still the marker');
 });
@@ -243,8 +259,8 @@ test('CRLF survives every write', () => {
   for (const next of [
     T.toggleChecklistItem(crlf, T.WEEK_PRIORITIES_SENTINEL, 0),
     T.addChecklistItem(crlf, T.WEEK_PRIORITIES_SENTINEL, 'Another', T.WEEK_PRIORITIES_SECTION),
-    T.weekHighlightAfterSet(crlf, '2026-09-16', 'Ship it'),
-    T.weekHighlightAfterMark(crlf, '2026-09-15', 'Y'),
+    T.weekHighlightAfterSet(crlf, '2026-09-21', 'Ship it'),
+    T.weekHighlightAfterMark(crlf, '2026-09-20', 'Y'),
   ]) {
     assert.ok(!/[^\r]\n/.test(next), 'a write must not leave a bare LF in a CRLF file');
   }
@@ -253,13 +269,13 @@ test('CRLF survives every write', () => {
 /* ---- the note on disk --------------------------------------------------- */
 
 test('the template is the frontmatter of record and nothing else', () => {
-  const t = T.weekTemplate('2026-W38', '2026-09-14T07:00:00Z');
-  assert.match(t, /^---\ntype: planner-week\nweek: 2026-W38\ncreated_at: 2026-09-14T07:00:00Z\ntags: \[]\n---\n/);
-  // No week_start and no week_end: both derive from `week`, and a derivable
-  // fact is not a field.
-  assert.ok(!/week_start|week_end/.test(t));
+  const t = T.weekTemplate('2026-09-19', '2026-09-19T07:00:00Z');
+  assert.match(t, /^---\ntype: planner-week\nweek_start: 2026-09-19\ncreated_at: 2026-09-19T07:00:00Z\ntags: \[]\n---\n/);
+  // No week_end: it derives from week_start, and a derivable fact is not a
+  // field.
+  assert.ok(!/week_end/.test(t));
   // No seeded rows: an empty week leaves no row nobody wrote.
-  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, t, 'Weeks/2026-W38.md');
+  const week = T.weekFromNote({ type: 'planner-week', week_start: '2026-09-19' }, t, 'Weeks/2026-09-19.md');
   assert.deepEqual(week.highlights, []);
 });
 
@@ -291,8 +307,8 @@ test('the room is created with the others, and the view is registered', () => {
   assert.equal(T.WEEK_VIEW_TYPE, 'icor-for-life-planner-week');
   const p = T.plannerPaths({ plannerFolder: '02 Planner' });
   assert.equal(p.weeks, '02 Planner/Weeks');
-  assert.equal(p.weekNote('2026-W38'), '02 Planner/Weeks/2026-W38.md');
-  assert.equal(p.isWeek('02 Planner/Weeks/2026-W38.md'), true);
+  assert.equal(p.weekNote('2026-09-19'), '02 Planner/Weeks/2026-09-19.md');
+  assert.equal(p.isWeek('02 Planner/Weeks/2026-09-19.md'), true);
   assert.equal(p.isWeek('02 Planner/Habits/x.md'), false);
 });
 
