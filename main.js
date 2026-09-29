@@ -3849,12 +3849,18 @@ function calendarFeedFor(settings, ev) {
 }
 
 // Stamp the feed's identity on every def a fetch returned. Id, name and
-// colour only: the URL stops here.
+// colour for every feed, the URL stops here; `source` rides along ONLY for
+// a feed this plugin never fetched itself (adoptCacheDefs's synthesized
+// foreign feed), so a cache-only feed's original writer survives a
+// round-trip through this plugin's own defs and its own cache file. A
+// feed this plugin fetched (calendarFetchFeed, the settings-declared kind)
+// never carries one, so its tagged shape is unchanged.
 function tagCalendarDefs(defs, feed) {
   for (const d of defs || []) {
     d.feedId = feed.id;
     d.feedName = feed.name;
     d.feedColor = clampSwatch(feed.color);
+    if (feed.source) d.feedSource = feed.source;
   }
   return defs;
 }
@@ -3931,8 +3937,14 @@ function calendarDefsFromByFeed(byFeed, feedIds) {
 // Merge one sync's per-feed results over the previous per-feed defs. A
 // healthy feed replaces its own entry; a failed feed keeps its previous one
 // (never prune on a blip); a feed absent from the results (disabled or
-// removed since) drops out. Results are keyed by feed id in feed order.
-function mergeCalendarFeeds(prevByFeed, results) {
+// removed since) drops out - UNLESS `cacheOnlyIds` names it: that feed was
+// never a settings row to begin with (adoptCacheDefs kept it under its own
+// cache-declared identity), so calendarFetchAll could never have fetched it
+// either, and its absence from `results` says nothing about whether it
+// should still be shown. Its previously held defs are carried forward
+// unfetched, the same treatment a failed feed already gets. Results are
+// keyed by feed id in feed order; a carried cache-only id is appended after.
+function mergeCalendarFeeds(prevByFeed, results, cacheOnlyIds) {
   const ids = Object.keys(results || {});
   const byFeed = {};
   const failed = [];
@@ -3943,8 +3955,16 @@ function mergeCalendarFeeds(prevByFeed, results) {
     failed.push(id);
     if (prevByFeed && Array.isArray(prevByFeed[id])) byFeed[id] = prevByFeed[id];
   }
-  const { defs, duplicates } = calendarDefsFromByFeed(byFeed, ids);
-  return { byFeed, defs, duplicates, failed, live };
+  const carried = [];
+  for (const id of cacheOnlyIds || []) {
+    if (ids.includes(id)) continue; // this sync actually fetched it (a settings row now exists)
+    if (prevByFeed && Array.isArray(prevByFeed[id]) && prevByFeed[id].length) {
+      byFeed[id] = prevByFeed[id];
+      carried.push(id);
+    }
+  }
+  const { defs, duplicates } = calendarDefsFromByFeed(byFeed, ids.concat(carried));
+  return { byFeed, defs, duplicates, failed, live, carried };
 }
 
 // One status for the consumers that want one (the board notice, the badge)
@@ -4004,9 +4024,14 @@ function calendarFeedStatusText(feed, st, vault, settings) {
 // The calendar's ConnectorResult for the sync loop: every feed fetched,
 // merged over the previous per-feed defs, one status. Items are the merged,
 // deduplicated defs; byFeed and perFeed ride along for the plugin state.
-async function calendarFetchDefs(settings, prevByFeed, deps) {
+// `cacheOnlyIds` (last, optional, appended rather than inserted so an
+// existing 3-argument call keeps working) is the plugin's
+// calendarCacheOnlyIds: feed ids this plugin never fetches (no
+// settings.calendars row) whose held defs still ride through the merge, so
+// a live sync of any OTHER feed can never silently drop them.
+async function calendarFetchDefs(settings, prevByFeed, deps, cacheOnlyIds) {
   const { feeds, results } = await calendarFetchAll(settings, deps);
-  const merged = mergeCalendarFeeds(prevByFeed || {}, results);
+  const merged = mergeCalendarFeeds(prevByFeed || {}, results, cacheOnlyIds);
   const status = calendarAggregateStatus(feeds, results, merged);
   const out = status.ok
     ? okResult('calendar', merged.defs, status.warning)
@@ -4133,7 +4158,10 @@ function reviveCalendarDefs(raw) {
 }
 
 // Defs grouped by the feed they carry, first-seen order. Untagged defs (a
-// def with no feed identity) form one group with a null id.
+// def with no feed identity) form one group with a null id. `source` rides
+// along from the first def that carries one (tagCalendarDefs only sets it
+// for a feed this plugin never itself fetched), so the cache write below
+// can tell that group's writer apart from this plugin's own.
 function groupDefsByFeed(defs) {
   const groups = new Map();
   for (const d of defs || []) {
@@ -4141,7 +4169,7 @@ function groupDefsByFeed(defs) {
     const id = d.feedId || null;
     let g = groups.get(id);
     if (!g) {
-      g = { id, name: d.feedName || null, color: clampSwatch(d.feedColor), defs: [] };
+      g = { id, name: d.feedName || null, color: clampSwatch(d.feedColor), source: d.feedSource || null, defs: [] };
       groups.set(id, g);
     }
     g.defs.push(d);
@@ -4166,12 +4194,21 @@ function adoptCacheDefs(defs, feeds, source) {
   const list = feeds || [];
   const byId = new Map(list.map((f) => [f.id, f]));
   const first = list[0] || null;
-  const foreign = !!source && source !== 'ics' && source !== 'graph';
   const out = [];
   for (const d of defs || []) {
     if (!d) continue;
+    // A def's OWN feed-entry source (parseCalendarCache, v2: one per feed)
+    // wins over the file-level source line when it is there; a v1 array or
+    // an older single-source file falls back to it. This is what lets a
+    // feed's own writer survive this plugin's own cache rewrite: once this
+    // plugin has carried a foreign feed through a live sync and written the
+    // cache back (buildCalendarCacheContent), the file's OWN top-level
+    // `source:` line is `ics` again, but that one feed's entry still says
+    // where it really came from.
+    const defSource = d.feedSource || source;
+    const foreign = !!defSource && defSource !== 'ics' && defSource !== 'graph';
     const feed = d.feedId
-      ? byId.get(d.feedId) || (foreign && d.feedName ? { id: d.feedId, name: d.feedName, color: d.feedColor } : null)
+      ? byId.get(d.feedId) || (foreign && d.feedName ? { id: d.feedId, name: d.feedName, color: d.feedColor, source: defSource } : null)
       : first;
     if (!feed) continue;
     out.push(tagCalendarDefs([d], feed)[0]);
@@ -4201,6 +4238,13 @@ function buildCalendarCacheContent(defs, now, plannerFolder, feedMeta) {
   const groups = groupDefsByFeed(defs);
   const feedsOut = groups.map((g) => ({
     id: g.id, name: g.name, color: g.color,
+    // This one feed's own writer, `ics` for anything this plugin itself
+    // fetched (the file-level `source:` line below still speaks for the
+    // whole file, and always says so - unchanged). A feed this plugin never
+    // fetched (carried forward from a foreign write, mergeCalendarFeeds)
+    // keeps ITS OWN source here, so overwriting this file on a live sync
+    // never mislabels, and so never re-drops, a feed something else wrote.
+    source: g.source || 'ics',
     updated_at: (feedMeta && g.id && feedMeta[g.id]) || now.toISOString(),
     defs: serializeCalendarDefs(g.defs),
   }));
@@ -4262,13 +4306,18 @@ function buildCalendarCacheContent(defs, now, plannerFolder, feedMeta) {
 
 // Cache file content -> { version, defs, feeds, source }, or null on any
 // malformed shape. v2: one entry per feed, its defs revived and tagged with
-// the entry's id, name and colour. v1: a bare array, revived untagged (the
+// the entry's id, name, colour and (when the entry carries its own,
+// buildCalendarCacheContent's per-feed `source`) that feed's own writer, as
+// `d.feedSource` - so a feed's original source survives THIS plugin's own
+// cache rewrite even though the file-level line below always says `ics`
+// for a file this plugin wrote. v1: a bare array, revived untagged (the
 // caller assigns it to a feed via adoptCacheDefs). `feeds` lists each
 // entry's id and its own updated_at. `source` is the frontmatter's own
 // `source:` line (never inside the fenced json), read as plain text so
 // adoptCacheDefs can tell this plugin's own cache (`ics`, `graph`) from one
 // written by something else entirely (a session-bound sync script) without
-// guessing from the defs alone.
+// guessing from the defs alone - the fallback when an entry has no source
+// of its own (every file predating this, and v1).
 function parseCalendarCache(text) {
   const s = String(text || '');
   const m = /```json\s*\n([\s\S]*?)\n```/.exec(s);
@@ -4294,11 +4343,13 @@ function parseCalendarCache(text) {
       updatedAt: typeof f.updated_at === 'string' ? f.updated_at : null,
     };
     feeds.push(feed);
+    const feedSource = typeof f.source === 'string' && f.source ? f.source : null;
     const revived = reviveCalendarDefs(f.defs) || [];
     for (const d of revived) {
       d.feedId = feed.id;
       d.feedName = feed.name;
       d.feedColor = feed.color;
+      if (feedSource) d.feedSource = feedSource;
     }
     defs.push(...revived);
   }
@@ -7428,17 +7479,22 @@ class IcorPlannerPlugin extends Plugin {
       // Calendar: no per-event notes. Every enabled feed is fetched on its
       // own; a healthy feed replaces its own entry, a failed feed keeps its
       // previous one (never prune on a blip), and the board renders the
-      // merged, deduplicated union. At least one live feed clears the stale
-      // look and rewrites the ONE cache file. No feeds at all: nothing to
-      // show, and nothing stale to keep.
-      const cal = await calendarFetchDefs(s, this.calendarDefsByFeed, this.connectorDeps());
+      // merged, deduplicated union. A cache-only feed (calendarCacheOnlyIds:
+      // held from an earlier adopted cache, no settings.calendars row, so
+      // never in this sync's jobs) rides the same "never prune on a blip"
+      // treatment - calendarFetchDefs already carries it through the merge.
+      // At least one live feed clears the stale look and rewrites the ONE
+      // cache file. No settings-declared feed at all: nothing of THIS
+      // plugin's own to show, but a still-held cache-only feed is not this
+      // sync's to drop either.
+      const cal = await calendarFetchDefs(s, this.calendarDefsByFeed, this.connectorDeps(), this.calendarCacheOnlyIds);
       this.calendarStatus = {
         ok: cal.ok, reason: cal.reason || null, message: cal.message || null,
         warning: cal.warning || null, perFeed: cal.perFeed || {}, at: new Date().toISOString(),
       };
       if (cal.reason === 'no-token') {
-        this.calendarDefs = null;
-        this.calendarDefsByFeed = {};
+        this.calendarDefsByFeed = cal.byFeed || {};
+        this.calendarDefs = (cal.items && cal.items.length) ? cal.items : null;
       } else {
         this.calendarDefsByFeed = cal.byFeed || {};
         this.calendarDefs = cal.items;
