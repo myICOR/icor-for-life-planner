@@ -207,15 +207,89 @@ test('the cache round-trips per feed and still reads a v1 array', () => {
   assert.deepEqual(T.parseCalendarCacheContent(v1).map((d) => d.uid), ['w1@x']);
   // Adopting the cache onto the settings: v1 defs join the first enabled
   // feed; a feed that is gone is dropped; names and colours follow settings.
+  // adoptCacheDefs tags its input defs in place (tagCalendarDefs), so the
+  // "no feed, nowhere to belong" case below re-parses a fresh, still-
+  // untagged copy rather than reusing `legacy.defs` after this line has
+  // already stamped it with cal-home's identity.
   const adopted = T.adoptCacheDefs(legacy.defs, [HOME]);
   assert.deepEqual(adopted.map((d) => [d.feedId, d.feedName, d.feedColor]), [['cal-home', 'Home', 3]]);
-  assert.deepEqual(T.adoptCacheDefs(legacy.defs, []), [], 'no feed, nowhere to belong');
+  assert.deepEqual(T.adoptCacheDefs(T.parseCalendarCache(v1).defs, []), [], 'no feed, nowhere to belong');
   const renamed = T.adoptCacheDefs(parsed.defs, [Object.assign({}, WORK, { name: 'Office', color: 4 })]);
   assert.deepEqual(renamed.map((d) => [d.uid, d.feedName, d.feedColor]), [['w1@x', 'Office', 4]], 'the settings, not the cache, name and colour a feed');
   // Malformed shapes are ignored, never thrown.
   assert.equal(T.parseCalendarCache('no block here'), null);
   assert.equal(T.parseCalendarCache('```json\n{"version":2}\n```'), null);
   assert.equal(T.parseCalendarCache('```json\nnot json\n```'), null);
+});
+
+test('THE ASK: a cache-declared feed with no settings.calendars row still renders, read-only, through the board pipeline', () => {
+  // Shaped like the sync-google-calendar.py script's own write: `source:
+  // google-calendar` in the frontmatter, a feed id that is a real calendar
+  // address (never a settings cal-N id), no settings row for it anywhere.
+  const foreignContent = [
+    '---', 'type: calendar-cache', 'source: google-calendar', 'updated_at: 2026-09-29T18:00:00Z',
+    'events: 1', 'feeds: 1', '---', '', '# Calendar Events', '',
+    '```json',
+    JSON.stringify({
+      version: 1,
+      updated_at: '2026-09-29T18:00:00Z',
+      feeds: [{
+        id: 'jeffjr@jandsautomotive.com', name: 'Jeff', color: 2, updated_at: '2026-09-29T18:00:00Z',
+        defs: T.serializeCalendarDefs(feedDefs({ id: 'jeffjr@jandsautomotive.com', name: 'Jeff', color: 2 }, vevent('g1@x', 'Shop meeting', '20260930'))),
+      }],
+    }),
+    '```', '',
+  ].join('\n');
+  const parsed = T.parseCalendarCache(foreignContent);
+  assert.equal(parsed.source, 'google-calendar');
+  assert.equal(parsed.defs.length, 1);
+  // No settings feeds at all (Jeff never added anything under Settings):
+  // adoptCacheDefs keeps the def under its own cache-declared identity.
+  const adopted = T.adoptCacheDefs(parsed.defs, [], parsed.source);
+  assert.deepEqual(adopted.map((d) => [d.feedId, d.feedName, d.feedColor]), [['jeffjr@jandsautomotive.com', 'Jeff', 2]]);
+  // The board's own expansion renders it exactly like a settings feed's def.
+  const events = T.icsEventsForWeek(adopted, '2026-09-28', 13);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].feedName, 'Jeff');
+  // A settings feed with a DIFFERENT id still wins for its own def; only the
+  // unmatched one falls back to its own identity.
+  const mixed = T.adoptCacheDefs(parsed.defs.concat(feedDefs(WORK, vevent('w1@x', 'Standup', '20260930'))), [WORK], 'google-calendar');
+  assert.deepEqual(mixed.map((d) => d.feedId).sort(), ['cal-work', 'jeffjr@jandsautomotive.com']);
+  // Contrast: for THIS plugin's OWN cache (source: ics, what buildCalendarCacheContent
+  // always writes) the same shape is dropped when it has no settings row —
+  // that is a feed the member removed on purpose, and settings stays the
+  // one authority over its own cache.
+  const ownContent = T.buildCalendarCacheContent(feedDefs({ id: 'jeffjr@jandsautomotive.com', name: 'Jeff', color: 2 }, vevent('g1@x', 'Shop meeting', '20260930')), new Date(2026, 8, 29, 9, 0), '02 Planner');
+  const ownParsed = T.parseCalendarCache(ownContent);
+  assert.equal(ownParsed.source, 'ics');
+  assert.deepEqual(T.adoptCacheDefs(ownParsed.defs, [], ownParsed.source), [], 'this plugin\'s own cache still treats settings as the one authority');
+});
+
+test('a cache-only feed id can never be polled by calendarFetchAll: the job list comes only from settings.calendars, never from a cache or calendarDefsByFeed', () => {
+  // calendarFetchAll takes settings and nothing else; a def carrying a
+  // feedId with no settings.calendars entry has no connector, no kind and
+  // no url to be fetched with, so it cannot appear as a job however many
+  // events it contributes to calendarDefsByFeed via the cache.
+  const c = code();
+  assert.match(c, /async function calendarFetchAll\(settings, deps\) \{/, 'calendarFetchAll takes settings only, no cache or byFeed argument');
+  assert.match(c, /for \(const feed of c\.feeds\(settings\)\)/, 'every job comes from a connector reading settings, never the cache');
+  assert.ok(!/calendarFetchAll\([^)]*calendarDefsByFeed/.test(c), 'calendarFetchAll is never called with the cache-derived per-feed map');
+});
+
+test('activeCalendarFeedIds never crashes on an id with no settings row and no cache entry (settings-tab toggling an unknown feed)', () => {
+  assert.equal(typeof T.activeCalendarFeedIds, 'function');
+  // A settings-backed id and a cache-only id (its defs still held) both render.
+  assert.deepEqual(
+    T.activeCalendarFeedIds(['cal-work'], { 'cal-work': [{ uid: 'w' }], 'jeffjr@x': [{ uid: 'g' }] }, new Set(['jeffjr@x'])),
+    ['cal-work', 'jeffjr@x'],
+  );
+  // An id in the cache-only set whose defs were already pruned elsewhere is
+  // simply left out, not thrown on.
+  assert.deepEqual(T.activeCalendarFeedIds(['cal-work'], { 'cal-work': [{ uid: 'w' }] }, new Set(['gone-feed'])), ['cal-work']);
+  // Every input can be empty, undefined or missing without throwing.
+  assert.deepEqual(T.activeCalendarFeedIds([], {}, new Set()), []);
+  assert.deepEqual(T.activeCalendarFeedIds(undefined, undefined, undefined), []);
+  assert.deepEqual(T.activeCalendarFeedIds(['cal-work'], null, null), ['cal-work']);
 });
 
 test('the cache never contains a feed URL', () => {

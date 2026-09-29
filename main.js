@@ -4150,21 +4150,47 @@ function groupDefsByFeed(defs) {
 }
 
 // Cached defs meet the CURRENT settings. The cache is a mirror, never an
-// authority: a feed's name and colour come from the settings; defs of a
-// feed no longer enabled (or gone) are dropped; untagged defs (a 0.7.x
+// authority, for a cache THIS PLUGIN wrote (`source: ics` or `graph`): a
+// feed's name and colour come from the settings when settings names that
+// feed, and a feed no longer enabled (or gone from settings) is a feed the
+// member removed on purpose, so its defs drop. Untagged defs (a 0.7.x
 // cache) belong to the first enabled feed when there is one, else nowhere.
-function adoptCacheDefs(defs, feeds) {
+//
+// A cache this plugin did NOT write (`source` is anything else, e.g. a
+// session-bound sync script's `source: google-calendar`) was never going to
+// have a settings.calendars row for its feed to begin with, so a feedId
+// with no settings match keeps its own name and colour, read-only, instead
+// of being silently dropped: the two "no match" cases look identical on the
+// defs alone, and `source` is the one signal that tells them apart.
+function adoptCacheDefs(defs, feeds, source) {
   const list = feeds || [];
   const byId = new Map(list.map((f) => [f.id, f]));
   const first = list[0] || null;
+  const foreign = !!source && source !== 'ics' && source !== 'graph';
   const out = [];
   for (const d of defs || []) {
     if (!d) continue;
-    const feed = d.feedId ? byId.get(d.feedId) : first;
+    const feed = d.feedId
+      ? byId.get(d.feedId) || (foreign && d.feedName ? { id: d.feedId, name: d.feedName, color: d.feedColor } : null)
+      : first;
     if (!feed) continue;
     out.push(tagCalendarDefs([d], feed)[0]);
   }
   return out;
+}
+
+// The ids the board should render from calendarDefsByFeed: every enabled
+// settings feed, plus a cache-only id (adoptCacheDefs kept it with no
+// settings.calendars row) whose defs are still actually held. Pulled out so
+// loadCalendarCache and recomputeCalendarDefs (one at first render, one on
+// every settings-tab feed toggle) read the same invariant the same way, and
+// a test can drive it without an Obsidian App. An id absent from both lists
+// is simply left out, never thrown on: a settings tab toggling an unknown
+// feed cannot crash this.
+function activeCalendarFeedIds(settingsIds, calendarDefsByFeed, cacheOnlyIds) {
+  const byFeed = calendarDefsByFeed || {};
+  const extra = Array.from(cacheOnlyIds || []).filter((id) => Array.isArray(byFeed[id]) && byFeed[id].length);
+  return (settingsIds || []).concat(extra);
 }
 
 // The full cache file content. `defs` is the merged list the board renders
@@ -4234,19 +4260,27 @@ function buildCalendarCacheContent(defs, now, plannerFolder, feedMeta) {
   return lines.join('\n');
 }
 
-// Cache file content -> { version, defs, feeds }, or null on any malformed
-// shape. v2: one entry per feed, its defs revived and tagged with the
-// entry's id, name and colour. v1: a bare array, revived untagged (the
+// Cache file content -> { version, defs, feeds, source }, or null on any
+// malformed shape. v2: one entry per feed, its defs revived and tagged with
+// the entry's id, name and colour. v1: a bare array, revived untagged (the
 // caller assigns it to a feed via adoptCacheDefs). `feeds` lists each
-// entry's id and its own updated_at.
+// entry's id and its own updated_at. `source` is the frontmatter's own
+// `source:` line (never inside the fenced json), read as plain text so
+// adoptCacheDefs can tell this plugin's own cache (`ics`, `graph`) from one
+// written by something else entirely (a session-bound sync script) without
+// guessing from the defs alone.
 function parseCalendarCache(text) {
-  const m = /```json\s*\n([\s\S]*?)\n```/.exec(String(text || ''));
+  const s = String(text || '');
+  const m = /```json\s*\n([\s\S]*?)\n```/.exec(s);
   if (!m) return null;
   let raw;
   try { raw = JSON.parse(m[1]); } catch { return null; }
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(s);
+  const sourceLine = fm && /^source:\s*(.+?)\s*$/m.exec(fm[1]);
+  const source = sourceLine ? sourceLine[1].trim() : null;
   if (Array.isArray(raw)) {
     const defs = reviveCalendarDefs(raw);
-    return defs ? { version: 1, defs, feeds: [] } : null;
+    return defs ? { version: 1, defs, feeds: [], source } : null;
   }
   if (!raw || typeof raw !== 'object' || !Array.isArray(raw.feeds)) return null;
   const defs = [];
@@ -4268,7 +4302,7 @@ function parseCalendarCache(text) {
     }
     defs.push(...revived);
   }
-  return { version: 2, defs, feeds };
+  return { version: 2, defs, feeds, source };
 }
 
 // Cache file content -> revived defs (both layouts), or null when malformed.
@@ -6756,6 +6790,7 @@ class IcorPlannerPlugin extends Plugin {
     this._habitCache = new Map();    // path -> { mtime, habit }: same rule
     this.calendarDefs = null;        // merged, deduplicated defs of every feed (mirrored to the cache note on healthy fetches)
     this.calendarDefsByFeed = {};    // feed id -> that feed's defs; a failed feed keeps its last entry
+    this.calendarCacheOnlyIds = new Set(); // feed ids adopted from the cache with no settings.calendars row (loadCalendarCache); never pruned just for being absent from settings
     this.calendarFeedSyncedAt = {};  // feed id -> ISO time of its last LIVE fetch (per-feed updated_at in the cache)
     this.calendarStale = false;      // true while defs come from the vault cache, not a live fetch
     this.calendarStatus = null;      // last calendar ConnectorResult status
@@ -7041,11 +7076,18 @@ class IcorPlannerPlugin extends Plugin {
       // The cache meets today's settings: names and colours from the feeds,
       // a feed that is gone or off drops out, a v1 array joins the first feed.
       const feeds = enabledCalendarFeeds(this.withSecrets());
-      const defs = adoptCacheDefs(parsed.defs, feeds);
+      const defs = adoptCacheDefs(parsed.defs, feeds, parsed.source);
       if (defs.length && !this.calendarDefs) {
         for (const g of groupDefsByFeed(defs)) if (g.id) this.calendarDefsByFeed[g.id] = g.defs;
         for (const f of parsed.feeds) if (f.id && f.updatedAt && this.calendarDefsByFeed[f.id]) this.calendarFeedSyncedAt[f.id] = f.updatedAt;
-        this.calendarDefs = calendarDefsFromByFeed(this.calendarDefsByFeed, feeds.map((f) => f.id)).defs;
+        // A feed id the cache carried but settings never named (adoptCacheDefs
+        // kept it under its own identity): render it too, and remember it so
+        // a later settings-tab prune (recomputeCalendarDefs) does not read
+        // its absence from settings as the user having removed it.
+        const settingsIds = feeds.map((f) => f.id);
+        const cacheOnlyIds = Object.keys(this.calendarDefsByFeed).filter((id) => !settingsIds.includes(id));
+        for (const id of cacheOnlyIds) this.calendarCacheOnlyIds.add(id);
+        this.calendarDefs = calendarDefsFromByFeed(this.calendarDefsByFeed, activeCalendarFeedIds(settingsIds, this.calendarDefsByFeed, this.calendarCacheOnlyIds)).defs;
         this.calendarStale = true; // pale + pulsing until a healthy fetch lands
         this.emitModelChanged();
       }
@@ -7055,11 +7097,16 @@ class IcorPlannerPlugin extends Plugin {
   // The board's defs from the per-feed map and the CURRENT settings: what
   // the settings tab calls when a feed is switched off or removed, so the
   // board follows at once instead of at the next sync. A feed no longer
-  // enabled drops out; the rest keep their order and their dedupe.
+  // enabled drops out; the rest keep their order and their dedupe. A feed
+  // id in calendarCacheOnlyIds (loadCalendarCache) was never a settings row
+  // to begin with, so its absence from settings here is not a removal and
+  // it is kept.
   recomputeCalendarDefs() {
-    const ids = enabledCalendarFeeds(this.withSecrets()).map((f) => f.id);
+    const settingsIds = enabledCalendarFeeds(this.withSecrets()).map((f) => f.id);
+    const ids = activeCalendarFeedIds(settingsIds, this.calendarDefsByFeed, this.calendarCacheOnlyIds);
+    const keep = new Set(ids);
     for (const id of Object.keys(this.calendarDefsByFeed)) {
-      if (!ids.includes(id)) delete this.calendarDefsByFeed[id];
+      if (!keep.has(id)) delete this.calendarDefsByFeed[id];
     }
     if (!ids.length) { this.calendarDefs = null; }
     else if (this.calendarDefs) this.calendarDefs = calendarDefsFromByFeed(this.calendarDefsByFeed, ids).defs;
@@ -12138,6 +12185,7 @@ module.exports.__test = {
   dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus, calendarFeedStatusText,
   serializeCalendarDefs, reviveCalendarDefs,
   buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
+  activeCalendarFeedIds,
   detectConferenceUrl, nextBadgeModel, fmtNextCountdown, routineTimedEntries, nextStripMountPoint,
   NEXT_URGENT_MS, NEXT_SECONDS_MS, NEXT_STRIP_LOGO_HOST, NEXT_STRIP_SPLIT_HOST,
   plannerToolbarMountPoint, PLANNER_TOOLBAR_HOST, PLANNER_TOOLBAR_CLASS, PLANNER_TOOLBAR_ICON, PLANNER_TOOLBAR_LABEL,
