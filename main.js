@@ -3859,6 +3859,14 @@ function tagCalendarDefs(defs, feed) {
   return defs;
 }
 
+// Is this reply an iCalendar at all? A calendar's first line is
+// BEGIN:VCALENDAR (a byte order mark or blank lines in front are tolerated);
+// a web page, even one that mentions the words, is not.
+function isIcalendarText(text) {
+  const first = String(text || '').split(/\r?\n/).find((l) => l.trim()) || '';
+  return /^BEGIN:VCALENDAR$/i.test(first.trim()); // trim() also drops a BOM
+}
+
 // Fetch ONE feed. Same body every release had for the single URL: webcal
 // rewritten, https enforced, the ICS parsed; the defs come back tagged.
 async function calendarFetchFeed(feed) {
@@ -3872,6 +3880,12 @@ async function calendarFetchFeed(feed) {
     const res = await requestUrl({ url: raw, method: 'GET', throw: false, headers: { Accept: 'text/calendar' } });
     if (res.status < 200 || res.status >= 300) {
       return degraded('calendar', 'unreachable', `Calendar feed returned HTTP ${res.status}.`);
+    }
+    // A 2xx reply that is not a calendar (a sign-in page, an HTML error
+    // page, an empty body) is a failed fetch, never an empty calendar: the
+    // feed keeps its previous events instead of blanking the cache note.
+    if (!isIcalendarText(res.text)) {
+      return degraded('calendar', 'misconfigured', 'Calendar address did not return a calendar. Check that it is the iCal address (a sign-in page means it is not).');
     }
     const defs = tagCalendarDefs(parseIcs(res.text || ''), feed);
     // Healthy fetch, but some zones could not be resolved: the result stays
@@ -7082,8 +7096,16 @@ class IcorPlannerPlugin extends Plugin {
       const content = buildCalendarCacheContent(this.calendarDefs, new Date(), this.paths().root, this.calendarFeedSyncedAt);
       const path = normalizePath(this.paths().cache);
       const existing = this.app.vault.getAbstractFileByPath(path);
-      if (existing instanceof TFile) await this.app.vault.process(existing, () => content);
-      else await this.app.vault.create(path, content);
+      if (existing instanceof TFile) {
+        // An empty fetch never blanks a cache that holds events: the note
+        // syncs to every device, so one device's empty reply would empty
+        // the calendar on all of them.
+        if (!this.calendarDefs.length) {
+          const prev = parseCalendarCache(await this.app.vault.read(existing));
+          if (prev && prev.defs.length) return;
+        }
+        await this.app.vault.process(existing, () => content);
+      } else await this.app.vault.create(path, content);
     } catch { /* the cache is a convenience - never fail a sync on it */ }
   }
 
@@ -12134,7 +12156,7 @@ module.exports.__test = {
   googleCalendarEventUrl,
   CALENDAR_SWATCHES, CALENDAR_SWATCH_NAMES, CALENDAR_SOURCES, clampSwatch, leastUsedSwatch, newCalendarId,
   calendarNameForUrl, normalizeCalendarFeed, calendarFeeds, enabledCalendarFeeds, calendarFeedConfigured,
-  migrateCalendarSettings, calendarFeedFor, tagCalendarDefs, calendarFetchFeed, calendarFetchAll,
+  migrateCalendarSettings, calendarFeedFor, tagCalendarDefs, isIcalendarText, calendarFetchFeed, calendarFetchAll,
   dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus, calendarFeedStatusText,
   serializeCalendarDefs, reviveCalendarDefs,
   buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
