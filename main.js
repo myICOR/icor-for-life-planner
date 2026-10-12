@@ -4193,8 +4193,8 @@ function buildCalendarCacheContent(defs, now, plannerFolder, feedMeta) {
     '',
     '# Calendar Events',
     '',
-    'Last synced calendar state, written by the ICOR for Life - Planner plugin on every',
-    'healthy fetch (may be minutes stale). Safe to read for schedule context;',
+    'Last synced calendar state, written by the ICOR for Life - Planner plugin when a',
+    'healthy fetch brings a change (updated_at is the time of that change). Safe to read for schedule context;',
     'it never contains a calendar feed URL or any secret. Do not edit: the',
     'next sync overwrites this file.',
     '',
@@ -4275,6 +4275,37 @@ function parseCalendarCache(text) {
 function parseCalendarCacheContent(text) {
   const parsed = parseCalendarCache(text);
   return parsed ? parsed.defs : null;
+}
+
+// Cache file content -> the part that is calendar, not clock: the content
+// with the times a fetch stamps taken out (the frontmatter updated_at, the
+// "synced" time in the Calendars list, the payload's and each feed's
+// updated_at). Two contents with the same signature show the same calendar,
+// so rewriting one with the other only adds a file version for a sync
+// service to keep. Null when there is no readable payload.
+function calendarCacheSignature(text) {
+  const s = String(text || '');
+  const m = /```json\s*\n([\s\S]*?)\n```/.exec(s);
+  if (!m) return null;
+  let raw;
+  try { raw = JSON.parse(m[1]); } catch { return null; }
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.feeds)) return null;
+  const feeds = raw.feeds.map((f) => {
+    if (!f || typeof f !== 'object') return f;
+    const { updated_at: _at, ...rest } = f;
+    return rest;
+  });
+  const head = s.slice(0, m.index)
+    .replace(/^updated_at: .*$/m, '')
+    .replace(/, synced [^)\n]*\)$/gm, ')');
+  return `${head}${JSON.stringify({ version: raw.version, feeds })}`;
+}
+
+// True when writing `next` over `prev` would change no event, no feed and
+// nothing in the readable list: only the fetch times would move.
+function sameCalendarCache(prev, next) {
+  const a = calendarCacheSignature(prev);
+  return a !== null && a === calendarCacheSignature(next);
 }
 
 /* ========================================================================== *
@@ -7082,8 +7113,12 @@ class IcorPlannerPlugin extends Plugin {
       const content = buildCalendarCacheContent(this.calendarDefs, new Date(), this.paths().root, this.calendarFeedSyncedAt);
       const path = normalizePath(this.paths().cache);
       const existing = this.app.vault.getAbstractFileByPath(path);
-      if (existing instanceof TFile) await this.app.vault.process(existing, () => content);
-      else await this.app.vault.create(path, content);
+      if (existing instanceof TFile) {
+        // Unchanged events: leave the file alone. A rewrite that only moves
+        // updated_at is a new version in Obsidian Sync and File recovery.
+        if (sameCalendarCache(await this.app.vault.read(existing), content)) return;
+        await this.app.vault.process(existing, () => content);
+      } else await this.app.vault.create(path, content);
     } catch { /* the cache is a convenience - never fail a sync on it */ }
   }
 
@@ -12138,6 +12173,7 @@ module.exports.__test = {
   dedupeCalendarDefs, calendarDefsFromByFeed, mergeCalendarFeeds, calendarAggregateStatus, calendarFeedStatusText,
   serializeCalendarDefs, reviveCalendarDefs,
   buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
+  calendarCacheSignature, sameCalendarCache,
   detectConferenceUrl, nextBadgeModel, fmtNextCountdown, routineTimedEntries, nextStripMountPoint,
   NEXT_URGENT_MS, NEXT_SECONDS_MS, NEXT_STRIP_LOGO_HOST, NEXT_STRIP_SPLIT_HOST,
   plannerToolbarMountPoint, PLANNER_TOOLBAR_HOST, PLANNER_TOOLBAR_CLASS, PLANNER_TOOLBAR_ICON, PLANNER_TOOLBAR_LABEL,
