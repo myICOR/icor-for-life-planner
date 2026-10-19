@@ -7271,15 +7271,18 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   /* ---- views ------------------------------------------------------------- */
-  async openBoard() {
+  async openBoard(opts) {
     const existing = this.app.workspace.getLeavesOfType(BOARD_VIEW_TYPE);
     const leaf = existing.length ? existing[0] : this.app.workspace.getLeaf(true);
     if (!existing.length) await leaf.setViewState({ type: BOARD_VIEW_TYPE, active: true });
     this.app.workspace.revealLeaf(leaf);
     await this.autoRevealTray();
     // Focus belongs on the board the user just asked for, never on the tray we
-    // opened beside it.
-    try { this.app.workspace.setActiveLeaf(leaf, { focus: true }); } catch { /* older API */ }
+    // opened beside it. { focus: false } lets a caller that hands focus on
+    // (focusAddTask) skip focusLeaf: on a phone focusLeaf collapses the right
+    // drawer, and a collapse right before the tray's reveal leaves it hidden.
+    const focus = !(opts && opts.focus === false);
+    try { this.app.workspace.setActiveLeaf(leaf, { focus }); } catch { /* older API */ }
   }
 
   // Reveal the tray alongside the board, once per session, without fighting a
@@ -7322,9 +7325,11 @@ class IcorPlannerPlugin extends Plugin {
   // TASKS exists only beside the board (trayVisibleTabs), so the board comes
   // forward first, and the tray is told so rather than left waiting on
   // active-leaf-change. A tray leaf in the background is deferred (1.7.2+):
-  // load it before its view is checked.
+  // load it before its view is checked. The board is not focused here: the
+  // composer takes the caret, and on a phone focusing the board would close
+  // the drawer the tray is about to open in.
   async focusAddTask() {
-    await this.openBoard();
+    await this.openBoard({ focus: false });
     const leaf = await this.openTray(true);
     if (leaf && typeof leaf.loadIfDeferred === 'function') await leaf.loadIfDeferred();
     const view = leaf && leaf.view;
