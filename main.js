@@ -7271,15 +7271,20 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   /* ---- views ------------------------------------------------------------- */
-  async openBoard() {
+  async openBoard(opts) {
+    // See the focus note below; a new board's setViewState({ active }) focuses
+    // too, so it follows the same choice.
+    const focus = !(opts && opts.focus === false);
     const existing = this.app.workspace.getLeavesOfType(BOARD_VIEW_TYPE);
     const leaf = existing.length ? existing[0] : this.app.workspace.getLeaf(true);
-    if (!existing.length) await leaf.setViewState({ type: BOARD_VIEW_TYPE, active: true });
+    if (!existing.length) await leaf.setViewState({ type: BOARD_VIEW_TYPE, active: focus });
     this.app.workspace.revealLeaf(leaf);
     await this.autoRevealTray();
     // Focus belongs on the board the user just asked for, never on the tray we
-    // opened beside it.
-    try { this.app.workspace.setActiveLeaf(leaf, { focus: true }); } catch { /* older API */ }
+    // opened beside it. { focus: false } lets a caller that hands focus on
+    // (focusAddTask) skip focusLeaf: on a phone focusLeaf collapses the right
+    // drawer, and a collapse right before the tray's reveal leaves it hidden.
+    try { this.app.workspace.setActiveLeaf(leaf, { focus }); } catch { /* older API */ }
   }
 
   // Reveal the tray alongside the board, once per session, without fighting a
@@ -7319,10 +7324,25 @@ class IcorPlannerPlugin extends Plugin {
   // Reveal the tray on its TASKS tab with the add-a-task field open and
   // focused. One capture surface, reachable from the command palette on
   // desktop and mobile alike, rather than a second modal to design and keep.
+  // TASKS exists only beside the board (trayVisibleTabs), so the board comes
+  // forward first, and the tray is told so rather than left waiting on
+  // active-leaf-change. A tray leaf in the background is deferred (1.7.2+):
+  // load it before its view is checked. The board is not focused here: the
+  // composer takes the caret, and on a phone focusing the board would close
+  // the drawer the tray is about to open in. One run at a time: a double tap
+  // on the phone toolbar must not open two boards.
   async focusAddTask() {
-    const leaf = await this.openTray(true);
-    const view = leaf && leaf.view;
-    if (view instanceof PlannerTrayView) view.openComposer();
+    if (this._addTaskBusy) return;
+    this._addTaskBusy = true;
+    try {
+      await this.openBoard({ focus: false });
+      const leaf = await this.openTray(true);
+      if (leaf && typeof leaf.loadIfDeferred === 'function') await leaf.loadIfDeferred();
+      const view = leaf && leaf.view;
+      if (view instanceof PlannerTrayView) view.openComposer({ besideBoard: true });
+    } finally {
+      this._addTaskBusy = false;
+    }
   }
 
   /* ---- sync engine -------------------------------------------------------- */
@@ -10838,7 +10858,13 @@ class PlannerTrayView extends ItemView {
    * an empty field does nothing and stays open (no error state, no red).
    * Commit feedback is the row appearing in MANUAL, nothing more.
    */
-  openComposer() {
+  // The field lives on TASKS, so asking for it means TASKS, over a manual pick
+  // of another tab. Only focusAddTask, which has just brought the board
+  // forward, passes besideBoard; with no board in front, render()'s guard
+  // still wins and the tray stays on AGENDA.
+  openComposer(opts) {
+    if (opts && opts.besideBoard) this.contextIsBoard = true;
+    this.activeTab = 'sync';
     this.composerOpen = true;
     this._composerWantsFocus = true;
     this.render();
@@ -12195,7 +12221,7 @@ module.exports.__test = {
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
-  settingsHoldSecrets, migrateSecretsSettled, IcorPlannerPlugin,
+  settingsHoldSecrets, migrateSecretsSettled, IcorPlannerPlugin, PlannerTrayView,
   // the env file backend (0.12.0)
   DEFAULT_ENV_FILE_PATH, SECRETS_BACKENDS, BACKEND_LABELS, normalizeSecretsBackend, secretsBackendLabel, normalizeEnvFilePath,
   envKeyFor, parseEnvText, envLineFor, upsertEnvLine, envErrorText, EnvFileStore, dataJsonStore, secretPresence, moveSecret,
