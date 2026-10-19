@@ -99,3 +99,174 @@ test('THE RULE still holds: without the board in front, TASKS is never drawn', (
   assert.equal(v.contextIsBoard, false);
   assert.equal(v.rendered.at(-1).tab, 'agenda');
 });
+
+/* ---------------------------------------------- on a phone, the drawer */
+
+/* On a phone the right sidebar is a drawer, and three things Obsidian does
+ * there meet inside one call of the command:
+ *  - revealLeaf on a leaf in the drawer expands it;
+ *  - setActiveLeaf(leaf, { focus: true }) on a main-area leaf goes through
+ *    focusLeaf, which on mobile collapses both drawers;
+ *  - the drawer animates expand and collapse through one helper that, before
+ *    it starts an animation, finishes the pending one and runs its
+ *    completion. Collapse's completion hides the drawer.
+ * The first call of a session reveals the tray from openBoard (the one auto
+ * reveal), then focused the board, then revealed the tray again: expand,
+ * collapse, expand. The pending collapse finished inside the second expand
+ * and hid the drawer, so the tray rendered with its field in a drawer the
+ * member could not see. A desktop sidebar is not a drawer and never showed
+ * it. The model below is that behaviour, with the animation settled by hand
+ * instead of by a clock. */
+
+const BOARD = 'icor-for-life-planner-board';
+const TRAY = 'icor-for-life-planner-tray';
+
+function drawer(phone) {
+  const d = { collapsed: true, shown: false, pending: null };
+  const animate = (complete) => {
+    if (d.pending) { const p = d.pending; d.pending = null; p(); }   // finish the one in flight first
+    d.pending = complete || (() => { });
+  };
+  d.settle = () => { const p = d.pending; d.pending = null; if (p) p(); };
+  d.expand = () => {
+    if (!d.collapsed) return;
+    d.collapsed = false; d.shown = true;
+    if (phone) animate(null);
+  };
+  d.collapse = () => {
+    if (d.collapsed) return;
+    d.collapsed = true;
+    if (phone) animate(() => { d.shown = false; }); else d.shown = false;
+  };
+  return d;
+}
+
+function workspace({ phone, trayExists = true, deferred = false, boardExists = false }) {
+  const rootSplit = { name: 'root' };
+  const rightSplit = drawer(phone);
+  const leaves = [];
+  const trays = [];
+  let active = null;
+  let plugin = null;
+  const mountTray = (leaf) => {
+    const v = tray({ contextIsBoard: false, activeTab: 'agenda' });
+    v.app = app; leaf.view = v; trays.push(v);
+  };
+  const leaf = (root) => {
+    const l = {
+      root, view: null, getRoot: () => root,
+      async setViewState(s) {
+        await null;
+        if (s.type === TRAY) mountTray(l); else l.view = { getViewType: () => s.type };
+        if (s.active) app.workspace.setActiveLeaf(l, { focus: true });
+      },
+      async loadIfDeferred() { if (l.deferred) { l.deferred = false; mountTray(l); } },
+    };
+    leaves.push(l);
+    return l;
+  };
+  const viewType = (l) => (l.view && l.view.getViewType ? l.view.getViewType() : null);
+  const app = {
+    workspace: {
+      rootSplit, rightSplit,
+      getLeavesOfType: (t) => leaves.filter((l) => (l.deferred ? t === TRAY : viewType(l) === t)),
+      getLeaf: () => leaf(rootSplit),
+      getRightLeaf: () => leaf(rightSplit),
+      revealLeaf: (l) => { if (l.root === rightSplit) rightSplit.expand(); },
+      setActiveLeaf: (l, opts) => {
+        active = l;
+        trays.forEach((v) => v.onActiveLeafChange(l));
+        if (phone && opts && opts.focus && l.root === rootSplit) rightSplit.collapse();
+      },
+    },
+  };
+  const note = leaf(rootSplit);
+  note.view = { getViewType: () => 'markdown' };
+  active = note;
+  if (trayExists) {
+    const t = leaf(rightSplit);
+    if (deferred) t.deferred = true; else mountTray(t);
+  }
+  if (boardExists) leaf(rootSplit).view = { getViewType: () => BOARD };
+  plugin = Object.create(PluginClass.prototype);
+  plugin.app = app;
+  plugin._trayAutoRevealed = false;
+  return {
+    plugin, rightSplit, trays,
+    boards: () => leaves.filter((l) => viewType(l) === BOARD).length,
+    backToNote: () => app.workspace.setActiveLeaf(note),
+  };
+}
+
+async function tap(w) {
+  await w.plugin.focusAddTask();
+  w.rightSplit.settle();
+}
+
+function assertFieldOnScreen(w, label) {
+  assert.equal(w.rightSplit.collapsed, false, `${label}: the drawer is open`);
+  assert.equal(w.rightSplit.shown, true, `${label}: and shown, not hidden behind the slid-aside page`);
+  const v = w.trays.at(-1);
+  assert.ok(v, `${label}: a tray view exists`);
+  assert.deepEqual(v.rendered.at(-1), { tab: 'sync', composerOpen: true }, `${label}: TASKS with the field`);
+  assert.equal(v._composerWantsFocus, true, `${label}: and the caret is asked for`);
+  assert.equal(w.boards(), 1, `${label}: one board, never two`);
+}
+
+for (const phone of [true, false]) {
+  const where = phone ? 'phone' : 'desktop';
+
+  test(`${phone ? 'THE DEFECT, ' : ''}${where}: the first tap of a session shows the field, tray already in the sidebar`, async () => {
+    const w = workspace({ phone });
+    await tap(w);
+    assertFieldOnScreen(w, where);
+  });
+
+  test(`${where}: the first tap of a session with no tray yet`, async () => {
+    const w = workspace({ phone, trayExists: false });
+    await tap(w);
+    assertFieldOnScreen(w, where);
+  });
+
+  test(`${where}: the first tap of a session with the tray leaf deferred`, async () => {
+    const w = workspace({ phone, deferred: true });
+    await tap(w);
+    assertFieldOnScreen(w, where);
+  });
+
+  test(`${where}: the first tap with the board already open in a tab`, async () => {
+    const w = workspace({ phone, boardExists: true });
+    await tap(w);
+    assertFieldOnScreen(w, where);
+  });
+
+  test(`${where}: a second tap after the member closed the sidebar and went back to a note`, async () => {
+    const w = workspace({ phone });
+    await tap(w);
+    w.rightSplit.collapse(); w.rightSplit.settle(); w.backToNote();
+    await tap(w);
+    assertFieldOnScreen(w, where);
+  });
+
+  test(`${where}: a second tap with the sidebar still open`, async () => {
+    const w = workspace({ phone });
+    await tap(w);
+    await tap(w);
+    assertFieldOnScreen(w, where);
+  });
+}
+
+test('every other way to the board still focuses it: only the command opts out', async () => {
+  const seen = [];
+  const p = Object.create(PluginClass.prototype);
+  const board = { view: { getViewType: () => BOARD } };
+  p.autoRevealTray = async () => { };
+  p.app = { workspace: {
+    getLeavesOfType: (t) => (t === BOARD ? [board] : []),
+    revealLeaf: () => { },
+    setActiveLeaf: (l, opts) => seen.push(opts),
+  } };
+  await p.openBoard();
+  await p.openBoard({ focus: false });
+  assert.deepEqual(seen, [{ focus: true }, { focus: false }]);
+});
