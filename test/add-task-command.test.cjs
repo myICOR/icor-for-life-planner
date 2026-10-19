@@ -256,6 +256,28 @@ for (const phone of [true, false]) {
   });
 }
 
+// A double tap on the phone toolbar runs the command twice before the first
+// run's board has landed: openBoard() checks for a board, then awaits
+// setViewState, so two overlapping runs would each open one.
+for (const phone of [true, false]) {
+  test(`${phone ? 'phone' : 'desktop'}: two overlapping taps open one board`, async () => {
+    const w = workspace({ phone });
+    await Promise.all([w.plugin.focusAddTask(), w.plugin.focusAddTask()]);
+    w.rightSplit.settle();
+    assert.equal(w.boards(), 1, 'one board, never two');
+  });
+}
+
+// The drawer already open and no board tab yet (a tablet with a keyboard, a
+// hotkey): creating the board must not focus it either, or the collapse
+// that focus starts hides the drawer the tray is revealed in.
+test('phone: the sidebar already open and no board yet', async () => {
+  const w = workspace({ phone: true });
+  w.rightSplit.expand(); w.rightSplit.settle();
+  await tap(w);
+  assertFieldOnScreen(w, 'phone, sidebar already open, no board');
+});
+
 test('every other way to the board still focuses it: only the command opts out', async () => {
   const seen = [];
   const p = Object.create(PluginClass.prototype);
