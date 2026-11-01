@@ -266,7 +266,7 @@ test('the template is the frontmatter of record and nothing else', () => {
 test('THE ASK: the week writes refuse a path outside the planner Weeks folder', () => {
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const guard = main.slice(main.indexOf('  weekFile(iso) {'), main.indexOf('  async ensureWeekNote('));
-  assert.match(guard, /if \(!WEEK_ISO_RE\.test/, 'the ISO shape is checked first');
+  assert.match(guard, /if \(!isWeekKey\(iso\)\)/, 'the week-key shape is checked first');
   assert.match(guard, /if \(!this\.paths\(\)\.isWeek\(path\)\) throw new Error/, 'then the folder boundary');
   assert.ok(guard.indexOf('isWeek') < guard.indexOf('getAbstractFileByPath'),
     'the boundary is checked before any file is looked up');
@@ -300,4 +300,91 @@ test('the week note is documented where the member reads', () => {
   const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
   assert.match(readme, /Weekly priorities/, 'the README names the week note');
   assert.match(readme, /Daily highlights/);
+});
+
+/* ---- the week-start setting: Monday, Saturday, Sunday --------------------- */
+
+test('THE SETTING: Monday is the default and both surfaces read the one value', () => {
+  assert.equal(T.DEFAULT_SETTINGS.weekStart, 'monday');
+  assert.equal(T.normalizeWeekStart('friday'), 'monday', 'an unknown value falls back to Monday');
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  assert.match(main, /\.setName\('Week starts on'\)/, 'the settings tab offers it');
+  assert.match(main, /weekKeyFor\(day\) \{ return weekKeyOf\(day, this\.settings\.weekStart\); \}/);
+  const board = main.slice(main.indexOf('class PlannerBoardView'), main.indexOf('class PlannerWeekView'));
+  assert.ok(!/weekStart = mondayOf\(|setWeek\(mondayOf\(|=== mondayOf\(/.test(board), 'the board no longer hardcodes Monday');
+});
+
+test('Monday keeps the ISO name, so no existing week note moves', () => {
+  assert.equal(T.weekKeyOf('2026-09-15', 'monday'), '2026-W38');
+  assert.equal(T.weekKeyOf('2026-09-20', 'monday'), '2026-W38');
+  assert.equal(T.weekStartOf('2026-09-20', 'monday'), '2026-09-14');
+  assert.deepEqual(T.weekKeyDays('2026-W38'), T.isoWeekDays('2026-W38'));
+  const t = T.weekTemplate('2026-W38', '2026-09-14T07:00:00Z');
+  assert.match(t, /\nweek: 2026-W38\n/);
+  assert.ok(!/week_start/.test(t));
+  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, t, 'Weeks/2026-W38.md');
+  assert.equal(week.week, '2026-W38');
+  assert.equal(week.monday, '2026-09-14');
+});
+
+test('Saturday and Sunday weeks are named by the date that starts them', () => {
+  assert.equal(T.weekStartOf('2026-09-19', 'saturday'), '2026-09-19');
+  assert.equal(T.weekStartOf('2026-09-25', 'saturday'), '2026-09-19', 'Friday closes it');
+  assert.equal(T.weekStartOf('2026-09-26', 'saturday'), '2026-09-26');
+  assert.equal(T.weekStartOf('2026-09-20', 'sunday'), '2026-09-20');
+  assert.equal(T.weekStartOf('2026-09-26', 'sunday'), '2026-09-20', 'Saturday closes it');
+  assert.equal(T.weekKeyOf('2026-09-23', 'saturday'), '2026-09-19');
+  assert.equal(T.weekKeyOf('2026-09-23', 'sunday'), '2026-09-20');
+  const t = T.weekTemplate('2026-09-19', '2026-09-19T07:00:00Z');
+  assert.match(t, /\nweek_start: 2026-09-19\n/);
+  assert.ok(!/\nweek: /.test(t));
+  const week = T.weekFromNote({ type: 'planner-week', week_start: '2026-09-19' }, t, 'Weeks/2026-09-19.md');
+  assert.equal(week.week, '2026-09-19');
+  assert.equal(week.weekStart, '2026-09-19');
+  const byName = T.weekFromNote({ type: 'planner-week' }, t, 'Weeks/2026-09-19.md');
+  assert.equal(byName.week, '2026-09-19', 'a missing field falls back to the file name');
+});
+
+test('a 7-day grid in every setting, and the Sat->Sun->Mon boundary does not drift', () => {
+  for (const [start, first] of [['monday', '2026-09-14'], ['saturday', '2026-09-19'], ['sunday', '2026-09-20']]) {
+    const key = T.weekKeyOf(first, start);
+    const days = T.weekKeyDays(key);
+    assert.equal(days.length, 7, `${start}: seven days`);
+    assert.equal(days[0], first, `${start}: opens on the start day`);
+    assert.equal(T.weekKeyOf(days[6], start), key, `${start}: the last day is the same week`);
+    assert.notEqual(T.weekKeyOf(T.addDays(days[6], 1), start), key, `${start}: the next day is the next week`);
+  }
+  const sat = ['2026-09-25', '2026-09-26', '2026-09-27', '2026-09-28'].map((d) => T.weekKeyOf(d, 'saturday'));
+  assert.deepEqual(sat, ['2026-09-19', '2026-09-26', '2026-09-26', '2026-09-26']);
+  assert.equal(T.weekKeyOf('2027-01-01', 'saturday'), '2026-12-26', 'a year boundary is just another Saturday');
+});
+
+test('the weekend hides by the calendar, not by column position', () => {
+  assert.equal(T.isWeekendDay('2026-09-19'), true, 'Saturday');
+  assert.equal(T.isWeekendDay('2026-09-20'), true, 'Sunday');
+  assert.equal(T.isWeekendDay('2026-09-21'), false);
+  const shown = T.weekDays('2026-09-19').filter((d) => !T.isWeekendDay(d));
+  assert.deepEqual(shown, ['2026-09-21', '2026-09-22', '2026-09-23', '2026-09-24', '2026-09-25'],
+    'a Saturday week without the weekend is Monday to Friday, five days, not Saturday to Wednesday');
+});
+
+test('an existing note is found under either name and never duplicated', () => {
+  assert.deepEqual(T.weekKeyAliases('2026-W38'), ['2026-W38', '2026-09-14']);
+  assert.deepEqual(T.weekKeyAliases('2026-09-14'), ['2026-09-14', '2026-W38']);
+  assert.deepEqual(T.weekKeyAliases('2026-09-19'), ['2026-09-19'], 'a Saturday week has one name');
+  assert.deepEqual(T.weekKeyAliases('nonsense'), []);
+  const main = fs.readFileSync(T.__mainPath, 'utf8');
+  const body = main.slice(main.indexOf('  weekFile(iso) {'), main.indexOf('  weekKeyFor(day)'));
+  assert.match(body, /for \(const key of weekKeyAliases\(iso\)\)/, 'every alias is looked up');
+  assert.ok(!/rename/i.test(main.slice(main.indexOf('  weekFile(iso) {'), main.indexOf('  async readWeek('))),
+    'no week note is renamed');
+});
+
+test('a malformed or impossible key is refused', () => {
+  assert.equal(T.isWeekKey('2025-W53'), false, 'a year without a week 53');
+  assert.equal(T.isWeekKey('2026-02-30'), false, 'a date that does not exist');
+  assert.equal(T.isWeekKey('2026-W38'), true);
+  assert.equal(T.isWeekKey('2026-09-19'), true);
+  assert.equal(T.weekKeyStart('2026-W38'), '2026-09-14');
+  assert.equal(T.weekKeyStart('x'), null);
 });
