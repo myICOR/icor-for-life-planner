@@ -3646,8 +3646,12 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
   const winEnd = new Date(winStart.getTime() + 7 * 86400000);
   const out = [];
   const overrides = new Map(); // uid::day -> def (RECURRENCE-ID edits)
+  const overridesByUid = new Map(); // uid -> [def], for edits moved across the week's edge
   for (const def of defs) {
-    if (def.recurrenceDay) overrides.set(`${def.uid}::${def.recurrenceDay}`, def);
+    if (!def.recurrenceDay) continue;
+    overrides.set(`${def.uid}::${def.recurrenceDay}`, def);
+    if (!overridesByUid.has(def.uid)) overridesByUid.set(def.uid, []);
+    overridesByUid.get(def.uid).push(def);
   }
   for (const def of defs) {
     if (def.recurrenceDay) continue; // rendered via its master's expansion
@@ -3655,6 +3659,21 @@ function icsEventsForWeek(defs, weekStart, splitHour) {
       ? Math.max(0, def.end.instant.getTime() - def.start.instant.getTime())
       : (def.start.allDay ? 86400000 : 0);
     const occurrences = expandOccurrences(def, winStart, winEnd);
+    // An occurrence moved INTO this week from a day outside it: the master
+    // never produces that original day in this window, so expand the master
+    // on the original day alone and let the override below replace it.
+    if (def.rrule && !def.expanded) {
+      for (const ov of overridesByUid.get(def.uid) || []) {
+        const [y, m, d] = ov.recurrenceDay.split('-').map(Number);
+        const origDay = new Date(y, m - 1, d);
+        if (origDay >= winStart && origDay < winEnd) continue; // expanded above
+        const ovStart = ov.start.instant;
+        const ovEnd = ov.end ? ov.end.instant : ovStart;
+        if (ovStart >= winEnd || (ovStart < winStart && ovEnd <= winStart)) continue;
+        occurrences.push(...expandOccurrences(def, origDay, new Date(y, m - 1, d + 1)));
+      }
+      occurrences.sort((a, b) => a - b);
+    }
     for (const occStart of occurrences) {
       const occDay = def.start.allDay && !def.rrule ? def.start.day : localDayStr(occStart);
       if (def.exdates.has(occDay)) continue;
