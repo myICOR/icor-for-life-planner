@@ -3878,9 +3878,33 @@ function tagCalendarDefs(defs, feed) {
   return defs;
 }
 
+// A feed address with a user name and password in it
+// (https://user:pass@host/...). Desktop answers the server's challenge with
+// the credentials in the address, whatever the scheme (Basic, Digest,
+// NTLM); mobile does not, and got 401 for the same address. So on mobile
+// only, the userinfo comes out of the URL and goes into one Basic header,
+// percent-decoded and UTF-8 encoded before base64 (RFC 7617). On desktop,
+// and for an address without credentials, the URL goes on untouched, as
+// does one the URL parser cannot read. `credentials` says the address
+// carried any, on either platform, for the 401 sentence.
+function icsRequestOf(url) {
+  let u;
+  try { u = new URL(url); } catch { return { url, auth: null, credentials: false }; } // unparsable: requestUrl decides, as before
+  if (!u.username && !u.password) return { url, auth: null, credentials: false };
+  if (!Platform.isMobile) return { url, auth: null, credentials: true };
+  const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } }; // a stray % is sent as typed
+  let bin = '';
+  for (const b of new TextEncoder().encode(`${dec(u.username)}:${dec(u.password)}`)) bin += String.fromCharCode(b);
+  u.username = '';
+  u.password = '';
+  return { url: u.href, auth: `Basic ${btoa(bin)}`, credentials: true };
+}
+
 // Fetch ONE feed. Same body every release had for the single URL: webcal
 // rewritten, https enforced, the ICS parsed; the defs come back tagged.
-async function calendarFetchFeed(feed) {
+// On mobile, credentials in the address travel as a header; no message
+// carries them. `deps.requestUrl` is the tests' wire; the plugin passes none.
+async function calendarFetchFeed(feed, deps) {
   let raw = feedUrl(feed);
   if (!raw) return degraded('calendar', 'no-token', 'Calendar is not connected (no iCal URL).');
   if (/^webcal:\/\//i.test(raw)) raw = raw.replace(/^webcal:\/\//i, 'https://');
@@ -3888,7 +3912,15 @@ async function calendarFetchFeed(feed) {
     return degraded('calendar', 'misconfigured', 'Calendar URL must be https:// (or webcal://).');
   }
   try {
-    const res = await requestUrl({ url: raw, method: 'GET', throw: false, headers: { Accept: 'text/calendar' } });
+    const { url, auth, credentials } = icsRequestOf(raw);
+    const headers = auth ? { Accept: 'text/calendar', Authorization: auth } : { Accept: 'text/calendar' };
+    const res = await requestUrlOf(deps)({ url, method: 'GET', throw: false, headers });
+    if (res.status === 401 && credentials) {
+      return degraded('calendar', 'misconfigured', 'Calendar feed rejected the sign-in (HTTP 401): check the user name and password in its address.');
+    }
+    if (res.status === 401 || res.status === 403) {
+      return degraded('calendar', 'misconfigured', `Calendar feed refused access (HTTP ${res.status}): check its address.`);
+    }
     if (res.status < 200 || res.status >= 300) {
       return degraded('calendar', 'unreachable', `Calendar feed returned HTTP ${res.status}.`);
     }
