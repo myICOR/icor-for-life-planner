@@ -10870,10 +10870,22 @@ class PlannerTrayView extends ItemView {
     this.render();
   }
 
-  async commitComposer(value) {
+  // opts.open: Enter. Open the new task's note, the way a click on its card
+  // does, so the due date and the rest can be set; the field closes behind it.
+  // Without it (Shift+Enter) the field stays open for the next entry.
+  async commitComposer(value, opts) {
     const path = await this.plugin.addManualItem(value);
     if (!path) return false;
     this.composerDraft = '';
+    if (opts && opts.open) {
+      const file = this.plugin.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) this.plugin.app.workspace.getLeaf('tab').openFile(file);
+      this.closeComposer();
+      // closeComposer re-renders, and a render can re-arm the focus flag while the
+      // input still holds the caret; the opened note must keep the focus.
+      this._composerWantsFocus = false;
+      return true;
+    }
     // Keep the field open and focused for a second entry: capture is a burst
     // activity, and reopening the trigger between two tasks costs a click each
     // time. emitModelChanged re-renders us, so the flag is what survives.
@@ -10896,14 +10908,18 @@ class PlannerTrayView extends ItemView {
     const input = wrap.createEl('input', {
       cls: 'iplan-add-input',
       attr: {
-        type: 'text', placeholder: 'What needs doing?',
-        'aria-label': 'New task title', enterkeyhint: 'done',
+        type: 'text',
+        placeholder: Platform.isMobile ? 'What needs doing?' : 'What needs doing? (Shift+Enter: add and keep going)',
+        'aria-label': Platform.isMobile ? 'New task title'
+          : 'New task title, Enter opens it, Shift+Enter adds and keeps the field open',
+        enterkeyhint: 'done',
         autocomplete: 'off', spellcheck: 'false',
       },
     });
     input.value = this.composerDraft || '';
     input.addEventListener('input', () => { this.composerDraft = input.value; });
     input.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;   // an IME is still choosing: Enter is not ours
       if (e.key === 'Escape') { e.preventDefault(); this.closeComposer(); return; }
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -10911,7 +10927,7 @@ class PlannerTrayView extends ItemView {
       if (!value) return;              // nothing to say, nothing to complain about
       input.value = '';
       this.composerDraft = '';
-      this.commitComposer(value);
+      this.commitComposer(value, { open: !e.shiftKey && !Platform.isMobile });
     });
     // Blur closes an EMPTY field so the trigger comes back; a field with a
     // draft in it stays, because losing typed text to a stray click is worse
@@ -12140,6 +12156,7 @@ module.exports = IcorPlannerPlugin;
 // Headless test surface (harmless in Obsidian; the test harness reaches the
 // internals through it instead of duplicating them).
 module.exports.__test = {
+  PlannerTrayView,
   mondayOf, addDays, dayInWeek, dueBucketOf, weekDays, fmtWeekLabel, todayStr, localDayStr,
   // display formats (2026-09-07)
   setDisplayFormatSource, displayFormats, templatesFormats, resolveDisplayFormats, fmtWithMoment, fmtTimeHM,
