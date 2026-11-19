@@ -35,9 +35,9 @@
   --iplan-cal-4: var(--ink-paper-faint, var(--text-faint));    /* plain ink */
   --iplan-event: var(--iplan-cal-1);        /* a feed with no colour set */
   --iplan-event-soft: var(--iplan-wash);    /* one shared wash for every chip */
-  --iplan-goal: #c2a35c;
-  --iplan-goal-soft: color-mix(in srgb, #c2a35c 14%, transparent);
-  --iplan-overdue: #b5654f;
+  --iplan-goal: var(--ink-hue-yellow, #c2a35c);
+  --iplan-goal-soft: color-mix(in srgb, var(--ink-hue-yellow, #c2a35c) 14%, transparent);
+  --iplan-overdue: var(--ink-callout-alert, #b5654f);
   --iplan-card-radius: 8px;
 }
 
