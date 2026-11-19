@@ -109,3 +109,10 @@ test('the board and the tray describe the unconnected state with one sentence', 
     'the old board wording said "keys" for a calendar that takes a URL');
   assert.ok(!/Settings -> ICOR for Life - Planner/.test(main), 'stale arrow copy');
 });
+
+test('goal and overdue colours read INKLINE tokens and keep their old hex as fallback', () => {
+  const decl = (name) => (css.match(new RegExp(`${name}:\\s*([^;]+);`)) || [])[1];
+  assert.equal(decl('--iplan-goal'), 'var(--ink-hue-yellow, #c2a35c)');
+  assert.equal(decl('--iplan-goal-soft'), 'color-mix(in srgb, var(--ink-hue-yellow, #c2a35c) 14%, transparent)');
+  assert.equal(decl('--iplan-overdue'), 'var(--ink-callout-alert, #b5654f)');
+});
