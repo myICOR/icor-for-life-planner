@@ -2,3 +2,7 @@
 data.json
 .DS_Store
 node_modules/
+# An ICOR for Life vault's shared keys file (.icor-for-life/.env) and any
+# other env file: API keys and OAuth tokens, never in git or a release
+.env
+.icor-for-life/

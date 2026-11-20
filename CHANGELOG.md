@@ -6,6 +6,29 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.17.0] - 2026-11-20
+
+### Changed
+- **The env file's default place is `.icor-for-life/.env`.** The ICOR for Life
+  vault no longer has the `06 AI Team` room, so the keys file moved to the
+  vault's hidden system folder, the same file ICOR for Life - Connect and AI
+  Chat read. Obsidian does not index a folder whose name starts with a dot, so
+  the planner reads and writes it through the vault adapter only, as before.
+  The system folder is made on the first save when it is missing. This only
+  matters if you chose the env file in Settings, Secrets; Obsidian's keychain
+  is still the default.
+- **Existing vaults keep working.** The old default path in `data.json` now
+  reads as the new one. While `.icor-for-life/.env` is missing and
+  `06 AI Team/AI Team Knowledge/.env` is there, the planner reads and writes
+  the old file. Once, at start, it offers to copy the file to the new place;
+  the settings tab keeps an "Old keys file" row with the same button. The copy
+  is byte for byte and is read back before it is used. The old file is never
+  deleted by itself: once the new file exists, the same row offers to move the
+  old one to the trash.
+- While the env file is selected, it is added to the vault's `.gitignore` too
+  (the file in use and the new place), the way Connect has always done.
+  No value is ever logged or shown; every new sentence names paths only.
+
 ## [0.16.3] - 2026-11-17
 
 ### Fixed

@@ -229,8 +229,29 @@ function sourceConfigured(settings, source) {
 }
 
 // The env file the secrets can live in instead of Obsidian's keychain
-// (0.12.0): vault-relative, the AI team's own key file by default.
-const DEFAULT_ENV_FILE_PATH = '06 AI Team/AI Team Knowledge/.env';
+// (0.12.0): vault-relative. Since 0.17.0 the default is the vault's own
+// system folder, the one file ICOR for Life - Connect and AI Chat read too.
+// Obsidian does not index a folder whose name starts with a dot, so this
+// file is reached through the vault adapter only, never the Vault API.
+const DEFAULT_ENV_FILE_PATH = '.icor-for-life/.env';
+// Where the default lived before 0.17.0, in a room the vault no longer has.
+// Read only while the default file is missing and this one is still there
+// (EnvFileStore's fallback), and offered as a one-time move; never deleted
+// without the member's own click.
+const LEGACY_ENV_FILE_PATH = '06 AI Team/AI Team Knowledge/.env';
+
+// The path data.json names, adopted: the old default reads as the new one,
+// because nobody chose it; it was simply what every earlier release wrote.
+function adoptEnvFilePath(v) {
+  const p = normalizeEnvFilePath(v).path;
+  return !p || p === LEGACY_ENV_FILE_PATH ? DEFAULT_ENV_FILE_PATH : p;
+}
+
+// The older file the default path falls back to, or '' for a path the
+// member chose (that one is read as typed, with no fallback).
+function legacyEnvFileFor(path) {
+  return trimmed(path) === DEFAULT_ENV_FILE_PATH ? LEGACY_ENV_FILE_PATH : '';
+}
 
 const DEFAULT_SETTINGS = {
   // Where the planner lives in the vault: the room folder. Every path the
@@ -286,6 +307,10 @@ const DEFAULT_SETTINGS = {
   // release since 0.9.0, until the env file is chosen.
   secretsBackend: 'secret-storage',
   envFilePath: DEFAULT_ENV_FILE_PATH,
+  // Set once the member has been offered, at load, the move of the old env
+  // file (LEGACY_ENV_FILE_PATH) to the default place (0.17.0): asked once,
+  // never at every start. The settings tab keeps the button either way.
+  envMoveOffered: false,
   syncMinutes: 10,
   showWeekend: false,
   // How dates and times are shown (2026-09-07): moment tokens, blank by
@@ -656,7 +681,7 @@ function adoptSettings(loaded, vault) {
 // encrypted blob per vault on desktop, a per-device native store on mobile,
 // in both cases outside the vault and outside data.json.
 function secretsNoteText(mode, secretsInStore, envPath) {
-  if (mode === 'env-file') return `Secrets are stored in the env file at ${trimmed(envPath) || DEFAULT_ENV_FILE_PATH} (inside the vault, one KEY=value line each). Only that file is read while it is selected; Obsidian's keychain is not consulted.`;
+  if (mode === 'env-file') return `Secrets are stored in the env file at ${trimmed(envPath) || DEFAULT_ENV_FILE_PATH} (inside the vault, one KEY=value line each; a folder whose name starts with a dot is hidden from Obsidian's file list). Only that file is read while it is selected; Obsidian's keychain is not consulted.`;
   if (mode === 'store') return 'Secrets are stored in Obsidian\'s keychain (Settings, General, Keychain): outside the vault and outside data.json, so they are never synced or committed with your notes.';
   const base = 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s keychain, outside the vault; on this Obsidian, choose the env file above to move them out of data.json).';
   if (secretsInStore) {
@@ -768,10 +793,24 @@ function envErrorText(e) { return trimmed(e && e.message ? e.message : e) || 'un
 // (true landed, false failed, never a throw), and a failed write takes the
 // value back out of memory, so the store never claims what the disk
 // refused. `error` is the last read or write failure.
+//
+// The fallback (0.17.0): the default path names a file in the vault's
+// system folder, and vaults made before it keep theirs at
+// LEGACY_ENV_FILE_PATH. While the file at `path` is missing and the
+// fallback is there, the fallback is the file this store reads AND writes
+// (`active`, `onLegacy`), so nothing a member set up stops working and no
+// half-empty new file appears beside the full old one. adoptLegacy() copies
+// it over once, on request; trashLegacy() moves the old copy to the trash,
+// on request. Neither ever runs by itself.
 class EnvFileStore {
-  constructor(adapter, path) {
+  constructor(adapter, path, fallback) {
     this.adapter = adapter || null;
     this.path = trimmed(path) || DEFAULT_ENV_FILE_PATH;
+    this.fallback = fallback === undefined ? legacyEnvFileFor(this.path) : trimmed(fallback);
+    if (this.fallback === this.path) this.fallback = '';
+    this.active = this.path;
+    this.onLegacy = false;
+    this.legacyExists = false;
     this.values = {};
     this.loaded = false;
     this.exists = false;
@@ -779,10 +818,38 @@ class EnvFileStore {
     this._chain = Promise.resolve();
     this._latest = {}; // key -> the most recent write of it, for the revert
   }
-  async _present() {
+  // Is there a file at p? An adapter without exists() is trusted for the
+  // configured path only; an exists() that throws counts as present for
+  // the configured path (the read then reports the error) and as absent
+  // for the fallback (which is never worth an error of its own).
+  async _has(p) {
     if (!this.adapter) return false;
-    if (typeof this.adapter.exists !== 'function') return true;
-    try { return !!(await this.adapter.exists(this.path)); } catch { return true; }
+    if (typeof this.adapter.exists !== 'function') return p === this.path;
+    try { return !!(await this.adapter.exists(p)); } catch { return p === this.path; }
+  }
+  async _present() { return this._has(this.active); }
+  // Which file is in use now: the configured one, unless it is missing and
+  // the fallback is there. Asked again before every read and every write,
+  // so a move made meanwhile (by this plugin or another) is followed.
+  async _resolve() {
+    let active = this.path;
+    let legacy = false;
+    if (this.fallback) {
+      legacy = await this._has(this.fallback);
+      if (legacy && !(await this._has(this.path))) active = this.fallback;
+    }
+    this.active = active;
+    this.onLegacy = active !== this.path;
+    this.legacyExists = legacy;
+    return active;
+  }
+  // The folder a file sits in, made when it is missing (the system folder of
+  // a vault made before 0.17.0, say). The adapter's mkdir makes every level.
+  async _ensureParent(p) {
+    const dir = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+    if (!dir || !this.adapter || typeof this.adapter.mkdir !== 'function') return;
+    if (typeof this.adapter.exists === 'function' && await this.adapter.exists(dir)) return;
+    await this.adapter.mkdir(dir);
   }
   // Read the file into memory, after any queued write has landed. A missing
   // file is an empty store, not an error; an unreadable one is an error and
@@ -793,11 +860,50 @@ class EnvFileStore {
     this.exists = false;
     this.error = '';
     try {
-      if (await this._present()) { text = await this.adapter.read(this.path); this.exists = true; }
+      await this._resolve();
+      if (await this._present()) { text = await this.adapter.read(this.active); this.exists = true; }
     } catch (e) { this.error = envErrorText(e); text = ''; }
     this.values = parseEnvText(text);
     this.loaded = true;
     return this;
+  }
+  // The one-time move: the old file's bytes, unchanged, copied to `path`,
+  // read back to be sure, and the store reloaded from the new place. The
+  // old file stays where it is (trashLegacy is a separate, asked-for step).
+  // Answers 'moved', 'already' (the new file exists), 'none' (no old file)
+  // or 'failed' (with `error` set, never carrying a value). Queued behind
+  // any pending write, so a write in flight lands in the copy.
+  adoptLegacy() {
+    const run = this._chain.then(async () => {
+      if (!this.adapter || !this.fallback) return 'none';
+      if (await this._has(this.path)) return 'already';
+      if (!(await this._has(this.fallback))) return 'none';
+      const text = await this.adapter.read(this.fallback);
+      await this._ensureParent(this.path);
+      await this.adapter.write(this.path, text);
+      if ((await this.adapter.read(this.path)) !== text) throw new Error('the copy did not read back the same');
+      return 'moved';
+    });
+    this._chain = run.then(() => undefined, () => undefined);
+    return run.then(async (r) => { await this.load(); return r; }, async (e) => {
+      await this.load();
+      this.error = envErrorText(e);
+      return 'failed';
+    });
+  }
+  // The old copy to the trash (the system trash, else the vault's .trash),
+  // only once the new file is there to read. True when it went.
+  async trashLegacy() {
+    await this.settle();
+    if (!this.adapter || !this.fallback) return false;
+    if (!(await this._has(this.path)) || !(await this._has(this.fallback))) return false;
+    let gone = false;
+    try {
+      if (typeof this.adapter.trashSystem === 'function') gone = !!(await this.adapter.trashSystem(this.fallback));
+      if (!gone && typeof this.adapter.trashLocal === 'function') { await this.adapter.trashLocal(this.fallback); gone = true; }
+    } catch (e) { this.error = envErrorText(e); gone = false; }
+    await this._resolve();
+    return gone;
   }
   getSecret(id) {
     const k = envKeyFor(id);
@@ -819,10 +925,12 @@ class EnvFileStore {
     let cur = null;
     try {
       if (!this.adapter) throw new Error('no vault adapter');
-      cur = (await this._present()) ? await this.adapter.read(this.path) : '';
+      const target = await this._resolve();
+      cur = (await this._present()) ? await this.adapter.read(target) : '';
       const next = upsertEnvLine(cur, w.key, w.value);
       if (next === cur) { this.exists = this.exists || cur !== ''; return; }
-      await this.adapter.write(this.path, next);
+      if (cur === '') await this._ensureParent(target);
+      await this.adapter.write(target, next);
       this.exists = true;
     } catch (e) {
       this._revert(w, cur);
@@ -6739,8 +6847,11 @@ class IcorPlannerPlugin extends Plugin {
     // only while it is the selected one; the store is feature-detected once.
     this.secretStorage = secretStorageUsable(this.app && this.app.secretStorage) ? this.app.secretStorage : null;
     const loaded = (await this.loadData()) || {};
+    // 0.17.0: the old default path (in room 06, which vaults no longer
+    // have) is adopted as the new one; the store reads the old file for as
+    // long as the new one is missing.
     const backend = normalizeSecretsBackend(loaded.secretsBackend);
-    const envPath = normalizeEnvFilePath(loaded.envFilePath).path || DEFAULT_ENV_FILE_PATH;
+    const envPath = adoptEnvFilePath(loaded.envFilePath);
     this.envStore = this.envStoreFor(envPath);
     if (backend === 'env-file') await this.envStore.load();
     this.secrets = this.vaultFor(backend);
@@ -6748,7 +6859,10 @@ class IcorPlannerPlugin extends Plugin {
     this.settings = adopted.settings;
     this.settings.secretsBackend = backend;
     this.settings.envFilePath = envPath;
-    if (adopted.changed || loaded.secretsBackend !== backend || loaded.envFilePath !== envPath) await this.persistSettings();
+    const offerMove = backend === 'env-file' && this.envStore.onLegacy && this.settings.envMoveOffered !== true;
+    if (offerMove) this.settings.envMoveOffered = true;
+    if (adopted.changed || offerMove || loaded.secretsBackend !== backend || loaded.envFilePath !== envPath) await this.persistSettings();
+    if (offerMove) this.offerEnvFileMove();
     // The display formats are resolved at every paint from the live
     // settings and the Templates plugin's options, never cached.
     setDisplayFormatSource(() => resolveDisplayFormats(this.settings, this.app));
@@ -6914,19 +7028,53 @@ class IcorPlannerPlugin extends Plugin {
     if (b === 'env-file') await this.envStore.load();
     this.secrets = this.vaultFor(b);
     await this.saveSettings();
+    if (b === 'env-file') await this.ensureGitignore();
   }
   async setEnvFilePath(path) {
     const n = normalizeEnvFilePath(path);
     if (!n.ok) return false;
-    this.settings.envFilePath = n.path;
+    this.settings.envFilePath = adoptEnvFilePath(n.path);
     await this.envStore.settle();
-    this.envStore = this.envStoreFor(n.path);
+    this.envStore = this.envStoreFor(this.settings.envFilePath);
     if (this.secrets.mode === 'env-file') {
       await this.envStore.load();
       this.secrets = this.vaultFor('env-file');
     }
     await this.saveSettings();
+    if (this.secrets.mode === 'env-file') await this.ensureGitignore();
     return true;
+  }
+  /* ---- the env file's move out of room 06 (0.17.0) ----
+   * Asked once at load (offerEnvFileMove), and always on offer in the
+   * settings tab while the old file is the one in use. Every sentence names
+   * paths only, never a line of the file. */
+  offerEnvFileMove() {
+    const text = `Planner: your keys are still read from the old file at ${LEGACY_ENV_FILE_PATH}. Their new place is ${DEFAULT_ENV_FILE_PATH}.`;
+    if (typeof createFragment !== 'function') { new Notice(`${text} Planner's settings have a button to copy them there.`, 30000); return; }
+    const frag = createFragment((f) => {
+      f.createDiv({ text });
+      const b = f.createEl('button', { text: 'Copy them there' });
+      b.addEventListener('click', () => { this.moveEnvFileFromLegacy(); });
+    });
+    new Notice(frag, 30000);
+  }
+  // Copy the old file to the default place and read it from there. The old
+  // file stays; the Notice says where, and the settings tab can trash it.
+  async moveEnvFileFromLegacy() {
+    const store = this.envStore;
+    const r = await store.adoptLegacy();
+    if (r === 'moved') new Notice(`Planner: copied your keys file to ${store.path} and reads it from there now. The old file is still at ${store.fallback}; Planner's settings can put it in the trash once nothing else reads it.`, 15000);
+    else if (r === 'already') new Notice(`Planner: ${store.path} is already there and is the file in use.`);
+    else if (r === 'none') new Notice('Planner: there is no old keys file to copy.');
+    else new Notice(`Planner: the keys file could not be copied to ${store.path}. See the Env file line in Planner's settings.`, 12000);
+    return r;
+  }
+  async trashLegacyEnvFile() {
+    const store = this.envStore;
+    const old = store.fallback;
+    const gone = await store.trashLegacy();
+    new Notice(gone ? `Planner: moved the old keys file at ${old} to the trash.` : `Planner: the old keys file at ${old} was not moved to the trash.`);
+    return gone;
   }
   // Move the keys of the given slots from one backend into the selected
   // one. Returns how many keys moved; the values never appear anywhere.
@@ -7036,9 +7184,15 @@ class IcorPlannerPlugin extends Plugin {
       try { text = await adapter.read(gi); } catch { text = ''; }
       const line = gitignoreLineFor(this.manifest);
       const wanted = line ? [line] : [];
+      // The env file too, while it is the backend in use (0.17.0, the way
+      // ICOR for Life - Connect has always guarded it): the file in use,
+      // and the configured one it will be once moved.
+      if (this.settings && this.settings.secretsBackend === 'env-file' && this.envStore) {
+        for (const p of [this.envStore.path, this.envStore.active]) if (p && !wanted.includes(p)) wanted.push(p);
+      }
       const missing = wanted.filter((line) => !text.split('\n').some((l) => l.trim() === line));
       if (missing.length) {
-        const block = `\n# ICOR for Life - Planner is its own git repository (and its data.json holds API keys)\n${missing.join('\n')}\n`;
+        const block = `\n# ICOR for Life - Planner is its own git repository (and its data.json, like the env file, can hold API keys)\n${missing.join('\n')}\n`;
         await adapter.write(gi, (text.endsWith('\n') || !text ? text : text + '\n') + block);
       }
     } catch { /* never block load on this */ }
@@ -11389,13 +11543,44 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .setName('Env file')
       .setDesc('Checking the file.');
     envSetting.descEl.setAttribute('aria-live', 'polite');
+    // The old file (0.17.0): while it is the one in use, a row offers the
+    // copy to the default place; once the new file is there and the old one
+    // still is, a row offers to put the old one in the trash. Both act only
+    // on the member's click, and both name paths, never a line of the file.
+    const legacySetting = new Setting(containerEl).setName('Old keys file');
+    legacySetting.descEl.setAttribute('aria-live', 'polite');
     const renderEnvStatus = () => {
       const store = this.plugin.envStore;
       envSetting.descEl.toggleClass('is-failed', !!store.error);
       const lead = 'A path inside the vault, one KEY=value line per secret; every other line is left as it is. Read only while the env file is selected above.';
-      if (store.error) envSetting.setDesc(`${lead} Could not read ${store.path}: ${store.error}`);
+      if (store.error) envSetting.setDesc(`${lead} Could not read ${store.active}: ${store.error}`);
+      else if (store.onLegacy) envSetting.setDesc(`${lead} Not found: ${store.path}, so the old file at ${store.active} is read instead.`);
       else if (store.exists) envSetting.setDesc(`${lead} Found: ${store.path}.`);
       else envSetting.setDesc(`${lead} Not found: ${store.path}. It is created on the first save.`);
+      renderLegacy();
+    };
+    const renderLegacy = () => {
+      const store = this.plugin.envStore;
+      legacySetting.controlEl.empty();
+      const show = this.plugin.secrets.mode === 'env-file' && !!store.fallback && store.legacyExists;
+      legacySetting.settingEl.toggleClass('is-hidden', !show);
+      if (!show) return;
+      if (store.onLegacy) {
+        legacySetting.setDesc(`Your keys are still in ${store.fallback}, a room this vault no longer needs. Copy the file to ${store.path}, the new place ICOR for Life tools read it from. The old file stays until you remove it.`);
+        legacySetting.addButton((b) => b.setButtonText('Copy to the new place').setCta().onClick(async () => {
+          b.setDisabled(true);
+          const r = await this.plugin.moveEnvFileFromLegacy();
+          if (r === 'moved') this.plugin.ensureGitignore();
+          await refreshSecrets();
+        }));
+      } else {
+        legacySetting.setDesc(`${store.path} is in use. The old copy is still at ${store.fallback}, with the keys it held when it was copied. Put it in the trash once no other tool reads it.`);
+        legacySetting.addButton((b) => b.setButtonText('Move old file to trash').setWarning().onClick(async () => {
+          b.setDisabled(true);
+          await this.plugin.trashLegacyEnvFile();
+          await refreshSecrets();
+        }));
+      }
     };
     const keysEl = containerEl.createDiv({ cls: 'iplan-settings-keys' });
     const renderKeys = () => {
@@ -12216,7 +12401,7 @@ module.exports.__test = {
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
   settingsHoldSecrets, migrateSecretsSettled, IcorPlannerPlugin,
   // the env file backend (0.12.0)
-  DEFAULT_ENV_FILE_PATH, SECRETS_BACKENDS, BACKEND_LABELS, normalizeSecretsBackend, secretsBackendLabel, normalizeEnvFilePath,
+  DEFAULT_ENV_FILE_PATH, LEGACY_ENV_FILE_PATH, adoptEnvFilePath, legacyEnvFileFor, SECRETS_BACKENDS, BACKEND_LABELS, normalizeSecretsBackend, secretsBackendLabel, normalizeEnvFilePath,
   envKeyFor, parseEnvText, envLineFor, upsertEnvLine, envErrorText, EnvFileStore, dataJsonStore, secretPresence, moveSecret,
   SECRET_SLOT_LABELS, SECRET_SLOT_COMPANIONS, secretSlots, secretStatusText,
   // Outlook (2026-09-06)

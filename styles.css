@@ -1510,6 +1510,8 @@ ul.iplan-settings-list li { margin: 3px 0; }
 .iplan-tray-root button.iplan-habits-archived-head:focus-visible { box-shadow: 0 0 0 1px var(--iplan-marker); }
 /* The modals: a row the chosen cadence does not read is not shown. */
 .iplan-habit-modal .setting-item.is-hidden { display: none; }
+/* The settings tab's Old keys file row (0.17.0), shown only while there is an old file to act on. */
+.iplan-settings .setting-item.is-hidden { display: none; }
 
 /* ----------------------------------------------- coarse pointer (d) ---- */
 @media (any-pointer: coarse) {

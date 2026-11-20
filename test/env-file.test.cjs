@@ -37,7 +37,8 @@ const T = require('./harness.cjs');
 const root = process.env.PLANNER_ROOT ? path.resolve(process.env.PLANNER_ROOT) : path.join(__dirname, '..');
 const main = fs.readFileSync(T.__mainPath, 'utf8');
 const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
-const ENV = '06 AI Team/AI Team Knowledge/.env';
+const ENV = '.icor-for-life/.env';
+const OLD = '06 AI Team/AI Team Knowledge/.env';
 
 class FakeSecretStorage {
   constructor() { this.m = new Map(); this.writes = 0; }
@@ -408,7 +409,8 @@ test('the settings: backend and path normalisers', () => {
   assert.equal(T.normalizeSecretsBackend('env-file'), 'env-file');
   for (const v of ['secret-storage', undefined, null, '', 'data-json', 'keychain', 42]) assert.equal(T.normalizeSecretsBackend(v), 'secret-storage', String(v));
   const ok = (v) => T.normalizeEnvFilePath(v);
-  assert.deepEqual(ok(' 06 AI Team/AI Team Knowledge/.env '), { ok: true, path: ENV, error: '' });
+  assert.deepEqual(ok(' .icor-for-life/.env '), { ok: true, path: ENV, error: '' });
+  assert.deepEqual(ok(' 06 AI Team/AI Team Knowledge/.env '), { ok: true, path: OLD, error: '' }, 'the checker takes any path as typed; adoptEnvFilePath maps the old default');
   assert.equal(ok('./a/./b/.env').path, 'a/b/.env');
   assert.equal(ok('a\\b\\.env').path, 'a/b/.env', 'backslashes are read as separators');
   assert.equal(ok('a//b/.env').path, 'a/b/.env');
@@ -458,7 +460,7 @@ test('the key list: the five credentials by name, every pasted calendar, never t
 
 test('source scan: the load order, the reload before a sync, the settle after a save', () => {
   assert.match(code, /this\.secretStorage = secretStorageUsable\(this\.app && this\.app\.secretStorage\) \? this\.app\.secretStorage : null;/);
-  assert.match(code, /const backend = normalizeSecretsBackend\(loaded\.secretsBackend\);\n\s*const envPath = normalizeEnvFilePath\(loaded\.envFilePath\)\.path \|\| DEFAULT_ENV_FILE_PATH;\n\s*this\.envStore = this\.envStoreFor\(envPath\);\n\s*if \(backend === 'env-file'\) await this\.envStore\.load\(\);\n\s*this\.secrets = this\.vaultFor\(backend\);\n\s*const adopted = adoptSettings\(loaded, this\.secrets\);/, 'the env file is read before the migration and only when selected');
+  assert.match(code, /const backend = normalizeSecretsBackend\(loaded\.secretsBackend\);\n\s*const envPath = adoptEnvFilePath\(loaded\.envFilePath\);\n\s*this\.envStore = this\.envStoreFor\(envPath\);\n\s*if \(backend === 'env-file'\) await this\.envStore\.load\(\);\n\s*this\.secrets = this\.vaultFor\(backend\);\n\s*const adopted = adoptSettings\(loaded, this\.secrets\);/, 'the env file is read before the migration and only when selected');
   assert.match(code, /async persistSettings\(\) \{\n\s*await migrateSecretsSettled\(this\.settings, this\.secrets\);\n\s*await this\.saveData\(this\.settings\);\n\s*await this\.secrets\.settle\(\);\n\s*\}/, 'the move waits for the file before data.json is written, and a save is not done until the env file is');
   assert.doesNotMatch(code.slice(code.indexOf('async persistSettings()'), code.indexOf('envStoreFor(path)')), /[^d]\s*migrateSecrets\(this\.settings/, 'the sync migration is never the one a save relies on');
   assert.match(code, /await this\.ensureFolders\(\);\n\s*if \(this\.secrets\.mode === 'env-file'\) await this\.envStore\.load\(\);\n\s*const s = this\.withSecrets\(\);/, 'a hand edit of the env file is seen at the next sync');

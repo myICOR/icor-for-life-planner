@@ -108,6 +108,13 @@ before you choose.
 
 Keys are held in Obsidian's own keychain, outside your notes.
 
+If you choose the file instead, it is `.icor-for-life/.env`, in the vault's
+hidden system folder, the same file ICOR for Life - Connect and AI Chat use.
+Obsidian's file list does not show that folder. A vault that still keeps the
+file in the old `06 AI Team` room keeps working: the planner reads it there,
+and its settings offer to copy it to the new place. The old file stays until
+you remove it.
+
 ## What it touches
 
 **Your vault.** Every task, event, routine and habit becomes a plain markdown

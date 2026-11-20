@@ -85,9 +85,16 @@ as "stored in local storage, keyed to the specific vault"), under ids
 prefixed `icor-for-life-planner-`. Obsidian's keychain is shared by every
 plugin in the app, which is why every id carries the prefix. The other
 backend is an env file inside the vault (`envFilePath`, default
-`06 AI Team/AI Team Knowledge/.env`): one `KEY=value` line per secret,
-read through the vault adapter, edited one line at a time with every
-other byte preserved; being inside the vault, it travels with whatever
+`.icor-for-life/.env` since 0.17.0, in the vault's hidden system folder,
+which Obsidian does not index): one `KEY=value` line per secret,
+read and written through the vault adapter only, edited one line at a time with every
+other byte preserved. Before 0.17.0 the default was
+`06 AI Team/AI Team Knowledge/.env`; while the new file is missing and
+that one exists, the old file is the one read and written, and the
+settings tab offers to copy it to the new place (byte for byte, read back
+before it is used). The old file is never deleted by the plugin; a second
+button, used only once the new file exists, moves it to the trash. While
+the env file is selected, both paths are added to the vault's `.gitignore`; being inside the vault, it travels with whatever
 syncs or commits the vault, which is the member's choice to make
 (Obsidian Sync skips dotfiles other than `.obsidian`, so it does not
 carry a `.env`). In both backends the matching fields in `data.json`
