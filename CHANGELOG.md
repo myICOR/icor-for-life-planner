@@ -29,6 +29,15 @@ Releases before 0.12.0 carry their notes on the GitHub release itself
   (the file in use and the new place), the way Connect has always done.
   No value is ever logged or shown; every new sentence names paths only.
 
+### Fixed
+- **Your words in a task note are never lost.** The note's text is the
+  task's description, and the source wins a conflict. When the description
+  changed at the source while you had written in the note, your words were
+  replaced without a copy. They now go to a note beside the task first,
+  named "<task> (your words, <day>)", and a notice says where. If that copy
+  cannot be written, the note is left as it is and the task waits for the
+  next sync.
+
 ## [0.16.3] - 2026-11-17
 
 ### Fixed
