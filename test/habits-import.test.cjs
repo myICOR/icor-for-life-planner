@@ -381,9 +381,11 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   assert.ok(modal.indexOf('IMPORT_EDITS_TEXT') < modal.indexOf('addToggle('), 'above, not below');
   const settings = main.slice(main.indexOf('class IcorPlannerSettingTab'));
   assert.ok(/\.setName\('Import from My Life'\)\s*\n\s*\.setDesc\(`\$\{IMPORT_EDITS_TEXT\} A note whose planner_habit already links to a planner habit note is skipped\.`\)/.test(settings), 'the same sentence under the button');
-  // the floor: trashFile is an API of 1.6.6
+  // the floor: trashFile is an API of 1.6.6 (since 0.17.0 the floor is 1.11.4,
+  // for the keychain; anything at or above 1.6.6 keeps trashFile)
   const manifest = JSON.parse(fs.readFileSync(require('node:path').join(__dirname, '..', 'manifest.json'), 'utf8'));
-  assert.equal(manifest.minAppVersion, '1.6.6');
+  const atLeast = (v, floor) => { const a = v.split('.').map(Number), b = floor.split('.').map(Number); for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); } return true; };
+  assert.ok(atLeast(manifest.minAppVersion, '1.6.6'), `minAppVersion ${manifest.minAppVersion} is below trashFile's 1.6.6`);
 });
 
 test('THE ASK: a run that stops after the body write resumes with the frontmatter step only, and makes no second planner note', async () => {

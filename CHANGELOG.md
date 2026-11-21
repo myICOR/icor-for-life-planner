@@ -30,6 +30,10 @@ Releases before 0.12.0 carry their notes on the GitHub release itself
   No value is ever logged or shown; every new sentence names paths only.
 
 ### Fixed
+- **Keys stay in Obsidian's keychain.** Planner now needs Obsidian 1.11.4 or
+  newer, the first with Obsidian's own keychain. On older versions it used to keep keys in
+  plain text without saying so. The env file is still there for a member who
+  chooses it in settings.
 - **Your words in a task note are never lost.** The note's text is the
   task's description, and the source wins a conflict. When the description
   changed at the source while you had written in the note, your words were
