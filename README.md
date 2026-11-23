@@ -23,8 +23,8 @@ and readable without this plugin.
 
 ## Getting started
 
-You do not need an account to start. Open the Planner from the button under
-the sidebar logo, add a task by hand in the tray, and drag it onto a day.
+You do not need an account to start. Open the Planner from its icon in the
+ribbon on the left, add a task by hand in the tray, and drag it onto a day.
 
 Connect sources when you want them, one at a time, from the settings page.
 

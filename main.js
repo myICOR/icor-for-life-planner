@@ -4596,35 +4596,14 @@ function nextStripMountPoint(root) {
   return null;
 }
 
-// THE TOOLBAR BUTTON'S MOUNT RULE (0.9.2), pure over a querySelector root.
-//
-// The row of icons under the sidebar logo is Obsidian's own file-explorer
-// toolbar, `.nav-buttons-container`. The ICOR for Life Connect plugin puts
-// its four launchers there as `div.clickable-icon.nav-action-button` and
-// marks the container `micor-tree-slot`, which is the class INKLINE styles;
-// it offers no registration hook for another plugin's button. So this
-// plugin mounts into the same container with the same class shape and the
-// theme styles it like its siblings. Appended, never inserted at the front:
-// the theme leaves launchers at flex order 0 in creation order and pins
-// only sort and collapse-all behind them, so appending lands the button
-// after Connect's launchers and ahead of the host's two controls.
-//
-// The rule returns the container and the button already in it, if any, so
-// the runtime can be idempotent under the observer that re-runs it: with
-// the button present from THIS plugin instance it must return without
-// touching the DOM (a mutation under a MutationObserver feeds itself).
-// Without a file explorer there is nowhere to mount; the ribbon icon and
-// the command are the routes then.
-const PLANNER_TOOLBAR_HOST = '.workspace-leaf-content[data-type="file-explorer"] .nav-buttons-container';
-const PLANNER_TOOLBAR_CLASS = 'iplan-toolbar-open';
-const PLANNER_TOOLBAR_ICON = 'calendar-days';
-const PLANNER_TOOLBAR_LABEL = 'Open the Planner';
-function plannerToolbarMountPoint(root) {
-  const q = (el, sel) => (el && typeof el.querySelector === 'function') ? el.querySelector(sel) : null;
-  const bar = q(root, PLANNER_TOOLBAR_HOST);
-  if (!bar) return null;
-  return { parent: bar, existing: q(bar, '.' + PLANNER_TOOLBAR_CLASS) };
-}
+// THE RIBBON ICON (0.18.1). The board's entry point is Obsidian's own
+// ribbon on the left (Tom, 2026-11-23), where a member can reorder or hide it
+// in Settings, Appearance, Ribbon menu. From 0.9.2 to 0.18.0 a second button
+// sat in the file explorer's toolbar under the sidebar logo; that row now
+// holds only Obsidian's own controls. The Open weekly planner command is the
+// other route to the same board.
+const PLANNER_RIBBON_ICON = 'calendar-days';
+const PLANNER_RIBBON_LABEL = 'Open the Planner';
 
 /* ========================================================================== *
  * Item store - synced tasks live as markdown notes under <planner folder>/<Source>/.
@@ -6990,15 +6969,12 @@ class IcorPlannerPlugin extends Plugin {
     // board instead of unfolding the folder, so the one folder in the vault
     // that did not open like a folder was this one, and its notes could
     // only be reached by hand. That hook is gone: the planner folder
-    // expands and collapses like every other folder. The board opens from a
-    // button on the file-tree toolbar under the sidebar logo (mounted from
-    // onLayoutReady below) and from the left ribbon here. `calendar-days`
-    // rather than `layout-grid`: the board is a week, and the days glyph
-    // says so, while the grid glyph would sit beside the Connect plugin's
-    // `layout-dashboard` canvas button and read as a second canvas.
+    // expands and collapses like every other folder. The board opens from
+    // the ribbon on the left here and from the Open weekly planner command.
+    // `calendar-days` rather than `layout-grid`: the board is a week, and
+    // the days glyph says so, while the grid glyph reads as a canvas.
     // Registered once; Obsidian removes it on unload.
-    this.addRibbonIcon(PLANNER_TOOLBAR_ICON, PLANNER_TOOLBAR_LABEL, () => this.openBoard());
-    this.registerEvent(this.app.workspace.on('layout-change', () => this.mountPlannerToolbarButton()));
+    this.addRibbonIcon(PLANNER_RIBBON_ICON, PLANNER_RIBBON_LABEL, () => this.openBoard());
 
     this.app.workspace.onLayoutReady(() => {
       // A renamed folder is found before anything reads or writes a path,
@@ -7006,7 +6982,6 @@ class IcorPlannerPlugin extends Plugin {
       this.adoptPlannerFolder();
       this.adoptHabitsImportFolder();
       this.ensureGitignore();
-      this.mountPlannerToolbarButton();
       // Instant calendar: rehydrate the last healthy fetch from the vault
       // cache (rendered pale + pulsing) before the live fetch replaces it.
       this.loadCalendarCache();
@@ -7199,7 +7174,6 @@ class IcorPlannerPlugin extends Plugin {
   onunload() {
     setDisplayFormatSource(null);
     this.removeNextBadge();
-    this.removePlannerToolbarButton();
     if (this._cacheWriteTimer) { window.clearTimeout(this._cacheWriteTimer); this._cacheWriteTimer = null; }
     if (this._pushTimers) {
       for (const t of this._pushTimers.values()) window.clearTimeout(t);
@@ -7354,39 +7328,6 @@ class IcorPlannerPlugin extends Plugin {
       .concat(icsEventsForWeek(this.calendarDefs, addDays(w0, 7), split));
   }
 
-  // The toolbar button under the sidebar logo. Mounted where
-  // plannerToolbarMountPoint says, from onLayoutReady, on layout-change and
-  // from the strip's left-split observer. Idempotent: a button this
-  // instance already put there is left alone; one left by an earlier
-  // instance (an in-place upgrade) is replaced, because it keeps its old
-  // click handler forever.
-  mountPlannerToolbarButton() {
-    const at = plannerToolbarMountPoint(document);
-    if (!at) return;
-    if (at.existing) {
-      if (at.existing === this._toolbarEl) return;
-      at.existing.remove();
-    }
-    const btn = document.createElement('div');
-    btn.className = `clickable-icon nav-action-button ${PLANNER_TOOLBAR_CLASS}`;
-    btn.setAttribute('aria-label', PLANNER_TOOLBAR_LABEL);
-    btn.setAttribute('role', 'button');
-    btn.tabIndex = 0;
-    setIcon(btn, PLANNER_TOOLBAR_ICON);
-    btn.addEventListener('click', () => this.openBoard());
-    btn.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return;
-      e.preventDefault();
-      this.openBoard();
-    });
-    this._toolbarEl = btn;
-    at.parent.appendChild(btn);
-  }
-
-  removePlannerToolbarButton() {
-    if (this._toolbarEl) { this._toolbarEl.remove(); this._toolbarEl = null; }
-  }
-
   // Build the strip once and mount it where nextStripMountPoint says. The
   // 0.5.0 badge hung off the ribbon's action stack, which the theme hides
   // and which was too narrow to read; the strip spans the sidebar column
@@ -7472,7 +7413,6 @@ class IcorPlannerPlugin extends Plugin {
       window.requestAnimationFrame(() => {
         this._badgeMountQueued = false;
         this.mountNextStrip();
-        this.mountPlannerToolbarButton();
       });
     });
     this._badgeObserver.observe(host, { childList: true, subtree: true });
@@ -12450,7 +12390,7 @@ module.exports.__test = {
   buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
   detectConferenceUrl, nextBadgeModel, fmtNextCountdown, routineTimedEntries, nextStripMountPoint,
   NEXT_URGENT_MS, NEXT_SECONDS_MS, NEXT_STRIP_LOGO_HOST, NEXT_STRIP_SPLIT_HOST,
-  plannerToolbarMountPoint, PLANNER_TOOLBAR_HOST, PLANNER_TOOLBAR_CLASS, PLANNER_TOOLBAR_ICON, PLANNER_TOOLBAR_LABEL,
+  PLANNER_RIBBON_ICON, PLANNER_RIBBON_LABEL,
   CONFERENCE_URL_PATTERNS,
   plannerPaths, normalizePlannerFolder, detectPlannerFolder, followHabitsImportFolder, plannerFolderChangePlan, gitignoreLineFor, collectItems,
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
