@@ -230,7 +230,7 @@ function sourceConfigured(settings, source) {
 
 // The env file the secrets can live in instead of Obsidian's keychain
 // (0.12.0): vault-relative. Since 0.17.0 the default is the vault's own
-// system folder, the one file ICOR for Life - Connect and AI Chat read too.
+// system folder, the one file ICOR Connect and AI Chat read too.
 // Obsidian does not index a folder whose name starts with a dot, so this
 // file is reached through the vault adapter only, never the Vault API.
 const DEFAULT_ENV_FILE_PATH = '.icor-for-life/.env';
@@ -7241,7 +7241,7 @@ class IcorPlannerPlugin extends Plugin {
       const line = gitignoreLineFor(this.manifest);
       const wanted = line ? [line] : [];
       // The env file too, while it is the backend in use (0.17.0, the way
-      // ICOR for Life - Connect has always guarded it): the file in use,
+      // ICOR Connect has always guarded it): the file in use,
       // and the configured one it will be once moved.
       if (this.settings && this.settings.secretsBackend === 'env-file' && this.envStore) {
         for (const p of [this.envStore.path, this.envStore.active]) if (p && !wanted.includes(p)) wanted.push(p);
