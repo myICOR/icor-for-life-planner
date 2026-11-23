@@ -1,4 +1,4 @@
-# ICOR for Life - Planner
+# ICOR Planner
 
 **Plan your week once, in one place.**
 
