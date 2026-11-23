@@ -1831,6 +1831,10 @@ function threeWayMerge(sourceVals, localVals, shadow, pushEnabled) {
   const pushes = {};
   const finals = {};
   const nextShadow = {};
+  // The member's own words that the source is about to replace. The source
+  // still wins the note (it is a mirror), but a description the member
+  // changed is never dropped: the caller keeps it in a note beside the task.
+  const kept = {};
   for (const f of TWO_WAY_FIELDS) {
     const src = sourceVals[f] == null || sourceVals[f] === '' ? (f === 'priority' ? 5 : null) : sourceVals[f];
     const loc = localVals[f] == null || localVals[f] === '' ? (f === 'priority' ? 5 : null) : localVals[f];
@@ -1848,11 +1852,36 @@ function threeWayMerge(sourceVals, localVals, shadow, pushEnabled) {
       pushes[f] = loc; finals[f] = loc; nextShadow[f] = loc;
     } else if (srcChanged) {
       finals[f] = src; nextShadow[f] = src;      // source wins (incl. conflicts)
+      if (f === 'description' && locChanged && loc && loc !== src) kept[f] = loc;
     } else {
       finals[f] = loc; nextShadow[f] = base;      // unchanged, or local kept unpushed
     }
   }
-  return { pushes, finals, nextShadow };
+  return { pushes, finals, nextShadow, kept };
+}
+
+/* The note a member's replaced words go to: beside the task, named after it
+ * and the day, never overwriting another file. type planner-kept, so
+ * collectItems (planner-item only) never treats it as a task. Pure. */
+function keptNoteName(basename, dayIso, taken) {
+  const stem = `${basename} (your words, ${dayIso})`;
+  let name = `${stem}.md`;
+  for (let i = 2; taken(name); i++) name = `${stem} ${i}.md`;
+  return name;
+}
+
+function keptNoteText(fromBasename, keptAtIso, words) {
+  const safe = String(fromBasename).replace(/"/g, "'");
+  return [
+    '---',
+    'type: planner-kept',
+    `kept_from: "[[${safe}]]"`,
+    `kept_at: ${keptAtIso}`,
+    '---',
+    '',
+    String(words).trim(),
+    '',
+  ].join('\n');
 }
 
 /* ========================================================================== *
@@ -7698,7 +7727,12 @@ class IcorPlannerPlugin extends Plugin {
       const sourceVals = { title: t.title, due: t.due || null, priority: t.priority, description: (t.description || '').trim() };
       const localVals = { title: prior.title, due: prior.due, priority: prior.priority, description: body };
       const pushEnabled = !!s.pushEdits && canPushToSource(source);
-      const { pushes, finals, nextShadow } = threeWayMerge(sourceVals, localVals, shadow, pushEnabled);
+      const { pushes, finals, nextShadow, kept } = threeWayMerge(sourceVals, localVals, shadow, pushEnabled);
+      if (kept && kept.description) {
+        // Not kept, not overwritten: the item waits for the next sync.
+        try { await this.keepMemberWords(prior.file, kept.description, source); }
+        catch (e) { new Notice(`Planner: ${e.message}`); continue; }
+      }
       // A write that answers "no such task" is the source telling us the
       // mirror is stale. Trash the note and move on: there is nothing to
       // retry and nothing to merge.
@@ -8059,6 +8093,25 @@ class IcorPlannerPlugin extends Plugin {
   // and must reach the source at once.
   // Takes the TFile wherever the caller has one (no lookup, and it works for
   // a file the index has not published yet), a path otherwise.
+  /* The source changed a task's description while the member had written in
+   * its note. The note follows the source (it is a mirror); the member's
+   * words go to a note beside it first, and a notice says where. */
+  async keepMemberWords(file, words, source) {
+    try {
+      const slash = file.path.lastIndexOf('/');
+      const dir = slash >= 0 ? file.path.slice(0, slash) : '';
+      const day = new Date().toISOString().slice(0, 10);
+      const taken = (name) => !!this.app.vault.getAbstractFileByPath(normalizePath(dir ? `${dir}/${name}` : name));
+      const name = keptNoteName(file.basename, day, taken);
+      const path = normalizePath(dir ? `${dir}/${name}` : name);
+      await this.app.vault.create(path, keptNoteText(file.basename, new Date().toISOString(), words));
+      new Notice(`Planner: "${file.basename}" changed in ${SOURCES[source] ? SOURCES[source].label : source} while you were writing in it. Your words are kept in "${name.replace(/\.md$/, '')}".`);
+    } catch (e) {
+      /* If the copy cannot be written, the note is not overwritten either. */
+      throw new Error(`could not keep your words from "${file.basename}" (${e.message}); the note was left as it is`);
+    }
+  }
+
   markSyncWrite(fileOrPath) {
     if (!fileOrPath || !this._syncWrites) return;
     const file = typeof fileOrPath === 'string' ? this.app.vault.getAbstractFileByPath(fileOrPath) : fileOrPath;
@@ -12393,7 +12446,7 @@ module.exports.__test = {
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
   WINDOWS_TZ_TO_IANA, normalizeTzid, isIanaZone, resolveTzid, tzidUtcPrefixOffset,
   icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult, truncatedWarning,
-  threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS, pushableTitle,
+  threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS, pushableTitle, keptNoteName, keptNoteText,
   goneError, isGoneError, goneProbeBatch, absenceVerdict, canProbeGone, goneNotice, doneSweepBatch,
   GONE_PROBE_MAX_PER_SYNC, todoistProbeGone, clickupProbeGone,
   htmlishToText, segmentInfo, fmtLeft, fmtDayTitle, fmtDayLabel,
