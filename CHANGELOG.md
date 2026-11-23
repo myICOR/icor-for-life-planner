@@ -6,6 +6,16 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.18.1] - 2026-11-23
+
+### Changed
+- **The Planner opens from the ribbon on the left.** The button under the
+  sidebar logo is gone (Tom, 2026-11-23: every plugin's launcher moves to
+  Obsidian's own ribbon). The calendar icon in the ribbon opens the board, as
+  does **Open weekly planner** in the command palette. Like any ribbon icon,
+  you can move or hide it in Settings, Appearance, Ribbon menu. The strip with
+  your next event above the logo is unchanged.
+
 ## [0.18.0] - 2026-11-23
 
 ICOR for Life 3.0 moves the planner from `02 Planner` to `06 Planner`, and

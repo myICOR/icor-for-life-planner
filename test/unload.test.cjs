@@ -34,7 +34,6 @@ function loaded() {
   p._shadowSaveTimer = 13;
   p._cacheWriteTimer = 14;
   p.removeNextBadge = () => { };
-  p.removePlannerToolbarButton = () => { };
   p.persistSettings = () => { p.persisted = (p.persisted || 0) + 1; return Promise.resolve(); };
   const restore = () => { if (hadWindow) globalThis.window = real; else delete globalThis.window; };
   return { p, cleared, restore };
