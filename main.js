@@ -1058,8 +1058,14 @@ const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
  * boot adopts a renamed folder when it is the only candidate.
  * ========================================================================== */
 
+// Obsidian's settings folder, read from vault.configDir at load: a member can
+// rename it, so it is never written down here (the directory's review flags a
+// hard-coded one). The gates set it through useConfigDir.
+let configDirName = null;
+function useConfigDir(dir) { configDirName = dir ? String(dir).replace(/\\/g, '/').replace(/\/+$/, '') : null; }
+
 // Validates a typed folder. Pure. Trims, strips surrounding slashes,
-// collapses repeated ones; refuses empty, anything under .obsidian, and any
+// collapses repeated ones; refuses empty, anything under the settings folder, and any
 // '.' or '..' segment. Returns { ok, folder, error }. `what` names the
 // folder in the sentence (the planner folder, the habits folder).
 function normalizeVaultFolder(raw, what) {
@@ -1068,7 +1074,10 @@ function normalizeVaultFolder(raw, what) {
   f = f.replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
   f = normalizePath(f);
   if (!f) return { ok: false, folder: null, error: `The ${label} folder cannot be empty.` };
-  if (/^\.obsidian(\/|$)/i.test(f)) return { ok: false, folder: null, error: `The ${label} folder cannot live inside .obsidian.` };
+  if (configDirName) {
+    const lower = f.toLowerCase(), cfg = configDirName.toLowerCase();
+    if (lower === cfg || lower.startsWith(cfg + '/')) return { ok: false, folder: null, error: `The ${label} folder cannot live inside ${configDirName}.` };
+  }
   if (f.split('/').some((seg) => seg === '.' || seg === '..')) return { ok: false, folder: null, error: `The ${label} folder cannot contain "." or ".." segments.` };
   return { ok: true, folder: f, error: null };
 }
@@ -1162,7 +1171,7 @@ function plannerFolderChangePlan({ current, next, currentExists, nextExists }) {
 // (Obsidian sets manifest.dir to the plugin folder; the id is the fallback).
 function gitignoreLineFor(manifest) {
   const m = manifest || {};
-  const dir = String(m.dir || (m.id ? `.obsidian/plugins/${m.id}` : '')).replace(/\\/g, '/').replace(/\/+$/, '');
+  const dir = String(m.dir || (m.id && configDirName ? `${configDirName}/plugins/${m.id}` : '')).replace(/\\/g, '/').replace(/\/+$/, '');
   return dir ? `${dir}/` : null;
 }
 
@@ -6894,6 +6903,7 @@ function weekPriorityProgress(week) {
 
 class IcorPlannerPlugin extends Plugin {
   async onload() {
+    useConfigDir(this.app.vault.configDir);
     // The secret store, when this Obsidian has one (feature-detected; see
     // the secret vault section). Then the settings from disk through
     // adoptSettings: the calendar migration, the secret migration (each
@@ -12483,7 +12493,7 @@ module.exports.__test = {
   subtaskRowMeta, cardChips, isDone, fmtDayNum,
   HABIT_TYPE, HABIT_LOG_SENTINEL, HABIT_LOG_SECTION, HABIT_CADENCES, HABIT_CADENCE_NAMES, HABIT_STATUSES,
   HABIT_MONTH_DAY_MAX, HABIT_SCHEDULE_FIELDS, HABIT_IMPORT_REMOVED_FIELDS, BOARD_ONLY_TABS,
-  normalizeVaultFolder, normalizeHabitsFolder, habitsImportFolderOf, importPathInside, habitPathInside, migrateHabitSettings,
+  useConfigDir, normalizeVaultFolder, normalizeHabitsFolder, habitsImportFolderOf, importPathInside, habitPathInside, migrateHabitSettings,
   normalizeCadence, habitStatusOf, monthDayOf, isPlannerHabitFrontmatter, isHabitFrontmatter, habitBasenameOk,
   basenameOf, wikilinkBasename, wikilinkTarget, wikilinkOf, qualifyLinkTarget, linkedFileOf, habitFromFrontmatter,
   daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,

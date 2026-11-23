@@ -6,6 +6,18 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.18.1] - 2026-11-23
+
+Ready for the Obsidian community directory's review.
+
+### Fixed
+- **Keys always stay in Obsidian's keychain, and your words in a task note
+  are kept** (the 0.17.0 fixes below, now in this line too). The planner
+  needs Obsidian 1.11.4, the first with Obsidian's own keychain.
+- **A renamed settings folder is respected.** The planner used to assume
+  Obsidian's settings live in `.obsidian`; it now reads the folder from
+  Obsidian, for the folder check and for the `.gitignore` line.
+
 ## [0.18.0] - 2026-11-23
 
 ICOR for Life 3.0 moves the planner from `02 Planner` to `06 Planner`, and
