@@ -167,6 +167,76 @@ test('a failing feed keeps its previous defs while the healthy feed refreshes', 
   }, dup).warning, /1 event appears in more than one feed; shown once\./);
 });
 
+test('mergeCalendarFeeds carries a cache-only feed through a LIVE sync of a different, settings-registered feed', () => {
+  // calendarDefsByFeed starts with a settings feed (cal-work) AND a
+  // cache-only feed (jeffjr@x - our Google sync script's write, adopted
+  // with no settings.calendars row, same shape adoptCacheDefs produces:
+  // tagCalendarDefs with a synthesized feed carrying its own `source`). A
+  // live sync's results name cal-work only (the only settings row) -
+  // calendarFetchAll can never enumerate a cache-only feed, so results
+  // never mentions jeffjr@x either way.
+  const GOOGLE_FEED = { id: 'jeffjr@x', name: 'Jeff', color: 2, source: 'google-calendar' };
+  const prev = {
+    'cal-work': feedDefs(WORK, vevent('w-old@x', 'Old standup', '20260907')),
+    'jeffjr@x': T.tagCalendarDefs(T.parseIcs(ics(vevent('g1@x', 'Shop meeting', '20260930'))), GOOGLE_FEED),
+  };
+  const results = { 'cal-work': T.okResult('calendar', feedDefs(WORK, vevent('w-new@x', 'New standup', '20260907'))) };
+  // Before this fix mergeCalendarFeeds took two arguments and read
+  // Object.keys(results) alone: jeffjr@x, absent from results because it
+  // was never a settings row to be fetched under, dropped out exactly like
+  // a feed the member removed - worse than the original display bug,
+  // because it fires on every real live sync.
+  const merged = T.mergeCalendarFeeds(prev, results, new Set(['jeffjr@x']));
+  assert.deepEqual(merged.byFeed['cal-work'].map((d) => d.uid), ['w-new@x'], 'the settings feed still refreshes normally');
+  assert.deepEqual(merged.byFeed['jeffjr@x'].map((d) => d.uid), ['g1@x'], 'the cache-only feed is carried forward, unfetched, never dropped');
+  assert.deepEqual(merged.carried, ['jeffjr@x']);
+  assert.deepEqual(merged.defs.map((d) => d.uid).sort(), ['g1@x', 'w-new@x']);
+  // A cache-only id the sync ACTUALLY has a settings row for now (the
+  // member added it under Settings) is fetched normally, never carried
+  // twice or duplicated.
+  const promoted = T.mergeCalendarFeeds(prev, {
+    'cal-work': results['cal-work'],
+    'jeffjr@x': T.okResult('calendar', T.tagCalendarDefs(T.parseIcs(ics(vevent('g2@x', 'Real settings row now', '20260930'))), Object.assign({}, GOOGLE_FEED, { source: undefined }))),
+  }, new Set(['jeffjr@x']));
+  assert.deepEqual(promoted.byFeed['jeffjr@x'].map((d) => d.uid), ['g2@x'], 'once it has a real settings row, the live result wins, not the carried-forward one');
+  assert.deepEqual(promoted.carried, []);
+  // A cache-only id with nothing actually held (pruned elsewhere, or never
+  // adopted) is not conjured back into existence.
+  assert.deepEqual(T.mergeCalendarFeeds({}, results, new Set(['jeffjr@x'])).carried, []);
+});
+
+test('a live sync writes the cache-only feed back to disk under ITS OWN source, so reloading the cache never re-drops it ("the write" half of the same bug)', async () => {
+  // The same shape a live "Sync now" actually produces end to end:
+  // calendarFetchDefs, not a hand-assembled merge result.
+  const GOOGLE_FEED = { id: 'jeffjr@x', name: 'Jeff', color: 2, source: 'google-calendar' };
+  const prevByFeed = {
+    'jeffjr@x': T.tagCalendarDefs(T.parseIcs(ics(vevent('g1@x', 'Shop meeting', '20260930'))), GOOGLE_FEED),
+  };
+  const cal = await T.calendarFetchDefs({ calendars: [WORK] }, prevByFeed, {}, new Set(['jeffjr@x']));
+  assert.equal(cal.ok, true, 'the one settings feed synced live and healthy');
+  assert.ok(Array.isArray(cal.byFeed['jeffjr@x']) && cal.byFeed['jeffjr@x'].length === 1, 'calendarDefsByFeed keeps the cache-only feed after this live sync');
+  assert.ok(cal.items.some((d) => d.uid === 'g1@x'), 'the merged defs the board renders still carry the Google event');
+  // What actually gets written to the ONE cache file this sync would
+  // schedule (writeCalendarCache -> buildCalendarCacheContent(this.calendarDefs, ...)):
+  const now = new Date(2026, 8, 30, 9, 0);
+  const content = T.buildCalendarCacheContent(cal.items, now, '02 Planner', {});
+  assert.match(content, /^source: ics$/m, 'the file-level line still says this plugin wrote the file');
+  const parsed = T.parseCalendarCache(content);
+  const googleFeedOut = parsed.feeds.find((f) => f.id === 'jeffjr@x');
+  assert.ok(googleFeedOut, 'the Google feed entry survived being written back by the plugin');
+  const googleDefOut = parsed.defs.find((d) => d.uid === 'g1@x');
+  assert.ok(googleDefOut, 'the Google event itself survived the write - not silently deleted from disk');
+  assert.equal(googleDefOut.feedSource, 'google-calendar', 'and its OWN source rides inside the per-feed json entry, not just the file-level line');
+  // The part that was actually irreversible before this fix: RELOADING that
+  // written file (the next plugin launch, loadCalendarCache) with NO
+  // settings row for jeffjr@x must still adopt it as foreign and keep it -
+  // not read the file-level `source: ics` and conclude it is this plugin's
+  // own untracked feed, which is exactly what a hardcoded `source: ics`
+  // caused: the events would vanish again on the very next load.
+  const reloaded = T.adoptCacheDefs(parsed.defs, [WORK], parsed.source);
+  assert.deepEqual(reloaded.filter((d) => d.feedId === 'jeffjr@x').map((d) => d.uid), ['g1@x'], 'the Google feed survives a reload of the file THIS plugin itself just wrote');
+});
+
 test('the status row says what one feed is doing', () => {
   assert.equal(T.calendarFeedStatusText({ url: '' }, null), 'Paste the iCal address to connect this calendar.');
   assert.equal(T.calendarFeedStatusText(Object.assign({}, WORK, { enabled: false }), null), 'Off: its events are hidden until it is switched on.');
@@ -207,15 +277,89 @@ test('the cache round-trips per feed and still reads a v1 array', () => {
   assert.deepEqual(T.parseCalendarCacheContent(v1).map((d) => d.uid), ['w1@x']);
   // Adopting the cache onto the settings: v1 defs join the first enabled
   // feed; a feed that is gone is dropped; names and colours follow settings.
+  // adoptCacheDefs tags its input defs in place (tagCalendarDefs), so the
+  // "no feed, nowhere to belong" case below re-parses a fresh, still-
+  // untagged copy rather than reusing `legacy.defs` after this line has
+  // already stamped it with cal-home's identity.
   const adopted = T.adoptCacheDefs(legacy.defs, [HOME]);
   assert.deepEqual(adopted.map((d) => [d.feedId, d.feedName, d.feedColor]), [['cal-home', 'Home', 3]]);
-  assert.deepEqual(T.adoptCacheDefs(legacy.defs, []), [], 'no feed, nowhere to belong');
+  assert.deepEqual(T.adoptCacheDefs(T.parseCalendarCache(v1).defs, []), [], 'no feed, nowhere to belong');
   const renamed = T.adoptCacheDefs(parsed.defs, [Object.assign({}, WORK, { name: 'Office', color: 4 })]);
   assert.deepEqual(renamed.map((d) => [d.uid, d.feedName, d.feedColor]), [['w1@x', 'Office', 4]], 'the settings, not the cache, name and colour a feed');
   // Malformed shapes are ignored, never thrown.
   assert.equal(T.parseCalendarCache('no block here'), null);
   assert.equal(T.parseCalendarCache('```json\n{"version":2}\n```'), null);
   assert.equal(T.parseCalendarCache('```json\nnot json\n```'), null);
+});
+
+test('THE ASK: a cache-declared feed with no settings.calendars row still renders, read-only, through the board pipeline', () => {
+  // Shaped like the sync-google-calendar.py script's own write: `source:
+  // google-calendar` in the frontmatter, a feed id that is a real calendar
+  // address (never a settings cal-N id), no settings row for it anywhere.
+  const foreignContent = [
+    '---', 'type: calendar-cache', 'source: google-calendar', 'updated_at: 2026-09-29T18:00:00Z',
+    'events: 1', 'feeds: 1', '---', '', '# Calendar Events', '',
+    '```json',
+    JSON.stringify({
+      version: 1,
+      updated_at: '2026-09-29T18:00:00Z',
+      feeds: [{
+        id: 'jeffjr@jandsautomotive.com', name: 'Jeff', color: 2, updated_at: '2026-09-29T18:00:00Z',
+        defs: T.serializeCalendarDefs(feedDefs({ id: 'jeffjr@jandsautomotive.com', name: 'Jeff', color: 2 }, vevent('g1@x', 'Shop meeting', '20260930'))),
+      }],
+    }),
+    '```', '',
+  ].join('\n');
+  const parsed = T.parseCalendarCache(foreignContent);
+  assert.equal(parsed.source, 'google-calendar');
+  assert.equal(parsed.defs.length, 1);
+  // No settings feeds at all (Jeff never added anything under Settings):
+  // adoptCacheDefs keeps the def under its own cache-declared identity.
+  const adopted = T.adoptCacheDefs(parsed.defs, [], parsed.source);
+  assert.deepEqual(adopted.map((d) => [d.feedId, d.feedName, d.feedColor]), [['jeffjr@jandsautomotive.com', 'Jeff', 2]]);
+  // The board's own expansion renders it exactly like a settings feed's def.
+  const events = T.icsEventsForWeek(adopted, '2026-09-28', 13);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].feedName, 'Jeff');
+  // A settings feed with a DIFFERENT id still wins for its own def; only the
+  // unmatched one falls back to its own identity.
+  const mixed = T.adoptCacheDefs(parsed.defs.concat(feedDefs(WORK, vevent('w1@x', 'Standup', '20260930'))), [WORK], 'google-calendar');
+  assert.deepEqual(mixed.map((d) => d.feedId).sort(), ['cal-work', 'jeffjr@jandsautomotive.com']);
+  // Contrast: for THIS plugin's OWN cache (source: ics, what buildCalendarCacheContent
+  // always writes) the same shape is dropped when it has no settings row —
+  // that is a feed the member removed on purpose, and settings stays the
+  // one authority over its own cache.
+  const ownContent = T.buildCalendarCacheContent(feedDefs({ id: 'jeffjr@jandsautomotive.com', name: 'Jeff', color: 2 }, vevent('g1@x', 'Shop meeting', '20260930')), new Date(2026, 8, 29, 9, 0), '02 Planner');
+  const ownParsed = T.parseCalendarCache(ownContent);
+  assert.equal(ownParsed.source, 'ics');
+  assert.deepEqual(T.adoptCacheDefs(ownParsed.defs, [], ownParsed.source), [], 'this plugin\'s own cache still treats settings as the one authority');
+});
+
+test('a cache-only feed id can never be polled by calendarFetchAll: the job list comes only from settings.calendars, never from a cache or calendarDefsByFeed', () => {
+  // calendarFetchAll takes settings and nothing else; a def carrying a
+  // feedId with no settings.calendars entry has no connector, no kind and
+  // no url to be fetched with, so it cannot appear as a job however many
+  // events it contributes to calendarDefsByFeed via the cache.
+  const c = code();
+  assert.match(c, /async function calendarFetchAll\(settings, deps\) \{/, 'calendarFetchAll takes settings only, no cache or byFeed argument');
+  assert.match(c, /for \(const feed of c\.feeds\(settings\)\)/, 'every job comes from a connector reading settings, never the cache');
+  assert.ok(!/calendarFetchAll\([^)]*calendarDefsByFeed/.test(c), 'calendarFetchAll is never called with the cache-derived per-feed map');
+});
+
+test('activeCalendarFeedIds never crashes on an id with no settings row and no cache entry (settings-tab toggling an unknown feed)', () => {
+  assert.equal(typeof T.activeCalendarFeedIds, 'function');
+  // A settings-backed id and a cache-only id (its defs still held) both render.
+  assert.deepEqual(
+    T.activeCalendarFeedIds(['cal-work'], { 'cal-work': [{ uid: 'w' }], 'jeffjr@x': [{ uid: 'g' }] }, new Set(['jeffjr@x'])),
+    ['cal-work', 'jeffjr@x'],
+  );
+  // An id in the cache-only set whose defs were already pruned elsewhere is
+  // simply left out, not thrown on.
+  assert.deepEqual(T.activeCalendarFeedIds(['cal-work'], { 'cal-work': [{ uid: 'w' }] }, new Set(['gone-feed'])), ['cal-work']);
+  // Every input can be empty, undefined or missing without throwing.
+  assert.deepEqual(T.activeCalendarFeedIds([], {}, new Set()), []);
+  assert.deepEqual(T.activeCalendarFeedIds(undefined, undefined, undefined), []);
+  assert.deepEqual(T.activeCalendarFeedIds(['cal-work'], null, null), ['cal-work']);
 });
 
 test('the cache never contains a feed URL', () => {
@@ -272,8 +416,8 @@ test('the modal links to Google only for a Google-shaped address', () => {
 test('the sync fetches every feed on its own and never prunes on a blip', () => {
   const c = code();
   assert.match(c, /Promise\.allSettled\(jobs\.map/, 'feeds are fetched together, failures isolated');
-  assert.match(c, /calendarFetchDefs\(s, this\.calendarDefsByFeed, this\.connectorDeps\(\)\)/, 'the sync merges over the previous per-feed defs, and tells the fetch which weeks the board shows');
-  assert.match(c, /if \(cal\.reason === 'no-token'\) \{\s*\n\s*this\.calendarDefs = null;/, 'no feeds means nothing to show');
+  assert.match(c, /calendarFetchDefs\(s, this\.calendarDefsByFeed, this\.connectorDeps\(\), this\.calendarCacheOnlyIds\)/, 'the sync merges over the previous per-feed defs, telling it which held feeds were never its own to fetch');
+  assert.match(c, /if \(cal\.reason === 'no-token'\) \{\s*\n\s*this\.calendarDefsByFeed = cal\.byFeed \|\| \{\};\s*\n\s*this\.calendarDefs = \(cal\.items && cal\.items\.length\) \? cal\.items : null;/, 'no settings-declared feed means nothing of this plugin\'s own to show, but cal.byFeed/cal.items (already carrying any held cache-only feed through the merge) are read, never replaced with an unconditional wipe');
   assert.ok(!/settings\.icsUrl/.test(c.replace(/trimmed\(s\.icsUrl\)/, '')), 'icsUrl is read by the migration only');
   assert.match(c, /calendars: \[\]/, 'the default settings declare the list');
 });
