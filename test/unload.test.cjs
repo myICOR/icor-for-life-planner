@@ -29,8 +29,8 @@ function loaded() {
     clearInterval: (id) => { cleared.push(id); },
   };
   const p = Object.create(PluginClass.prototype);
-  p.settings = { plannerFolder: '02 Planner' };
-  p._pushTimers = new Map([['02 Planner/A.md', 11], ['02 Planner/B.md', 12]]);
+  p.settings = { plannerFolder: '06 Planner' };
+  p._pushTimers = new Map([['06 Planner/A.md', 11], ['06 Planner/B.md', 12]]);
   p._shadowSaveTimer = 13;
   p._cacheWriteTimer = 14;
   p.removeNextBadge = () => { };

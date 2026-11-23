@@ -6,11 +6,29 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.18.0] - 2026-11-23
+
+ICOR for Life 3.0 moves the planner from `02 Planner` to `06 Planner`, and
+Inner World from `04 Inner World` to `02 Inner World`. The planner follows.
+
+### Changed
+- **The planner folder is `06 Planner` by default.** If your settings still
+  say `02 Planner` and your vault still has that folder, the planner keeps
+  using it. Once the vault has `06 Planner` instead, the planner moves to it
+  on start and saves the setting. A folder you chose yourself is left as it
+  is, and `06 AI Team`, a 2.x folder with the same number, is never taken for
+  the planner.
+- **The My Life Habits folder the import reads is
+  `02 Inner World/My Life/Habits` by default.** The 2.x default stays while
+  your vault still has `04 Inner World`, and follows once the vault has
+  `02 Inner World`.
+- The README names the new folders.
+
 ## [0.17.0] - 2026-11-20
 
 ### Changed
 - **The env file's default place is `.icor-for-life/.env`.** The ICOR for Life
-  vault no longer has the `06 AI Team` room, so the keys file moved to the
+  vault no longer has the `06 AI Team` folder, so the keys file moved to the
   vault's hidden system folder, the same file ICOR for Life - Connect and AI
   Chat read. Obsidian does not index a folder whose name starts with a dot, so
   the planner reads and writes it through the vault adapter only, as before.

@@ -35,7 +35,7 @@ const { TFile, TFolder } = T.__obsidian;
 const code = () => fs.readFileSync(T.__mainPath, 'utf8');
 const bare = () => code().split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
-const ROOT = '02 Planner';
+const ROOT = '06 Planner';
 // A real frontmatter block, because readBody strips one and an empty pair of
 // fences is not a block Obsidian ever writes.
 const HEAD = '---\ntype: planner-item\n---\n';

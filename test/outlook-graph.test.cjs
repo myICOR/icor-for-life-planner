@@ -339,7 +339,7 @@ test('the cache round trip keeps the expanded flag and the stated meeting link; 
   assert.equal('expanded' in T.serializeCalendarDefs(ics)[0], false);
   assert.equal('expanded' in T.reviveCalendarDefs(T.serializeCalendarDefs(ics))[0], false);
   // The cache note names the feed, never a token, and reads back tagged.
-  const content = T.buildCalendarCacheContent([def], new Date(2026, 8, 4, 9, 0), '02 Planner');
+  const content = T.buildCalendarCacheContent([def], new Date(2026, 8, 4, 9, 0), '06 Planner');
   for (const needle of ['at-1', 'rt-1', 'Bearer', CLIENT]) assert.ok(!content.includes(needle), `the cache carries: ${needle}`);
   assert.match(content, /- \d\d:\d\d-\d\d:\d\d Standup \[Outlook calendar\]/);
   assert.match(content, /conference: https:\/\/teams\.microsoft\.com/);

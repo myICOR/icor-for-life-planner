@@ -180,7 +180,7 @@ test('the cache round-trips per feed and still reads a v1 array', () => {
   const now = new Date(2026, 8, 4, 9, 0);
   const defs = feedDefs(WORK, vevent('w1@x', 'Standup', '20260907'))
     .concat(feedDefs(HOME, vevent('h1@x', 'Dentist', '20260908')));
-  const content = T.buildCalendarCacheContent(defs, now, '02 Planner', { 'cal-home': '2026-09-03T08:00:00.000Z' });
+  const content = T.buildCalendarCacheContent(defs, now, '06 Planner', { 'cal-home': '2026-09-03T08:00:00.000Z' });
   assert.match(content, /^source: ics$/m, 'no longer named after one provider');
   assert.match(content, /^feeds: 2$/m);
   assert.match(content, /^events: 2$/m);
@@ -221,7 +221,7 @@ test('the cache round-trips per feed and still reads a v1 array', () => {
 test('the cache never contains a feed URL', () => {
   const defs = feedDefs(WORK, vevent('w1@x', 'Standup', '20260907'))
     .concat(feedDefs(HOME, vevent('h1@x', 'Dentist', '20260908')));
-  const content = T.buildCalendarCacheContent(defs, new Date(2026, 8, 4, 9, 0), '02 Planner');
+  const content = T.buildCalendarCacheContent(defs, new Date(2026, 8, 4, 9, 0), '06 Planner');
   for (const needle of [GOOGLE, ICLOUD, 'private-0123456789abcdef', 'icloud.com', 'calendar.google.com', '"url":"http']) {
     assert.ok(!content.includes(needle), `the cache carries a feed address: ${needle}`);
   }

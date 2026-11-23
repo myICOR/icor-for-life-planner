@@ -1,13 +1,13 @@
 /* The planner folder is a setting, and every path derives from it.
  *
- * The reported case: the room was renamed, and the plugin kept looking for
+ * The reported case: the folder was renamed, and the plugin kept looking for
  * the literal it was born with. collectItems found nothing, the file-tree
  * click hook stopped firing, and the next sync recreated an empty default
  * folder beside the renamed one, all silently.
  *
  * Gated here: the default paths are byte-for-byte what earlier releases
  * wrote (an older data.json without the key behaves exactly as before); a
- * renamed room is adopted only when it is the only candidate; the folder
+ * renamed folder is adopted only when it is the only candidate; the folder
  * boundary is a boundary, not a prefix; the validation refuses what must
  * be refused; the .gitignore guard reads the manifest, never a literal.
  */
@@ -22,15 +22,15 @@ const code = () => fs.readFileSync(T.__mainPath, 'utf8')
 
 test('the default paths are exactly what earlier releases wrote', () => {
   assert.equal(typeof T.plannerPaths, 'function', 'plannerPaths must be a pure function');
-  assert.equal(T.DEFAULT_SETTINGS.plannerFolder, '02 Planner');
+  assert.equal(T.DEFAULT_SETTINGS.plannerFolder, '06 Planner');
   for (const settings of [T.DEFAULT_SETTINGS, {}, undefined, { plannerFolder: '' }, { plannerFolder: '.obsidian/x' }]) {
     const p = T.plannerPaths(settings);
-    assert.equal(p.root, '02 Planner', JSON.stringify(settings));
-    assert.equal(p.cache, '02 Planner/Calendar Events.md');
-    assert.equal(p.sourceFolder('todoist'), '02 Planner/Todoist');
-    assert.equal(p.sourceFolder('clickup'), '02 Planner/ClickUp');
-    assert.equal(p.sourceFolder('email'), '02 Planner/Email');
-    assert.equal(p.sourceFolder('manual'), '02 Planner/Manual');
+    assert.equal(p.root, '06 Planner', JSON.stringify(settings));
+    assert.equal(p.cache, '06 Planner/Calendar Events.md');
+    assert.equal(p.sourceFolder('todoist'), '06 Planner/Todoist');
+    assert.equal(p.sourceFolder('clickup'), '06 Planner/ClickUp');
+    assert.equal(p.sourceFolder('email'), '06 Planner/Email');
+    assert.equal(p.sourceFolder('manual'), '06 Planner/Manual');
     assert.equal(p.sourceFolder('calendar'), null, 'the calendar has no per-item folder');
     assert.equal(p.sourceFolder('nonsense'), null);
   }
@@ -40,35 +40,35 @@ test('the default paths are exactly what earlier releases wrote', () => {
   assert.equal(custom.sourceFolder('todoist'), 'Planner/Todoist');
 });
 
-test('a renamed room is adopted when it is the only candidate; two candidates ask; the configured one wins', () => {
+test('a renamed folder is adopted when it is the only candidate; two candidates ask; the configured one wins', () => {
   assert.equal(typeof T.detectPlannerFolder, 'function');
-  assert.deepEqual(T.detectPlannerFolder(['01 Inbox', 'Planner', '03 WiP'], '02 Planner'), { action: 'adopt', folder: 'Planner', candidates: ['Planner'] });
-  assert.equal(T.detectPlannerFolder(['2 Planner'], '02 Planner').folder, '2 Planner');
-  assert.equal(T.detectPlannerFolder(['MY PLANNER'], '02 Planner').action, 'adopt', 'case does not matter');
-  const ask = T.detectPlannerFolder(['2 Planner', 'My Planner'], '02 Planner');
+  assert.deepEqual(T.detectPlannerFolder(['01 Inbox', 'Planner', '03 Outer World'], '06 Planner'), { action: 'adopt', folder: 'Planner', candidates: ['Planner'] });
+  assert.equal(T.detectPlannerFolder(['2 Planner'], '06 Planner').folder, '2 Planner');
+  assert.equal(T.detectPlannerFolder(['MY PLANNER'], '06 Planner').action, 'adopt', 'case does not matter');
+  const ask = T.detectPlannerFolder(['2 Planner', 'My Planner'], '06 Planner');
   assert.equal(ask.action, 'ask');
-  assert.equal(ask.folder, '02 Planner', 'asking leaves the setting alone');
+  assert.equal(ask.folder, '06 Planner', 'asking leaves the setting alone');
   assert.deepEqual(ask.candidates, ['2 Planner', 'My Planner']);
-  assert.deepEqual(T.detectPlannerFolder(['02 Planner', 'Planner'], '02 Planner'), { action: 'keep', folder: '02 Planner', candidates: [] }, 'an existing configured folder is never second-guessed');
-  assert.equal(T.detectPlannerFolder([], '02 Planner').action, 'keep', 'a fresh vault keeps the default (ensureFolders creates it)');
-  assert.equal(T.detectPlannerFolder(['Planners', 'Planner notes', 'planner.md'], '02 Planner').action, 'keep', 'only a name ENDING in planner is a candidate');
-  assert.equal(T.detectPlannerFolder(null, '02 Planner').action, 'keep', 'a missing list never throws');
+  assert.deepEqual(T.detectPlannerFolder(['06 Planner', 'Planner'], '06 Planner'), { action: 'keep', folder: '06 Planner', candidates: [] }, 'an existing configured folder is never second-guessed');
+  assert.equal(T.detectPlannerFolder([], '06 Planner').action, 'keep', 'a fresh vault keeps the default (ensureFolders creates it)');
+  assert.equal(T.detectPlannerFolder(['Planners', 'Planner notes', 'planner.md'], '06 Planner').action, 'keep', 'only a name ENDING in planner is a candidate');
+  assert.equal(T.detectPlannerFolder(null, '06 Planner').action, 'keep', 'a missing list never throws');
 });
 
 test('isInside is a folder boundary, not a prefix', () => {
-  const p = T.plannerPaths({ plannerFolder: '02 Planner' });
-  assert.equal(p.isInside('02 Planner/Todoist/x.md'), true);
-  assert.equal(p.isInside('02 Planner/Calendar Events.md'), true);
-  assert.equal(p.isInside('02 Planner2/x.md'), false);
-  assert.equal(p.isInside('02 Planner'), false, 'the folder itself is not inside itself');
-  assert.equal(p.isInside('Other/02 Planner/x.md'), false);
+  const p = T.plannerPaths({ plannerFolder: '06 Planner' });
+  assert.equal(p.isInside('06 Planner/Todoist/x.md'), true);
+  assert.equal(p.isInside('06 Planner/Calendar Events.md'), true);
+  assert.equal(p.isInside('06 Planner2/x.md'), false);
+  assert.equal(p.isInside('06 Planner'), false, 'the folder itself is not inside itself');
+  assert.equal(p.isInside('Other/06 Planner/x.md'), false);
   assert.equal(p.isInside(null), false);
   assert.equal(p.isInside(undefined), false);
 });
 
 test('normalizePlannerFolder strips slashes and refuses .obsidian, empty and dot segments', () => {
   assert.equal(typeof T.normalizePlannerFolder, 'function');
-  assert.deepEqual(T.normalizePlannerFolder(' /02 Planner/ '), { ok: true, folder: '02 Planner', error: null });
+  assert.deepEqual(T.normalizePlannerFolder(' /06 Planner/ '), { ok: true, folder: '06 Planner', error: null });
   assert.equal(T.normalizePlannerFolder('Life//Planner').folder, 'Life/Planner');
   assert.equal(T.normalizePlannerFolder('Life\\Planner').folder, 'Life/Planner');
   for (const bad of ['', '   ', '/', null, undefined, '.obsidian', '.obsidian/plugins', '.OBSIDIAN/x', '../Planner', 'a/../b', './x']) {
@@ -83,14 +83,14 @@ test('normalizePlannerFolder strips slashes and refuses .obsidian, empty and dot
 test('the change plan moves, switches, refuses or does nothing, and says why', () => {
   assert.equal(typeof T.plannerFolderChangePlan, 'function');
   const plan = (current, next, currentExists, nextExists) => T.plannerFolderChangePlan({ current, next, currentExists, nextExists });
-  assert.equal(plan('02 Planner', '02 Planner', true, true).action, 'noop');
-  assert.equal(plan('02 Planner', 'Planner', true, false).action, 'move');
-  assert.match(plan('02 Planner', 'Planner', true, false).reason, /keeping links/);
-  assert.equal(plan('02 Planner', 'Planner', true, true).action, 'refuse');
-  assert.match(plan('02 Planner', 'Planner', true, true).reason, /Both .* exist/);
-  assert.equal(plan('02 Planner', 'Planner', false, true).action, 'switch');
-  assert.equal(plan('02 Planner', 'Planner', false, false).action, 'switch');
-  assert.match(plan('02 Planner', 'Planner', false, false).reason, /Creates/);
+  assert.equal(plan('06 Planner', '06 Planner', true, true).action, 'noop');
+  assert.equal(plan('06 Planner', 'Planner', true, false).action, 'move');
+  assert.match(plan('06 Planner', 'Planner', true, false).reason, /keeping links/);
+  assert.equal(plan('06 Planner', 'Planner', true, true).action, 'refuse');
+  assert.match(plan('06 Planner', 'Planner', true, true).reason, /Both .* exist/);
+  assert.equal(plan('06 Planner', 'Planner', false, true).action, 'switch');
+  assert.equal(plan('06 Planner', 'Planner', false, false).action, 'switch');
+  assert.match(plan('06 Planner', 'Planner', false, false).reason, /Creates/);
 });
 
 test('the .gitignore line is derived from the manifest, never a literal', () => {
@@ -119,7 +119,7 @@ test('the cache note names the planner folder, and still reads without it', () =
 
 test('the literal default appears exactly once in code, and no constant path survives', () => {
   const c = code();
-  assert.equal((c.match(/'02 Planner'/g) || []).length, 1, 'the default lives in DEFAULT_SETTINGS and nowhere else');
+  assert.equal((c.match(/'06 Planner'/g) || []).length, 1, 'the default lives in DEFAULT_SETTINGS and nowhere else');
   assert.doesNotMatch(c, /PLANNER_FOLDER\b/, 'the module constant is gone');
   assert.doesNotMatch(c, /CALENDAR_CACHE_FILE/, 'the cache path derives from the setting');
   assert.doesNotMatch(c, /startsWith\(PLANNER_FOLDER/, 'no prefix test against the constant');
@@ -129,7 +129,7 @@ test('the literal default appears exactly once in code, and no constant path sur
   // folder), so no code builds a selector from the folder path any more.
   assert.doesNotMatch(c, /data-path="\$\{this\.paths\(\)\.root\}"/, 'the retired file-tree click hook is back');
   assert.match(c, /this\.paths\(\)\.isInside\(/, 'the live-render guards ask the boundary helper');
-  assert.match(c, /this\.adoptPlannerFolder\(\);\n\s*this\.ensureGitignore\(\);/, 'adoption runs first on layout ready');
+  assert.match(c, /this\.adoptPlannerFolder\(\);\n\s*this\.adoptHabitsImportFolder\(\);\n\s*this\.ensureGitignore\(\);/, 'adoption runs first on layout ready');
   assert.match(c, /await this\.app\.fileManager\.renameFile\(fp\.current, fp\.folder\)/, 'the move is a link-safe rename');
   assert.match(c, /folderSetting\.descEl\.setAttribute\('aria-live', 'polite'\)/, 'the validation text is announced');
   // The folder is the third argument; later releases may pass more after it.

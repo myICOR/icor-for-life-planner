@@ -28,7 +28,7 @@ const PluginClass = require(T.__mainPath);
 const { TFile, TFolder } = T.__obsidian;
 const bare = () => fs.readFileSync(T.__mainPath, 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
-const ROOT = '02 Planner';
+const ROOT = '06 Planner';
 const FOLDER = `${ROOT}/ClickUp`;
 const HEAD = '---\ntype: planner-item\n---\n';
 const res = (status, json) => ({ status, json, text: JSON.stringify(json || {}), headers: {} });

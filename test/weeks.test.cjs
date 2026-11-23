@@ -104,7 +104,7 @@ test('a week a year does not have is null, never a silent roll into January', ()
 /* ---- reading the note --------------------------------------------------- */
 
 test('the note reads back as its two blocks', () => {
-  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, NOTE, '02 Planner/Weeks/2026-W38.md');
+  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, NOTE, '06 Planner/Weeks/2026-W38.md');
   assert.equal(week.week, '2026-W38');
   assert.equal(week.monday, '2026-09-14');
   assert.deepEqual(week.priorities.map((p) => [p.index, p.done, p.text]), [
@@ -125,13 +125,13 @@ test('any other note is not a week', () => {
   // No usable week anywhere: the field is malformed and so is the file name.
   assert.equal(T.weekFromNote({ type: 'planner-week', week: 'soon' }, NOTE, 'Weeks/later.md'), null);
   // A malformed field falls back to the file name, which IS the week.
-  const fallback = T.weekFromNote({ type: 'planner-week' }, NOTE, '02 Planner/Weeks/2026-W38.md');
+  const fallback = T.weekFromNote({ type: 'planner-week' }, NOTE, '06 Planner/Weeks/2026-W38.md');
   assert.equal(fallback.week, '2026-W38');
 });
 
 test('an empty week is an empty week', () => {
   const empty = T.weekTemplate('2026-W38', '2026-09-14T07:00:00Z');
-  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, empty, '02 Planner/Weeks/2026-W38.md');
+  const week = T.weekFromNote({ type: 'planner-week', week: '2026-W38' }, empty, '06 Planner/Weeks/2026-W38.md');
   assert.deepEqual(week.priorities, []);
   assert.deepEqual(week.highlights, []);
   assert.equal(T.weekPriorityProgress(week), 'No priorities yet.');
@@ -283,17 +283,17 @@ test('THE ASK: the week writes refuse a path outside the planner Weeks folder', 
   assert.match(ensure, /const existing = this\.weekFile\(iso\);\n {4}if \(existing\) return existing;/);
 });
 
-test('the room is created with the others, and the view is registered', () => {
+test('the folder is created with the others, and the view is registered', () => {
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   assert.match(main, /await mk\(p\.weeks\);/, 'ensureFolders creates Weeks/');
   assert.match(main, /this\.registerView\(WEEK_VIEW_TYPE/, 'the week view is registered');
   assert.match(main, /id: 'open-week'/, 'and reachable from the command palette');
   assert.equal(T.WEEK_VIEW_TYPE, 'icor-for-life-planner-week');
-  const p = T.plannerPaths({ plannerFolder: '02 Planner' });
-  assert.equal(p.weeks, '02 Planner/Weeks');
-  assert.equal(p.weekNote('2026-W38'), '02 Planner/Weeks/2026-W38.md');
-  assert.equal(p.isWeek('02 Planner/Weeks/2026-W38.md'), true);
-  assert.equal(p.isWeek('02 Planner/Habits/x.md'), false);
+  const p = T.plannerPaths({ plannerFolder: '06 Planner' });
+  assert.equal(p.weeks, '06 Planner/Weeks');
+  assert.equal(p.weekNote('2026-W38'), '06 Planner/Weeks/2026-W38.md');
+  assert.equal(p.isWeek('06 Planner/Weeks/2026-W38.md'), true);
+  assert.equal(p.isWeek('06 Planner/Habits/x.md'), false);
 });
 
 test('the week note is documented where the member reads', () => {

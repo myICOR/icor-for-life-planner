@@ -168,7 +168,7 @@ test('occurrence history is capped at 30, oldest dropped', () => {
 
 test('ghost entries: one per planned occurrence, read-only, distinct from the live card', () => {
   const item = {
-    path: '02 Planner/Todoist/Water plants (todoist-1).md', source: 'todoist', id: '1', title: 'Water plants',
+    path: '06 Planner/Todoist/Water plants (todoist-1).md', source: 'todoist', id: '1', title: 'Water plants',
     due: '2026-09-08', plannedDay: '2026-09-08', plannedHalf: 'am', doneLocal: false, status: 'open', weeklyGoal: true,
     occurrences: [
       { due: '2026-08-25', plannedDay: '2026-08-25', plannedHalf: 'pm', doneAt: 'x' },
