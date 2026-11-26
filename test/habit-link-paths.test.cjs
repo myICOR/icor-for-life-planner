@@ -1,8 +1,8 @@
 /* The two cross-links between a habit's two notes carry the folder.
  *
- * A habit exists twice by design: `04 Inner World/My Life/Habits/X.md`,
+ * A habit exists twice by design: `02 Inner World/My Life/Habits/X.md`,
  * where the person and the AI team write about it, and
- * `02 Planner/Habits/X.md`, where its schedule and its check-ins live. The
+ * `06 Planner/Habits/X.md`, where its schedule and its check-ins live. The
  * two notes share a name ON PURPOSE, so a bare `[[X]]` cannot say which one
  * a link means. Obsidian resolves a bare link by proximity to the note it
  * sits in, so the planner note's "Open linked note" resolved back to the
@@ -10,8 +10,8 @@
  * note as an orphan because nothing pointed at that path.
  *
  * So both fields are stored path-qualified:
- *   `linked_note`   on the planner note  -> [[04 Inner World/My Life/Habits/X]]
- *   `planner_habit` on the My Life note  -> [[02 Planner/Habits/X]]
+ *   `linked_note`   on the planner note  -> [[02 Inner World/My Life/Habits/X]]
+ *   `planner_habit` on the My Life note  -> [[06 Planner/Habits/X]]
  * and the folders come from the two settings, never from a literal string.
  *
  * A value that already names a folder is authority: it is read as it is and
@@ -27,23 +27,23 @@ const PluginClass = require(T.__mainPath);
 const { TFile, TFolder } = T.__obsidian;
 const main = fs.readFileSync(T.__mainPath, 'utf8');
 
-const MY = '04 Inner World/My Life/Habits';
-const PL = '02 Planner/Habits';
+const MY = '02 Inner World/My Life/Habits';
+const PL = '06 Planner/Habits';
 const slice = (from, to) => main.slice(main.indexOf(from), main.indexOf(to));
 
 /* ---- the pure layer ------------------------------------------------------ */
 
 test('a link target keeps its folders; the basename question is a different one', () => {
-  assert.equal(T.wikilinkTarget('[[04 Inner World/My Life/Habits/Walk]]'), '04 Inner World/My Life/Habits/Walk');
+  assert.equal(T.wikilinkTarget('[[02 Inner World/My Life/Habits/Walk]]'), '02 Inner World/My Life/Habits/Walk');
   assert.equal(T.wikilinkTarget('[[a/b|c]]'), 'a/b', 'the alias goes, the folder stays');
   assert.equal(T.wikilinkTarget('[[a/b#Log]]'), 'a/b', 'and so does the heading');
   assert.equal(T.wikilinkTarget('[[a/b#^ref]]'), 'a/b');
-  assert.equal(T.wikilinkTarget('02 Planner/Habits/Walk.md'), '02 Planner/Habits/Walk', 'a path is a target: the extension goes');
+  assert.equal(T.wikilinkTarget('06 Planner/Habits/Walk.md'), '06 Planner/Habits/Walk', 'a path is a target: the extension goes');
   assert.equal(T.wikilinkTarget('Walk'), 'Walk');
   assert.equal(T.wikilinkTarget(''), null);
   assert.equal(T.wikilinkTarget(null), null);
   // the companion still answers the display question, folders stripped
-  assert.equal(T.wikilinkBasename('[[04 Inner World/My Life/Habits/Walk]]'), 'Walk');
+  assert.equal(T.wikilinkBasename('[[02 Inner World/My Life/Habits/Walk]]'), 'Walk');
 });
 
 test('qualifying adds the folder a bare name is known to live in, and never overrides one', () => {
@@ -82,7 +82,7 @@ test('THE ASK: the dialog and the mapper both write the folder from the setting,
   assert.equal(fm.linked_note, `[[${MY}/Walk]]`);
   assert.match(T.habitTemplate({ name: 'Walk', cadence: 'daily', linkedNote: 'Walk' }, { nowIso: 'T', linkFolder: MY }),
     new RegExp(`^linked_note: "\\[\\[${MY}/Walk\\]\\]"$`, 'm'));
-  // a different room in the settings is a different folder in the link
+  // a different folder in the settings is a different folder in the link
   assert.equal(T.habitFrontmatterOf({ name: 'Walk', cadence: 'daily', linkedNote: 'Walk' }, { nowIso: 'T', linkFolder: 'Life/Habits' }).linked_note, '[[Life/Habits/Walk]]');
   // the import mapper takes the note's own path
   assert.equal(T.importMapping({ type: 'habit', cadence: 'daily' }, 'Walk', `${MY}/Walk.md`).linkedNote, `[[${MY}/Walk]]`);
@@ -240,7 +240,7 @@ test('SOURCE GUARD: both Import entries reach the rewrite when there is nothing 
   // the settings-tab button is the entry a fully-imported vault has left, so
   // it goes through the same method and is not disabled for having nothing new
   const settings = slice("const importFolderSetting = new Setting(containerEl).setName('My Life Habits folder')", "new Setting(containerEl)\n      .setName('Streaks')");
-  assert.match(settings, /importBtn\.setDisabled\(!exists\)/, 'enabled whenever the room exists');
+  assert.match(settings, /importBtn\.setDisabled\(!exists\)/, 'enabled whenever the folder exists');
   assert.doesNotMatch(settings, /importBtn\.setDisabled\(!candidates\.length\)/, 'the bug: no candidates, no way in');
   assert.match(settings, /onClick\(\(\) => this\.plugin\.openImportHabits\(null, \(\) => this\.display\(\)\)\)/, 'one entry, not a second modal call site');
 });
@@ -271,7 +271,7 @@ test('every reader of the two fields takes both shapes, bare and qualified', () 
     assert.equal(T.wikilinkTarget(habit(v).linkedTarget), T.wikilinkTarget(v), `and the resolver reads ${v} as a target`);
   }
   // the item side, the same two questions and the same two answers
-  const item = (v) => T.itemFromFrontmatter({ type: 'planner-item', source: 'todoist', external_id: '1', title: 'x', linked_note: v }, '02 Planner/Todoist/x.md', 'x');
+  const item = (v) => T.itemFromFrontmatter({ type: 'planner-item', source: 'todoist', external_id: '1', title: 'x', linked_note: v }, '06 Planner/Todoist/x.md', 'x');
   assert.equal(item(`[[${MY}/Walk]]`).linkedNote, 'Walk', 'the menu label stays the short name');
   assert.equal(item(`[[${MY}/Walk]]`).linkedNoteTarget, `${MY}/Walk`, 'the resolver and the editor get the whole thing');
   assert.equal(item('[[Walk]]').linkedNoteTarget, 'Walk');
@@ -298,7 +298,7 @@ test('SOURCE GUARD: no writer of the two habit cross-links can emit a folderless
 
   // The source half: the folder comes from the settings, at the call site.
   const create = slice('  async createHabit(', '  // The notes the import could take');
-  assert.match(create, /const linkFolder = this\.habitsImportFolder\(\);/, 'the room is read from the setting, never written as a literal');
+  assert.match(create, /const linkFolder = this\.habitsImportFolder\(\);/, 'the folder is read from the setting, never written as a literal');
   assert.match(create, /habitTemplate\(input, \{ nowIso, today, lenient, linkFolder, logBlock: o\.logBlock \}\)/);
   assert.match(create, /habitFrontmatterOf\(input, \{ nowIso, today, lenient, linkFolder \}\)/, 'and the cache entry agrees with the note');
 
@@ -339,7 +339,7 @@ test('SOURCE GUARD: no writer of the two habit cross-links can emit a folderless
 /* The one line the My Life note keeps where its log table was reads
  *   Schedule and check-ins: [[Walk]]
  * and carries the very ambiguity 0.14.1 took out of the two frontmatter
- * fields. From the My Life room a bare [[Walk]] resolves by proximity to
+ * fields. From the My Life folder a bare [[Walk]] resolves by proximity to
  * the My Life note the line sits in, so the one link a person actually
  * clicks was the one link still pointing at itself. It carries the planner
  * folder now, built from the same setting the frontmatter writer reads.
@@ -452,7 +452,7 @@ test('THE ASK: pressing Import rewrites the bare pointer line once, and the pres
 test('THE ASK: a pointer whose planner note is not in the folder is left exactly as it was', async () => {
   const { p, files, calls } = qualifiedApp();
   // imported, its frontmatter already qualified, but the note the bare
-  // pointer names is not in the planner room
+  // pointer names is not in the planner folder
   files[`${MY}/Old.md`].text = `---\ntype: habit\nplanner_habit: "[[${PL}/Old]]"\n---\n\n# Old\n\nSchedule and check-ins: [[Elsewhere]]\n`;
   files[`${MY}/Old.md`].fm = { type: 'habit', planner_habit: `[[${PL}/Old]]` };
   const before = files[`${MY}/Old.md`].text;
@@ -477,7 +477,7 @@ test('SOURCE GUARD: the pointer sentence is built in one place', () => {
 
 /* ---- fakes --------------------------------------------------------------- */
 
-// A vault with two My Life notes and an empty planner room, the shape the
+// A vault with two My Life notes and an empty planner folder, the shape the
 // import test uses: enough YAML for the fixtures, reparsed after every write
 // the way Obsidian's cache reparses after one.
 function fmOf(text) {
@@ -521,7 +521,7 @@ function importApp() {
     [`${MY}/Morning pages.md`]: { text: '---\nname: Morning pages\ncadence: weekly\nstatus: active\nstarted_on: 2026-08-27\n---\n\n# Morning pages\n', fm: { name: 'Morning pages', cadence: 'weekly', status: 'active', started_on: '2026-08-27' } },
     [`${MY}/Walk.md`]: { text: '---\ntype: habit\ncadence: daily\nsince: 2026-08-01\n---\n\n# Walk\n', fm: { type: 'habit', cadence: 'daily', since: '2026-08-01' } },
   };
-  const folders = new Set([MY, '02 Planner', PL]);
+  const folders = new Set([MY, '06 Planner', PL]);
   const calls = { process: [], frontmatter: [], create: [], notices: [] };
   const fileOf = (p) => { const f = new TFile(); f.path = p; f.basename = p.split('/').pop().replace(/\.md$/, ''); f.extension = 'md'; f.stat = { mtime: 1 }; return f; };
   const folderOf = (p) => { const f = new TFolder(); f.path = p; f.children = Object.keys(files).filter((k) => k.startsWith(`${p}/`) && !k.slice(p.length + 1).includes('/')).map(fileOf); return f; };
@@ -538,7 +538,7 @@ function importApp() {
     metadataCache: { getFileCache: (f) => ({ frontmatter: files[f.path] && files[f.path].fm }) },
   };
   const p = Object.create(PluginClass.prototype);
-  p.settings = { plannerFolder: '02 Planner', habitsImportFolder: MY };
+  p.settings = { plannerFolder: '06 Planner', habitsImportFolder: MY };
   p.app = app;
   p.habits = [];
   p._habitCache = new Map();

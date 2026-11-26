@@ -152,7 +152,7 @@ test('the re-map pairs a new UID with the note that already holds that mail', ()
 
 /* ---- 5. end to end: the rebuild, through upsertSource -------------------- */
 
-const ROOT = '02 Planner';
+const ROOT = '06 Planner';
 const FOLDER = `${ROOT}/Email`;
 const HEAD = '---\ntype: planner-item\n---\n';
 

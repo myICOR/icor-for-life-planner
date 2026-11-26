@@ -1,4 +1,4 @@
-/* ICOR for Life - Planner - the myPKA Cockpit weekly planner, replicated inside Obsidian.
+/* ICOR Planner - the myPKA Cockpit weekly planner, replicated inside Obsidian.
  *
  * Hand-written CommonJS, no build step. Architecture mirrors the
  * cockpit expansion (REFINE/Expansions/mypka-cockpit) with one structural
@@ -229,15 +229,46 @@ function sourceConfigured(settings, source) {
 }
 
 // The env file the secrets can live in instead of Obsidian's keychain
-// (0.12.0): vault-relative, the AI team's own key file by default.
-const DEFAULT_ENV_FILE_PATH = '06 AI Team/AI Team Knowledge/.env';
+// (0.12.0): vault-relative. Since 0.17.0 the default is the vault's own
+// system folder, the one file ICOR Connect and AI Chat read too.
+// Obsidian does not index a folder whose name starts with a dot, so this
+// file is reached through the vault adapter only, never the Vault API.
+const DEFAULT_ENV_FILE_PATH = '.icor-for-life/.env';
+// Where the default lived before 0.17.0, in a 2.x vault's 06 AI Team folder.
+// Read only while the default file is missing and this one is still there
+// (EnvFileStore's fallback), and offered as a one-time move; never deleted
+// without the member's own click.
+const LEGACY_ENV_FILE_PATH = '06 AI Team/AI Team Knowledge/.env';
+
+// The path data.json names, adopted: the old default reads as the new one,
+// because nobody chose it; it was simply what every earlier release wrote.
+function adoptEnvFilePath(v) {
+  const p = normalizeEnvFilePath(v).path;
+  return !p || p === LEGACY_ENV_FILE_PATH ? DEFAULT_ENV_FILE_PATH : p;
+}
+
+// The older file the default path falls back to, or '' for a path the
+// member chose (that one is read as typed, with no fallback).
+function legacyEnvFileFor(path) {
+  return trimmed(path) === DEFAULT_ENV_FILE_PATH ? LEGACY_ENV_FILE_PATH : '';
+}
+
+// The defaults of an ICOR for Life 2.x vault, before 3.0 moved the planner
+// to 06 Planner and Inner World to 02 Inner World. data.json carries every
+// default once anything is saved, so a member can hold these without having
+// chosen them. Each is kept while the vault still has its 2.x folder and
+// follows the vault once it has moved (detectPlannerFolder,
+// followHabitsImportFolder). Matched by full name, never by number: 06 AI
+// Team (2.x) and 06 Planner (3.0) share the 06.
+const PLANNER_FOLDER_2X = '02 Planner';
+const HABITS_IMPORT_FOLDER_2X = '04 Inner World/My Life/Habits';
 
 const DEFAULT_SETTINGS = {
-  // Where the planner lives in the vault: the room folder. Every path the
+  // Where the planner lives in the vault: its folder. Every path the
   // plugin reads or writes derives from this one value (plannerPaths); a
-  // renamed room is found on boot (detectPlannerFolder) instead of being
+  // renamed folder is found on boot (detectPlannerFolder) instead of being
   // recreated empty beside the renamed one.
-  plannerFolder: '02 Planner',
+  plannerFolder: '06 Planner',
   todoistToken: '',
   clickupToken: '',
   clickupTeamId: '',
@@ -286,6 +317,10 @@ const DEFAULT_SETTINGS = {
   // release since 0.9.0, until the env file is chosen.
   secretsBackend: 'secret-storage',
   envFilePath: DEFAULT_ENV_FILE_PATH,
+  // Set once the member has been offered, at load, the move of the old env
+  // file (LEGACY_ENV_FILE_PATH) to the default place (0.17.0): asked once,
+  // never at every start. The settings tab keeps the button either way.
+  envMoveOffered: false,
   syncMinutes: 10,
   showWeekend: false,
   // How dates and times are shown (2026-09-07): moment tokens, blank by
@@ -332,11 +367,11 @@ const DEFAULT_SETTINGS = {
   // Habits (2026-09-04; planner-owned since 0.10.0): one note per habit
   // under <planner folder>/Habits/, read for the all-day block under each
   // day and written for the check-in row and the schedule. The My Life
-  // Habits room is read only to import from and to link to; up to 0.9.2
-  // the setting was called habitsFolder and named the room the planner
+  // Habits folder is read only to import from and to link to; up to 0.9.2
+  // the setting was called habitsFolder and named the folder the planner
   // read, and it is carried over on load (migrateHabitSettings).
   habitsEnabled: true,
-  habitsImportFolder: '04 Inner World/My Life/Habits',
+  habitsImportFolder: '02 Inner World/My Life/Habits',
   habitStreaks: true,
 };
 
@@ -625,7 +660,7 @@ function withSecrets(settings, vault) {
 // the old single-URL shape; then the secret migration; then the defaults.
 // `changed` says whether data.json must be written back once.
 // 0.10.0: the habits moved into the planner folder and the old setting,
-// the My Life room the planner used to read, became the import folder.
+// the My Life folder the planner used to read, became the import folder.
 // The value is carried over once and the old key dropped; a data.json that
 // already has the new key keeps it. Same object back when there is nothing
 // to do, so `changed` stays honest.
@@ -656,7 +691,7 @@ function adoptSettings(loaded, vault) {
 // encrypted blob per vault on desktop, a per-device native store on mobile,
 // in both cases outside the vault and outside data.json.
 function secretsNoteText(mode, secretsInStore, envPath) {
-  if (mode === 'env-file') return `Secrets are stored in the env file at ${trimmed(envPath) || DEFAULT_ENV_FILE_PATH} (inside the vault, one KEY=value line each). Only that file is read while it is selected; Obsidian's keychain is not consulted.`;
+  if (mode === 'env-file') return `Secrets are stored in the env file at ${trimmed(envPath) || DEFAULT_ENV_FILE_PATH} (inside the vault, one KEY=value line each; a folder whose name starts with a dot is hidden from Obsidian's file list). Only that file is read while it is selected; Obsidian's keychain is not consulted.`;
   if (mode === 'store') return 'Secrets are stored in Obsidian\'s keychain (Settings, General, Keychain): outside the vault and outside data.json, so they are never synced or committed with your notes.';
   const base = 'Secrets are stored in this plugin\'s data.json (Obsidian 1.11.4 or newer keeps them in Obsidian\'s keychain, outside the vault; on this Obsidian, choose the env file above to move them out of data.json).';
   if (secretsInStore) {
@@ -768,10 +803,24 @@ function envErrorText(e) { return trimmed(e && e.message ? e.message : e) || 'un
 // (true landed, false failed, never a throw), and a failed write takes the
 // value back out of memory, so the store never claims what the disk
 // refused. `error` is the last read or write failure.
+//
+// The fallback (0.17.0): the default path names a file in the vault's
+// system folder, and vaults made before it keep theirs at
+// LEGACY_ENV_FILE_PATH. While the file at `path` is missing and the
+// fallback is there, the fallback is the file this store reads AND writes
+// (`active`, `onLegacy`), so nothing a member set up stops working and no
+// half-empty new file appears beside the full old one. adoptLegacy() copies
+// it over once, on request; trashLegacy() moves the old copy to the trash,
+// on request. Neither ever runs by itself.
 class EnvFileStore {
-  constructor(adapter, path) {
+  constructor(adapter, path, fallback) {
     this.adapter = adapter || null;
     this.path = trimmed(path) || DEFAULT_ENV_FILE_PATH;
+    this.fallback = fallback === undefined ? legacyEnvFileFor(this.path) : trimmed(fallback);
+    if (this.fallback === this.path) this.fallback = '';
+    this.active = this.path;
+    this.onLegacy = false;
+    this.legacyExists = false;
     this.values = {};
     this.loaded = false;
     this.exists = false;
@@ -779,10 +828,38 @@ class EnvFileStore {
     this._chain = Promise.resolve();
     this._latest = {}; // key -> the most recent write of it, for the revert
   }
-  async _present() {
+  // Is there a file at p? An adapter without exists() is trusted for the
+  // configured path only; an exists() that throws counts as present for
+  // the configured path (the read then reports the error) and as absent
+  // for the fallback (which is never worth an error of its own).
+  async _has(p) {
     if (!this.adapter) return false;
-    if (typeof this.adapter.exists !== 'function') return true;
-    try { return !!(await this.adapter.exists(this.path)); } catch { return true; }
+    if (typeof this.adapter.exists !== 'function') return p === this.path;
+    try { return !!(await this.adapter.exists(p)); } catch { return p === this.path; }
+  }
+  async _present() { return this._has(this.active); }
+  // Which file is in use now: the configured one, unless it is missing and
+  // the fallback is there. Asked again before every read and every write,
+  // so a move made meanwhile (by this plugin or another) is followed.
+  async _resolve() {
+    let active = this.path;
+    let legacy = false;
+    if (this.fallback) {
+      legacy = await this._has(this.fallback);
+      if (legacy && !(await this._has(this.path))) active = this.fallback;
+    }
+    this.active = active;
+    this.onLegacy = active !== this.path;
+    this.legacyExists = legacy;
+    return active;
+  }
+  // The folder a file sits in, made when it is missing (the system folder of
+  // a vault made before 0.17.0, say). The adapter's mkdir makes every level.
+  async _ensureParent(p) {
+    const dir = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+    if (!dir || !this.adapter || typeof this.adapter.mkdir !== 'function') return;
+    if (typeof this.adapter.exists === 'function' && await this.adapter.exists(dir)) return;
+    await this.adapter.mkdir(dir);
   }
   // Read the file into memory, after any queued write has landed. A missing
   // file is an empty store, not an error; an unreadable one is an error and
@@ -793,11 +870,50 @@ class EnvFileStore {
     this.exists = false;
     this.error = '';
     try {
-      if (await this._present()) { text = await this.adapter.read(this.path); this.exists = true; }
+      await this._resolve();
+      if (await this._present()) { text = await this.adapter.read(this.active); this.exists = true; }
     } catch (e) { this.error = envErrorText(e); text = ''; }
     this.values = parseEnvText(text);
     this.loaded = true;
     return this;
+  }
+  // The one-time move: the old file's bytes, unchanged, copied to `path`,
+  // read back to be sure, and the store reloaded from the new place. The
+  // old file stays where it is (trashLegacy is a separate, asked-for step).
+  // Answers 'moved', 'already' (the new file exists), 'none' (no old file)
+  // or 'failed' (with `error` set, never carrying a value). Queued behind
+  // any pending write, so a write in flight lands in the copy.
+  adoptLegacy() {
+    const run = this._chain.then(async () => {
+      if (!this.adapter || !this.fallback) return 'none';
+      if (await this._has(this.path)) return 'already';
+      if (!(await this._has(this.fallback))) return 'none';
+      const text = await this.adapter.read(this.fallback);
+      await this._ensureParent(this.path);
+      await this.adapter.write(this.path, text);
+      if ((await this.adapter.read(this.path)) !== text) throw new Error('the copy did not read back the same');
+      return 'moved';
+    });
+    this._chain = run.then(() => undefined, () => undefined);
+    return run.then(async (r) => { await this.load(); return r; }, async (e) => {
+      await this.load();
+      this.error = envErrorText(e);
+      return 'failed';
+    });
+  }
+  // The old copy to the trash (the system trash, else the vault's .trash),
+  // only once the new file is there to read. True when it went.
+  async trashLegacy() {
+    await this.settle();
+    if (!this.adapter || !this.fallback) return false;
+    if (!(await this._has(this.path)) || !(await this._has(this.fallback))) return false;
+    let gone = false;
+    try {
+      if (typeof this.adapter.trashSystem === 'function') gone = !!(await this.adapter.trashSystem(this.fallback));
+      if (!gone && typeof this.adapter.trashLocal === 'function') { await this.adapter.trashLocal(this.fallback); gone = true; }
+    } catch (e) { this.error = envErrorText(e); gone = false; }
+    await this._resolve();
+    return gone;
   }
   getSecret(id) {
     const k = envKeyFor(id);
@@ -819,10 +935,12 @@ class EnvFileStore {
     let cur = null;
     try {
       if (!this.adapter) throw new Error('no vault adapter');
-      cur = (await this._present()) ? await this.adapter.read(this.path) : '';
+      const target = await this._resolve();
+      cur = (await this._present()) ? await this.adapter.read(target) : '';
       const next = upsertEnvLine(cur, w.key, w.value);
       if (next === cur) { this.exists = this.exists || cur !== ''; return; }
-      await this.adapter.write(this.path, next);
+      if (cur === '') await this._ensureParent(target);
+      await this.adapter.write(target, next);
       this.exists = true;
     } catch (e) {
       this._revert(w, cur);
@@ -933,30 +1051,39 @@ const DAY_NAMES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 /* ========================================================================== *
  * Where the planner lives
  *
- * The room name used to be a module constant. Renaming the room made
+ * The folder name used to be a module constant. Renaming the folder made
  * collectItems return nothing, the file-tree click hook stop firing, and the
  * next sync recreate an empty default folder beside the renamed one, all of
  * it silently. Now the folder is a setting, every path derives from it, and
- * boot adopts a renamed room when it is the only candidate.
+ * boot adopts a renamed folder when it is the only candidate.
  * ========================================================================== */
 
+// Obsidian's settings folder, read from vault.configDir at load: a member can
+// rename it, so it is never written down here (the directory's review flags a
+// hard-coded one). The gates set it through useConfigDir.
+let configDirName = null;
+function useConfigDir(dir) { configDirName = dir ? String(dir).replace(/\\/g, '/').replace(/\/+$/, '') : null; }
+
 // Validates a typed folder. Pure. Trims, strips surrounding slashes,
-// collapses repeated ones; refuses empty, anything under .obsidian, and any
+// collapses repeated ones; refuses empty, anything under the settings folder, and any
 // '.' or '..' segment. Returns { ok, folder, error }. `what` names the
-// folder in the sentence (the planner room, the habits room).
+// folder in the sentence (the planner folder, the habits folder).
 function normalizeVaultFolder(raw, what) {
   const label = what || 'planner';
   let f = String(raw == null ? '' : raw).trim().replace(/\\/g, '/');
   f = f.replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
   f = normalizePath(f);
   if (!f) return { ok: false, folder: null, error: `The ${label} folder cannot be empty.` };
-  if (/^\.obsidian(\/|$)/i.test(f)) return { ok: false, folder: null, error: `The ${label} folder cannot live inside .obsidian.` };
+  if (configDirName) {
+    const lower = f.toLowerCase(), cfg = configDirName.toLowerCase();
+    if (lower === cfg || lower.startsWith(cfg + '/')) return { ok: false, folder: null, error: `The ${label} folder cannot live inside ${configDirName}.` };
+  }
   if (f.split('/').some((seg) => seg === '.' || seg === '..')) return { ok: false, folder: null, error: `The ${label} folder cannot contain "." or ".." segments.` };
   return { ok: true, folder: f, error: null };
 }
 function normalizePlannerFolder(raw) { return normalizeVaultFolder(raw, 'planner'); }
 function normalizeHabitsFolder(raw) { return normalizeVaultFolder(raw, 'My Life Habits'); }
-// The My Life Habits room, off the setting: read for the import and the
+// The My Life Habits folder, off the setting: read for the import and the
 // link picker only, never for the board. An invalid or missing value is
 // the default.
 function habitsImportFolderOf(settings) {
@@ -964,7 +1091,7 @@ function habitsImportFolderOf(settings) {
   return n.ok ? n.folder : DEFAULT_SETTINGS.habitsImportFolder;
 }
 // The import's one write outside the planner folder is confined to that
-// room: a folder boundary, not a prefix, same as plannerPaths().isInside.
+// folder: a folder boundary, not a prefix, same as plannerPaths().isInside.
 function importPathInside(settings, path) {
   return typeof path === 'string' && path.startsWith(`${habitsImportFolderOf(settings)}/`);
 }
@@ -987,10 +1114,10 @@ function plannerPaths(settings) {
     },
     // A folder boundary, not a prefix: '02 Planner2/x.md' is outside '02 Planner'.
     isInside: (path) => typeof path === 'string' && path.startsWith(`${root}/`),
-    // Routine notes (2026-09-04): one per routine, under the room.
+    // Routine notes (2026-09-04): one per routine, under the folder.
     routines: `${root}/Routines`,
     isRoutine: (path) => typeof path === 'string' && path.startsWith(`${root}/Routines/`),
-    // Habit notes (0.10.0): one per habit, under the room.
+    // Habit notes (0.10.0): one per habit, under the folder.
     habits: `${root}/Habits`,
     isHabit: (path) => typeof path === 'string' && path.startsWith(`${root}/Habits/`),
     // Week notes (0.14.0): one per ISO week, named by the week itself.
@@ -1003,14 +1130,31 @@ function plannerPaths(settings) {
 // Boot-time detection. Pure. The configured folder existing wins. Otherwise
 // exactly one top-level folder whose name ends in "planner" (any prefix,
 // any case) is adopted; several ask; none keeps the setting (ensureFolders
-// creates it). Returns { action: 'keep' | 'adopt' | 'ask', folder, candidates }.
+// creates it), except the 2.x default, which becomes the 3.0 default for
+// now ('default': nothing saved, nothing said; the 2.x folder is gone or
+// was never made). So a saved 02 Planner stays while the vault has it and
+// follows to 06 Planner once the vault has moved.
+// Returns { action: 'keep' | 'adopt' | 'ask' | 'default', folder, candidates }.
 function detectPlannerFolder(topLevelFolderNames, configured) {
   const names = Array.isArray(topLevelFolderNames) ? topLevelFolderNames : [];
   if (names.includes(configured)) return { action: 'keep', folder: configured, candidates: [] };
   const candidates = names.filter((n) => /(^|\s)planner$/i.test(String(n)));
   if (candidates.length === 1) return { action: 'adopt', folder: candidates[0], candidates };
   if (candidates.length > 1) return { action: 'ask', folder: configured, candidates };
+  if (configured === PLANNER_FOLDER_2X) return { action: 'default', folder: DEFAULT_SETTINGS.plannerFolder, candidates: [] };
   return { action: 'keep', folder: configured, candidates: [] };
+}
+
+// The My Life Habits folder for a saved one, once the vault is known. Pure.
+// The 2.x default stays while the vault still has its top folder
+// (04 Inner World); otherwise it becomes the 3.0 default, saved once the
+// vault has the new top folder. Any other value is the member's and stays.
+// `exists(path)` says whether the vault has that folder.
+function followHabitsImportFolder(saved, exists) {
+  const top = (p) => p.split('/')[0];
+  if (saved !== HABITS_IMPORT_FOLDER_2X || exists(top(HABITS_IMPORT_FOLDER_2X))) return { folder: saved, save: false };
+  const folder = DEFAULT_SETTINGS.habitsImportFolder;
+  return { folder, save: !!exists(top(folder)) };
 }
 
 // The settings tab's decision for a folder change. Pure. 'move' renames the
@@ -1027,7 +1171,7 @@ function plannerFolderChangePlan({ current, next, currentExists, nextExists }) {
 // (Obsidian sets manifest.dir to the plugin folder; the id is the fallback).
 function gitignoreLineFor(manifest) {
   const m = manifest || {};
-  const dir = String(m.dir || (m.id ? `.obsidian/plugins/${m.id}` : '')).replace(/\\/g, '/').replace(/\/+$/, '');
+  const dir = String(m.dir || (m.id && configDirName ? `${configDirName}/plugins/${m.id}` : '')).replace(/\\/g, '/').replace(/\/+$/, '');
   return dir ? `${dir}/` : null;
 }
 
@@ -1696,6 +1840,10 @@ function threeWayMerge(sourceVals, localVals, shadow, pushEnabled) {
   const pushes = {};
   const finals = {};
   const nextShadow = {};
+  // The member's own words that the source is about to replace. The source
+  // still wins the note (it is a mirror), but a description the member
+  // changed is never dropped: the caller keeps it in a note beside the task.
+  const kept = {};
   for (const f of TWO_WAY_FIELDS) {
     const src = sourceVals[f] == null || sourceVals[f] === '' ? (f === 'priority' ? 5 : null) : sourceVals[f];
     const loc = localVals[f] == null || localVals[f] === '' ? (f === 'priority' ? 5 : null) : localVals[f];
@@ -1713,11 +1861,36 @@ function threeWayMerge(sourceVals, localVals, shadow, pushEnabled) {
       pushes[f] = loc; finals[f] = loc; nextShadow[f] = loc;
     } else if (srcChanged) {
       finals[f] = src; nextShadow[f] = src;      // source wins (incl. conflicts)
+      if (f === 'description' && locChanged && loc && loc !== src) kept[f] = loc;
     } else {
       finals[f] = loc; nextShadow[f] = base;      // unchanged, or local kept unpushed
     }
   }
-  return { pushes, finals, nextShadow };
+  return { pushes, finals, nextShadow, kept };
+}
+
+/* The note a member's replaced words go to: beside the task, named after it
+ * and the day, never overwriting another file. type planner-kept, so
+ * collectItems (planner-item only) never treats it as a task. Pure. */
+function keptNoteName(basename, dayIso, taken) {
+  const stem = `${basename} (your words, ${dayIso})`;
+  let name = `${stem}.md`;
+  for (let i = 2; taken(name); i++) name = `${stem} ${i}.md`;
+  return name;
+}
+
+function keptNoteText(fromBasename, keptAtIso, words) {
+  const safe = String(fromBasename).replace(/"/g, "'");
+  return [
+    '---',
+    'type: planner-kept',
+    `kept_from: "[[${safe}]]"`,
+    `kept_at: ${keptAtIso}`,
+    '---',
+    '',
+    String(words).trim(),
+    '',
+  ].join('\n');
 }
 
 /* ========================================================================== *
@@ -4212,7 +4385,7 @@ function buildCalendarCacheContent(defs, now, plannerFolder, feedMeta) {
     '',
     '# Calendar Events',
     '',
-    'Last synced calendar state, written by the ICOR for Life - Planner plugin on every',
+    'Last synced calendar state, written by the ICOR Planner plugin on every',
     'healthy fetch (may be minutes stale). Safe to read for schedule context;',
     'it never contains a calendar feed URL or any secret. Do not edit: the',
     'next sync overwrites this file.',
@@ -4423,35 +4596,14 @@ function nextStripMountPoint(root) {
   return null;
 }
 
-// THE TOOLBAR BUTTON'S MOUNT RULE (0.9.2), pure over a querySelector root.
-//
-// The row of icons under the sidebar logo is Obsidian's own file-explorer
-// toolbar, `.nav-buttons-container`. The ICOR for Life Connect plugin puts
-// its four launchers there as `div.clickable-icon.nav-action-button` and
-// marks the container `micor-tree-slot`, which is the class INKLINE styles;
-// it offers no registration hook for another plugin's button. So this
-// plugin mounts into the same container with the same class shape and the
-// theme styles it like its siblings. Appended, never inserted at the front:
-// the theme leaves launchers at flex order 0 in creation order and pins
-// only sort and collapse-all behind them, so appending lands the button
-// after Connect's launchers and ahead of the host's two controls.
-//
-// The rule returns the container and the button already in it, if any, so
-// the runtime can be idempotent under the observer that re-runs it: with
-// the button present from THIS plugin instance it must return without
-// touching the DOM (a mutation under a MutationObserver feeds itself).
-// Without a file explorer there is nowhere to mount; the ribbon icon and
-// the command are the routes then.
-const PLANNER_TOOLBAR_HOST = '.workspace-leaf-content[data-type="file-explorer"] .nav-buttons-container';
-const PLANNER_TOOLBAR_CLASS = 'iplan-toolbar-open';
-const PLANNER_TOOLBAR_ICON = 'calendar-days';
-const PLANNER_TOOLBAR_LABEL = 'Open the Planner';
-function plannerToolbarMountPoint(root) {
-  const q = (el, sel) => (el && typeof el.querySelector === 'function') ? el.querySelector(sel) : null;
-  const bar = q(root, PLANNER_TOOLBAR_HOST);
-  if (!bar) return null;
-  return { parent: bar, existing: q(bar, '.' + PLANNER_TOOLBAR_CLASS) };
-}
+// THE RIBBON ICON (0.18.1). The board's entry point is Obsidian's own
+// ribbon on the left (Tom, 2026-11-23), where a member can reorder or hide it
+// in Settings, Appearance, Ribbon menu. From 0.9.2 to 0.18.0 a second button
+// sat in the file explorer's toolbar under the sidebar logo; that row now
+// holds only Obsidian's own controls. The Open weekly planner command is the
+// other route to the same board.
+const PLANNER_RIBBON_ICON = 'calendar-days';
+const PLANNER_RIBBON_LABEL = 'Open the Planner';
 
 /* ========================================================================== *
  * Item store - synced tasks live as markdown notes under <planner folder>/<Source>/.
@@ -5715,7 +5867,7 @@ function routineTemplate(name, type, weekdays, defaults, opts) {
  * habit under <planner folder>/Habits/ with `type: planner-habit`, created,
  * renamed, paused, archived and deleted from the HABITS tab, its cadence
  * switched there (daily, weekdays, weekly on chosen days, monthly on a day
- * of the month). The My Life Habits room is not read for the board any
+ * of the month). The My Life Habits folder is not read for the board any
  * more: a note there is imported once (its schedule fields and its log
  * table move into the planner note, a pointer line stays in its place) and
  * the planner note keeps `linked_note` pointing back, so the meaning of the
@@ -5779,7 +5931,7 @@ function isHabitFrontmatter(fm) {
   return !!fm && typeof fm === 'object'
     && (String(fm.type == null ? '' : fm.type).trim().toLowerCase() === 'habit' || fm.cadence != null);
 }
-// INDEX.md, README.md and _-prefixed names are room furniture, not habits.
+// INDEX.md, README.md and _-prefixed names are folder furniture, not habits.
 function habitBasenameOk(basename) {
   const b = String(basename == null ? '' : basename);
   return !!b && !b.startsWith('_') && !HABIT_SKIP_NAMES.test(b);
@@ -6027,7 +6179,7 @@ function validateHabitInput(input, opts) {
 // none is given: a calendar date, the LOCAL one (todayStr), never the
 // UTC day of nowIso. A member importing at 19:20 Pacific got a start date
 // one day in the future because the two were the same slice.
-// `opts.linkFolder` is the My Life Habits room from the settings: a bare
+// `opts.linkFolder` is the My Life Habits folder from the settings: a bare
 // linked-note name gains it, so `linked_note` names one file rather than
 // every file called that. A value that already names a folder keeps it.
 function habitFrontmatterOf(input, opts) {
@@ -6114,7 +6266,7 @@ function importMapping(fm, basename, sourcePath) {
   };
 }
 // The import's rows: the My Life notes that are habits (by the My Life
-// shape), are not room furniture, and do not carry the back-link yet
+// shape), are not folder furniture, and do not carry the back-link yet
 // (importDone, read on the source). When a planner note already links to
 // such a note, a run stopped half way; the row carries that note's path as
 // `existingPlanner` so the import resumes into it instead of making a
@@ -6136,7 +6288,7 @@ function importPlan(notes, plannerHabits) {
 // place its sentence is written. The link carries the planner folder for
 // the same reason the two frontmatter fields do (0.14.1): a habit lives in
 // two notes that share a name, a bare [[X]] resolves by proximity, and from
-// the My Life room proximity is the My Life note the line sits in, so the
+// the My Life folder proximity is the My Life note the line sits in, so the
 // one link a person actually clicks was the one still pointing at itself.
 // `plannerTarget` is the planner note's TARGET (its path without the
 // extension), never a bare name this would have to guess a folder for.
@@ -6353,7 +6505,7 @@ function qualifyHabitPointer(text, folder) {
 
 // Which notes still carry a folderless cross-link, and what each one needs.
 // Pure: `plannerHabits` are the parsed planner notes, `sourceNotes` the
-// { path, fm } of the My Life room, `folders` the two settings. An empty
+// { path, fm } of the My Life folder, `folders` the two settings. An empty
 // result is the steady state, which is how "a second run changes nothing"
 // is read off the plan rather than off the disk. Each row carries the bare
 // `target` it would qualify, so the caller can ask the vault whether that
@@ -6730,6 +6882,7 @@ function weekPriorityProgress(week) {
 
 class IcorPlannerPlugin extends Plugin {
   async onload() {
+    useConfigDir(this.app.vault.configDir);
     // The secret store, when this Obsidian has one (feature-detected; see
     // the secret vault section). Then the settings from disk through
     // adoptSettings: the calendar migration, the secret migration (each
@@ -6739,8 +6892,11 @@ class IcorPlannerPlugin extends Plugin {
     // only while it is the selected one; the store is feature-detected once.
     this.secretStorage = secretStorageUsable(this.app && this.app.secretStorage) ? this.app.secretStorage : null;
     const loaded = (await this.loadData()) || {};
+    // 0.17.0: the old default path (in room 06, which vaults no longer
+    // have) is adopted as the new one; the store reads the old file for as
+    // long as the new one is missing.
     const backend = normalizeSecretsBackend(loaded.secretsBackend);
-    const envPath = normalizeEnvFilePath(loaded.envFilePath).path || DEFAULT_ENV_FILE_PATH;
+    const envPath = adoptEnvFilePath(loaded.envFilePath);
     this.envStore = this.envStoreFor(envPath);
     if (backend === 'env-file') await this.envStore.load();
     this.secrets = this.vaultFor(backend);
@@ -6748,7 +6904,10 @@ class IcorPlannerPlugin extends Plugin {
     this.settings = adopted.settings;
     this.settings.secretsBackend = backend;
     this.settings.envFilePath = envPath;
-    if (adopted.changed || loaded.secretsBackend !== backend || loaded.envFilePath !== envPath) await this.persistSettings();
+    const offerMove = backend === 'env-file' && this.envStore.onLegacy && this.settings.envMoveOffered !== true;
+    if (offerMove) this.settings.envMoveOffered = true;
+    if (adopted.changed || offerMove || loaded.secretsBackend !== backend || loaded.envFilePath !== envPath) await this.persistSettings();
+    if (offerMove) this.offerEnvFileMove();
     // The display formats are resolved at every paint from the live
     // settings and the Templates plugin's options, never cached.
     setDisplayFormatSource(() => resolveDisplayFormats(this.settings, this.app));
@@ -6810,21 +6969,19 @@ class IcorPlannerPlugin extends Plugin {
     // board instead of unfolding the folder, so the one folder in the vault
     // that did not open like a folder was this one, and its notes could
     // only be reached by hand. That hook is gone: the planner folder
-    // expands and collapses like every other folder. The board opens from a
-    // button on the file-tree toolbar under the sidebar logo (mounted from
-    // onLayoutReady below) and from the left ribbon here. `calendar-days`
-    // rather than `layout-grid`: the board is a week, and the days glyph
-    // says so, while the grid glyph would sit beside the Connect plugin's
-    // `layout-dashboard` canvas button and read as a second canvas.
+    // expands and collapses like every other folder. The board opens from
+    // the ribbon on the left here and from the Open weekly planner command.
+    // `calendar-days` rather than `layout-grid`: the board is a week, and
+    // the days glyph says so, while the grid glyph reads as a canvas.
     // Registered once; Obsidian removes it on unload.
-    this.addRibbonIcon(PLANNER_TOOLBAR_ICON, PLANNER_TOOLBAR_LABEL, () => this.openBoard());
-    this.registerEvent(this.app.workspace.on('layout-change', () => this.mountPlannerToolbarButton()));
+    this.addRibbonIcon(PLANNER_RIBBON_ICON, PLANNER_RIBBON_LABEL, () => this.openBoard());
 
     this.app.workspace.onLayoutReady(() => {
-      // A renamed room is found before anything reads or writes a path.
+      // A renamed folder is found before anything reads or writes a path,
+      // and a 2.x default follows a vault that has moved to the 3.0 folders.
       this.adoptPlannerFolder();
+      this.adoptHabitsImportFolder();
       this.ensureGitignore();
-      this.mountPlannerToolbarButton();
       // Instant calendar: rehydrate the last healthy fetch from the vault
       // cache (rendered pale + pulsing) before the live fetch replaces it.
       this.loadCalendarCache();
@@ -6844,9 +7001,9 @@ class IcorPlannerPlugin extends Plugin {
     // writes, user edits, or the AI team moving an item by editing
     // frontmatter). The boundary is read at event time (this.paths()).
     const inside = (file) => !!(file && this.paths().isInside(file.path));
-    // The habit notes live under the room since 0.10.0, so the one boundary
+    // The habit notes live under the folder since 0.10.0, so the one boundary
     // covers them. A habit note is never a planner item, so the push check
-    // that fires for any note in the room finds nothing to push for it.
+    // that fires for any note in the folder finds nothing to push for it.
     const watched = (file) => inside(file);
     // A change under Routines/ or Habits/ re-reads that cache BEFORE the
     // views re-render, because steps and logs live in the note body, which
@@ -6914,19 +7071,53 @@ class IcorPlannerPlugin extends Plugin {
     if (b === 'env-file') await this.envStore.load();
     this.secrets = this.vaultFor(b);
     await this.saveSettings();
+    if (b === 'env-file') await this.ensureGitignore();
   }
   async setEnvFilePath(path) {
     const n = normalizeEnvFilePath(path);
     if (!n.ok) return false;
-    this.settings.envFilePath = n.path;
+    this.settings.envFilePath = adoptEnvFilePath(n.path);
     await this.envStore.settle();
-    this.envStore = this.envStoreFor(n.path);
+    this.envStore = this.envStoreFor(this.settings.envFilePath);
     if (this.secrets.mode === 'env-file') {
       await this.envStore.load();
       this.secrets = this.vaultFor('env-file');
     }
     await this.saveSettings();
+    if (this.secrets.mode === 'env-file') await this.ensureGitignore();
     return true;
+  }
+  /* ---- the env file's move out of room 06 (0.17.0) ----
+   * Asked once at load (offerEnvFileMove), and always on offer in the
+   * settings tab while the old file is the one in use. Every sentence names
+   * paths only, never a line of the file. */
+  offerEnvFileMove() {
+    const text = `Planner: your keys are still read from the old file at ${LEGACY_ENV_FILE_PATH}. Their new place is ${DEFAULT_ENV_FILE_PATH}.`;
+    if (typeof createFragment !== 'function') { new Notice(`${text} Planner's settings have a button to copy them there.`, 30000); return; }
+    const frag = createFragment((f) => {
+      f.createDiv({ text });
+      const b = f.createEl('button', { text: 'Copy them there' });
+      b.addEventListener('click', () => { this.moveEnvFileFromLegacy(); });
+    });
+    new Notice(frag, 30000);
+  }
+  // Copy the old file to the default place and read it from there. The old
+  // file stays; the Notice says where, and the settings tab can trash it.
+  async moveEnvFileFromLegacy() {
+    const store = this.envStore;
+    const r = await store.adoptLegacy();
+    if (r === 'moved') new Notice(`Planner: copied your keys file to ${store.path} and reads it from there now. The old file is still at ${store.fallback}; Planner's settings can put it in the trash once nothing else reads it.`, 15000);
+    else if (r === 'already') new Notice(`Planner: ${store.path} is already there and is the file in use.`);
+    else if (r === 'none') new Notice('Planner: there is no old keys file to copy.');
+    else new Notice(`Planner: the keys file could not be copied to ${store.path}. See the Env file line in Planner's settings.`, 12000);
+    return r;
+  }
+  async trashLegacyEnvFile() {
+    const store = this.envStore;
+    const old = store.fallback;
+    const gone = await store.trashLegacy();
+    new Notice(gone ? `Planner: moved the old keys file at ${old} to the trash.` : `Planner: the old keys file at ${old} was not moved to the trash.`);
+    return gone;
   }
   // Move the keys of the given slots from one backend into the selected
   // one. Returns how many keys moved; the values never appear anywhere.
@@ -6958,9 +7149,23 @@ class IcorPlannerPlugin extends Plugin {
         await this.persistSettings();
         new Notice(`Planner: using the folder "${d.folder}".`);
       } else if (d.action === 'ask') {
-        new Notice(`Planner: several folders look like the planner (${d.candidates.join(', ')}). Pick one under Settings, ICOR for Life - Planner, Planner folder.`, 12000);
+        new Notice(`Planner: several folders look like the planner (${d.candidates.join(', ')}). Pick one under Settings, ICOR Planner, Planner folder.`, 12000);
+      } else if (d.action === 'default') {
+        this.settings.plannerFolder = d.folder;
       }
     } catch { /* detection is a convenience; ensureFolders covers the rest */ }
+  }
+
+  // Boot: the My Life Habits folder follows a vault that has moved to the
+  // ICOR for Life 3.0 folders (followHabitsImportFolder).
+  async adoptHabitsImportFolder() {
+    try {
+      const has = (p) => this.app.vault.getAbstractFileByPath(p) instanceof TFolder;
+      const f = followHabitsImportFolder(this.settings.habitsImportFolder, has);
+      if (f.folder === this.settings.habitsImportFolder) return;
+      this.settings.habitsImportFolder = f.folder;
+      if (f.save) await this.persistSettings();
+    } catch { /* a convenience; the setting is still there to change */ }
   }
 
   // Nothing this plugin scheduled may run after it is gone: a pending push
@@ -6969,7 +7174,6 @@ class IcorPlannerPlugin extends Plugin {
   onunload() {
     setDisplayFormatSource(null);
     this.removeNextBadge();
-    this.removePlannerToolbarButton();
     if (this._cacheWriteTimer) { window.clearTimeout(this._cacheWriteTimer); this._cacheWriteTimer = null; }
     if (this._pushTimers) {
       for (const t of this._pushTimers.values()) window.clearTimeout(t);
@@ -7036,9 +7240,15 @@ class IcorPlannerPlugin extends Plugin {
       try { text = await adapter.read(gi); } catch { text = ''; }
       const line = gitignoreLineFor(this.manifest);
       const wanted = line ? [line] : [];
+      // The env file too, while it is the backend in use (0.17.0, the way
+      // ICOR Connect has always guarded it): the file in use,
+      // and the configured one it will be once moved.
+      if (this.settings && this.settings.secretsBackend === 'env-file' && this.envStore) {
+        for (const p of [this.envStore.path, this.envStore.active]) if (p && !wanted.includes(p)) wanted.push(p);
+      }
       const missing = wanted.filter((line) => !text.split('\n').some((l) => l.trim() === line));
       if (missing.length) {
-        const block = `\n# ICOR for Life - Planner is its own git repository (and its data.json holds API keys)\n${missing.join('\n')}\n`;
+        const block = `\n# ICOR Planner is its own git repository (and its data.json, like the env file, can hold API keys)\n${missing.join('\n')}\n`;
         await adapter.write(gi, (text.endsWith('\n') || !text ? text : text + '\n') + block);
       }
     } catch { /* never block load on this */ }
@@ -7116,39 +7326,6 @@ class IcorPlannerPlugin extends Plugin {
     const split = this.splitHour();
     return icsEventsForWeek(this.calendarDefs, w0, split)
       .concat(icsEventsForWeek(this.calendarDefs, addDays(w0, 7), split));
-  }
-
-  // The toolbar button under the sidebar logo. Mounted where
-  // plannerToolbarMountPoint says, from onLayoutReady, on layout-change and
-  // from the strip's left-split observer. Idempotent: a button this
-  // instance already put there is left alone; one left by an earlier
-  // instance (an in-place upgrade) is replaced, because it keeps its old
-  // click handler forever.
-  mountPlannerToolbarButton() {
-    const at = plannerToolbarMountPoint(document);
-    if (!at) return;
-    if (at.existing) {
-      if (at.existing === this._toolbarEl) return;
-      at.existing.remove();
-    }
-    const btn = document.createElement('div');
-    btn.className = `clickable-icon nav-action-button ${PLANNER_TOOLBAR_CLASS}`;
-    btn.setAttribute('aria-label', PLANNER_TOOLBAR_LABEL);
-    btn.setAttribute('role', 'button');
-    btn.tabIndex = 0;
-    setIcon(btn, PLANNER_TOOLBAR_ICON);
-    btn.addEventListener('click', () => this.openBoard());
-    btn.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return;
-      e.preventDefault();
-      this.openBoard();
-    });
-    this._toolbarEl = btn;
-    at.parent.appendChild(btn);
-  }
-
-  removePlannerToolbarButton() {
-    if (this._toolbarEl) { this._toolbarEl.remove(); this._toolbarEl = null; }
   }
 
   // Build the strip once and mount it where nextStripMountPoint says. The
@@ -7236,7 +7413,6 @@ class IcorPlannerPlugin extends Plugin {
       window.requestAnimationFrame(() => {
         this._badgeMountQueued = false;
         this.mountNextStrip();
-        this.mountPlannerToolbarButton();
       });
     });
     this._badgeObserver.observe(host, { childList: true, subtree: true });
@@ -7348,7 +7524,7 @@ class IcorPlannerPlugin extends Plugin {
   async ensureFolders() {
     const mk = async (path) => {
       const existing = this.app.vault.getAbstractFileByPath(path);
-      if (!existing) { try { await this.app.vault.createFolder(path); } catch { /* another call got there first, or the vault refuses it: every write checks its own room */ } }
+      if (!existing) { try { await this.app.vault.createFolder(path); } catch { /* another call got there first, or the vault refuses it: every write checks its own folder */ } }
     };
     const p = this.paths();
     await mk(p.root);
@@ -7362,7 +7538,7 @@ class IcorPlannerPlugin extends Plugin {
     // And Habits (0.10.0): where New habit and the import put the notes.
     await mk(p.habits);
     // And Weeks (0.14.0): one note per ISO week. The note itself is created
-    // on demand, the room is created here so it is visible from day one.
+    // on demand, the folder is created here so it is visible from day one.
     await mk(p.weeks);
   }
 
@@ -7501,7 +7677,12 @@ class IcorPlannerPlugin extends Plugin {
       const sourceVals = { title: t.title, due: t.due || null, priority: t.priority, description: (t.description || '').trim() };
       const localVals = { title: prior.title, due: prior.due, priority: prior.priority, description: body };
       const pushEnabled = !!s.pushEdits && canPushToSource(source);
-      const { pushes, finals, nextShadow } = threeWayMerge(sourceVals, localVals, shadow, pushEnabled);
+      const { pushes, finals, nextShadow, kept } = threeWayMerge(sourceVals, localVals, shadow, pushEnabled);
+      if (kept && kept.description) {
+        // Not kept, not overwritten: the item waits for the next sync.
+        try { await this.keepMemberWords(prior.file, kept.description, source); }
+        catch (e) { new Notice(`Planner: ${e.message}`); continue; }
+      }
       // A write that answers "no such task" is the source telling us the
       // mirror is stale. Trash the note and move on: there is nothing to
       // retry and nothing to merge.
@@ -7862,6 +8043,25 @@ class IcorPlannerPlugin extends Plugin {
   // and must reach the source at once.
   // Takes the TFile wherever the caller has one (no lookup, and it works for
   // a file the index has not published yet), a path otherwise.
+  /* The source changed a task's description while the member had written in
+   * its note. The note follows the source (it is a mirror); the member's
+   * words go to a note beside it first, and a notice says where. */
+  async keepMemberWords(file, words, source) {
+    try {
+      const slash = file.path.lastIndexOf('/');
+      const dir = slash >= 0 ? file.path.slice(0, slash) : '';
+      const day = new Date().toISOString().slice(0, 10);
+      const taken = (name) => !!this.app.vault.getAbstractFileByPath(normalizePath(dir ? `${dir}/${name}` : name));
+      const name = keptNoteName(file.basename, day, taken);
+      const path = normalizePath(dir ? `${dir}/${name}` : name);
+      await this.app.vault.create(path, keptNoteText(file.basename, new Date().toISOString(), words));
+      new Notice(`Planner: "${file.basename}" changed in ${SOURCES[source] ? SOURCES[source].label : source} while you were writing in it. Your words are kept in "${name.replace(/\.md$/, '')}".`);
+    } catch (e) {
+      /* If the copy cannot be written, the note is not overwritten either. */
+      throw new Error(`could not keep your words from "${file.basename}" (${e.message}); the note was left as it is`);
+    }
+  }
+
   markSyncWrite(fileOrPath) {
     if (!fileOrPath || !this._syncWrites) return;
     const file = typeof fileOrPath === 'string' ? this.app.vault.getAbstractFileByPath(fileOrPath) : fileOrPath;
@@ -8414,7 +8614,7 @@ class IcorPlannerPlugin extends Plugin {
   habitsImportFolder() { return habitsImportFolderOf(this.settings); }
   openNewHabit() { new NewHabitModal(this.app, this).open(); }
   // The tap on Import is the consent moment for the one write the planner
-  // makes in the My Life room, and nothing new to take does not make it a
+  // makes in the My Life folder, and nothing new to take does not make it a
   // different moment: a vault whose habits were all imported before 0.14.1
   // has no candidates left, so this is the only place its two bare
   // cross-links can still be qualified. The Notice says what that did.
@@ -8558,7 +8758,7 @@ class IcorPlannerPlugin extends Plugin {
     const nowIso = new Date().toISOString();
     const today = todayStr();
     const lenient = !!o.lenient;
-    // The room the linked note lives in, from the setting: a bare name from
+    // The folder the linked note lives in, from the setting: a bare name from
     // the dialog's dropdown becomes the path of the note it came from.
     const linkFolder = this.habitsImportFolder();
     const text = habitTemplate(input, { nowIso, today, lenient, linkFolder, logBlock: o.logBlock });
@@ -8589,7 +8789,7 @@ class IcorPlannerPlugin extends Plugin {
     return importPlan(notes, this.habits || []);
   }
   // The notes the New habit dialog can link to: every note in the My Life
-  // Habits folder that is not room furniture, by basename.
+  // Habits folder that is not folder furniture, by basename.
   linkableNotes() {
     const folder = this.app.vault.getAbstractFileByPath(this.habitsImportFolder());
     const files = folder instanceof TFolder
@@ -8602,7 +8802,7 @@ class IcorPlannerPlugin extends Plugin {
   // habit exists twice by design, the two notes share a name, and a bare
   // [[X]] cannot say which of them it means. It runs at the top of an
   // import because that is the one moment the person has agreed to a write
-  // in the My Life room; the settings sentence already says so. Idempotent
+  // in the My Life folder; the settings sentence already says so. Idempotent
   // by construction: the plan only names a note whose value is still
   // folderless, and the text edit refuses anything it does not recognise,
   // so a second run writes nothing.
@@ -8622,8 +8822,8 @@ class IcorPlannerPlugin extends Plugin {
       sources.push({ path: c.path, fm, body: importDone(fm) ? await this.app.vault.cachedRead(c) : null });
     }
     for (const row of qualifyLinkPlan(this.habits || [], sources, folders)) {
-      // The same boundary every other write has: the planner room for the
-      // planner note, the import room for the My Life note, checked before
+      // The same boundary every other write has: the planner folder for the
+      // planner note, the import folder for the My Life note, checked before
       // the file is looked up.
       const inside = row.field === 'linked_note'
         ? habitPathInside(this.settings, row.path)
@@ -8694,7 +8894,7 @@ class IcorPlannerPlugin extends Plugin {
         // One reading of the planner note, its PATH, for both writes
         // (0.14.2). The body pointer used to keep the short name, on the
         // reasoning that it is prose a person reads; but it is prose that
-        // names a file, and from the My Life room a bare name resolves to
+        // names a file, and from the My Life folder a bare name resolves to
         // the note the line sits in. A note pointed the old way is still
         // recognised as pointed, so it never gains a second line.
         const plannerLink = wikilinkTarget(path);
@@ -8777,13 +8977,13 @@ class IcorPlannerPlugin extends Plugin {
     try {
       const setting = this.app.setting;
       if (!setting || typeof setting.open !== 'function') {
-        new Notice('Open Settings, Community plugins, ICOR for Life - Planner to add a key.');
+        new Notice('Open Settings, Community plugins, ICOR Planner to add a key.');
         return;
       }
       setting.open();
       if (typeof setting.openTabById === 'function') setting.openTabById(this.manifest.id);
     } catch {
-      new Notice('Open Settings, Community plugins, ICOR for Life - Planner to add a key.');
+      new Notice('Open Settings, Community plugins, ICOR Planner to add a key.');
     }
   }
 
@@ -11389,13 +11589,44 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .setName('Env file')
       .setDesc('Checking the file.');
     envSetting.descEl.setAttribute('aria-live', 'polite');
+    // The old file (0.17.0): while it is the one in use, a row offers the
+    // copy to the default place; once the new file is there and the old one
+    // still is, a row offers to put the old one in the trash. Both act only
+    // on the member's click, and both name paths, never a line of the file.
+    const legacySetting = new Setting(containerEl).setName('Old keys file');
+    legacySetting.descEl.setAttribute('aria-live', 'polite');
     const renderEnvStatus = () => {
       const store = this.plugin.envStore;
       envSetting.descEl.toggleClass('is-failed', !!store.error);
       const lead = 'A path inside the vault, one KEY=value line per secret; every other line is left as it is. Read only while the env file is selected above.';
-      if (store.error) envSetting.setDesc(`${lead} Could not read ${store.path}: ${store.error}`);
+      if (store.error) envSetting.setDesc(`${lead} Could not read ${store.active}: ${store.error}`);
+      else if (store.onLegacy) envSetting.setDesc(`${lead} Not found: ${store.path}, so the old file at ${store.active} is read instead.`);
       else if (store.exists) envSetting.setDesc(`${lead} Found: ${store.path}.`);
       else envSetting.setDesc(`${lead} Not found: ${store.path}. It is created on the first save.`);
+      renderLegacy();
+    };
+    const renderLegacy = () => {
+      const store = this.plugin.envStore;
+      legacySetting.controlEl.empty();
+      const show = this.plugin.secrets.mode === 'env-file' && !!store.fallback && store.legacyExists;
+      legacySetting.settingEl.toggleClass('is-hidden', !show);
+      if (!show) return;
+      if (store.onLegacy) {
+        legacySetting.setDesc(`Your keys are still in ${store.fallback}, a folder this vault no longer needs. Copy the file to ${store.path}, the new place ICOR for Life tools read it from. The old file stays until you remove it.`);
+        legacySetting.addButton((b) => b.setButtonText('Copy to the new place').setCta().onClick(async () => {
+          b.setDisabled(true);
+          const r = await this.plugin.moveEnvFileFromLegacy();
+          if (r === 'moved') this.plugin.ensureGitignore();
+          await refreshSecrets();
+        }));
+      } else {
+        legacySetting.setDesc(`${store.path} is in use. The old copy is still at ${store.fallback}, with the keys it held when it was copied. Put it in the trash once no other tool reads it.`);
+        legacySetting.addButton((b) => b.setButtonText('Move old file to trash').setWarning().onClick(async () => {
+          b.setDisabled(true);
+          await this.plugin.trashLegacyEnvFile();
+          await refreshSecrets();
+        }));
+      }
     };
     const keysEl = containerEl.createDiv({ cls: 'iplan-settings-keys' });
     const renderKeys = () => {
@@ -12070,7 +12301,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       const exists = this.app.vault.getAbstractFileByPath(n.folder) instanceof TFolder;
       const candidates = exists ? this.plugin.importCandidates() : [];
       importFolderSetting.setDesc(exists ? importFolderText(n.folder, candidates.length) : `"${n.folder}" does not exist in this vault.`);
-      // Enabled whenever the room exists, not only when something is left to
+      // Enabled whenever the folder exists, not only when something is left to
       // take: pressing it with nothing new still qualifies the links (0.14.1).
       if (importBtn) importBtn.setDisabled(!exists);
     };
@@ -12159,13 +12390,13 @@ module.exports.__test = {
   buildCalendarCacheContent, parseCalendarCacheContent, parseCalendarCache, groupDefsByFeed, adoptCacheDefs,
   detectConferenceUrl, nextBadgeModel, fmtNextCountdown, routineTimedEntries, nextStripMountPoint,
   NEXT_URGENT_MS, NEXT_SECONDS_MS, NEXT_STRIP_LOGO_HOST, NEXT_STRIP_SPLIT_HOST,
-  plannerToolbarMountPoint, PLANNER_TOOLBAR_HOST, PLANNER_TOOLBAR_CLASS, PLANNER_TOOLBAR_ICON, PLANNER_TOOLBAR_LABEL,
+  PLANNER_RIBBON_ICON, PLANNER_RIBBON_LABEL,
   CONFERENCE_URL_PATTERNS,
-  plannerPaths, normalizePlannerFolder, detectPlannerFolder, plannerFolderChangePlan, gitignoreLineFor, collectItems,
+  plannerPaths, normalizePlannerFolder, detectPlannerFolder, followHabitsImportFolder, plannerFolderChangePlan, gitignoreLineFor, collectItems,
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
   WINDOWS_TZ_TO_IANA, normalizeTzid, isIanaZone, resolveTzid, tzidUtcPrefixOffset,
   icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult, truncatedWarning,
-  threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS, pushableTitle,
+  threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS, pushableTitle, keptNoteName, keptNoteText,
   goneError, isGoneError, goneProbeBatch, absenceVerdict, canProbeGone, goneNotice, doneSweepBatch,
   GONE_PROBE_MAX_PER_SYNC, todoistProbeGone, clickupProbeGone,
   htmlishToText, segmentInfo, fmtLeft, fmtDayTitle, fmtDayLabel,
@@ -12202,7 +12433,7 @@ module.exports.__test = {
   subtaskRowMeta, cardChips, isDone, fmtDayNum,
   HABIT_TYPE, HABIT_LOG_SENTINEL, HABIT_LOG_SECTION, HABIT_CADENCES, HABIT_CADENCE_NAMES, HABIT_STATUSES,
   HABIT_MONTH_DAY_MAX, HABIT_SCHEDULE_FIELDS, HABIT_IMPORT_REMOVED_FIELDS, BOARD_ONLY_TABS,
-  normalizeVaultFolder, normalizeHabitsFolder, habitsImportFolderOf, importPathInside, habitPathInside, migrateHabitSettings,
+  useConfigDir, normalizeVaultFolder, normalizeHabitsFolder, habitsImportFolderOf, importPathInside, habitPathInside, migrateHabitSettings,
   normalizeCadence, habitStatusOf, monthDayOf, isPlannerHabitFrontmatter, isHabitFrontmatter, habitBasenameOk,
   basenameOf, wikilinkBasename, wikilinkTarget, wikilinkOf, qualifyLinkTarget, linkedFileOf, habitFromFrontmatter,
   daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,
@@ -12216,7 +12447,7 @@ module.exports.__test = {
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,
   settingsHoldSecrets, migrateSecretsSettled, IcorPlannerPlugin,
   // the env file backend (0.12.0)
-  DEFAULT_ENV_FILE_PATH, SECRETS_BACKENDS, BACKEND_LABELS, normalizeSecretsBackend, secretsBackendLabel, normalizeEnvFilePath,
+  DEFAULT_ENV_FILE_PATH, LEGACY_ENV_FILE_PATH, adoptEnvFilePath, legacyEnvFileFor, SECRETS_BACKENDS, BACKEND_LABELS, normalizeSecretsBackend, secretsBackendLabel, normalizeEnvFilePath,
   envKeyFor, parseEnvText, envLineFor, upsertEnvLine, envErrorText, EnvFileStore, dataJsonStore, secretPresence, moveSecret,
   SECRET_SLOT_LABELS, SECRET_SLOT_COMPANIONS, secretSlots, secretStatusText,
   // Outlook (2026-09-06)

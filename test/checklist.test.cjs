@@ -17,11 +17,11 @@ const T = require('./harness.cjs');
 // newest on top, with a note column that carries prose.
 const STREAK = [
   '---',
-  'name: Daily Scratchpad writing',
+  'name: Daily notes writing',
   'cadence: daily',
   '---',
   '',
-  '# Daily Scratchpad writing',
+  '# Daily notes writing',
   '',
   'Notes about the habit, kept as written.',
   '',

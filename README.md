@@ -1,4 +1,4 @@
-# ICOR for Life - Planner
+# ICOR Planner
 
 **Plan your week once, in one place.**
 
@@ -23,8 +23,8 @@ and readable without this plugin.
 
 ## Getting started
 
-You do not need an account to start. Open the Planner from the button under
-the sidebar logo, add a task by hand in the tray, and drag it onto a day.
+You do not need an account to start. Open the Planner from its icon in the
+ribbon on the left, add a task by hand in the tray, and drag it onto a day.
 
 Connect sources when you want them, one at a time, from the settings page.
 
@@ -78,7 +78,7 @@ top of the tray under PINNED THIS WEEK and wear a WEEK chip on the board.
 
 ## The week note
 
-Beside the board there is one note per week, in `02 Planner/Weeks/`, and a tab
+Beside the board there is one note per week, in `06 Planner/Weeks/`, and a tab
 that reads and writes it. It holds two things.
 
 **Weekly priorities.** What you are trying to achieve this week, one line
@@ -108,10 +108,19 @@ before you choose.
 
 Keys are held in Obsidian's own keychain, outside your notes.
 
+If you choose the file instead, it is `.icor-for-life/.env`, in the vault's
+hidden system folder, the same file ICOR Connect and AI Chat use.
+Obsidian's file list does not show that folder. A vault that still keeps the
+file in the old `06 AI Team` folder keeps working: the planner reads it there,
+and its settings offer to copy it to the new place. The old file stays until
+you remove it.
+
 ## What it touches
 
 **Your vault.** Every task, event, routine and habit becomes a plain markdown
-note in `02 Planner/`. You can read and edit them without this plugin.
+note in `06 Planner/`. You can read and edit them without this plugin. A vault
+that still has the ICOR for Life 2.x folder `02 Planner` keeps using it until
+the vault moves to `06 Planner`; the planner folder is a setting.
 
 **The services you connect, and only those.** With a key configured it talks
 to Todoist, ClickUp, your own IMAP host, the iCal addresses you paste, and

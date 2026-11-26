@@ -1,7 +1,7 @@
 /* Habits: planner-owned notes on the board, read and written.
  *
  * Since 0.10.0 a habit is a note under <planner folder>/Habits/ with
- * `type: planner-habit`; the My Life Habits room is read for the import
+ * `type: planner-habit`; the My Life Habits folder is read for the import
  * only, never for the board (that is habits-import.test.cjs). On the read
  * side one shape: name, cadence (daily, weekdays, weekly, monthly),
  * cadence_days for weekly, month_day for monthly, status (active, paused,
@@ -21,7 +21,7 @@ const root = process.env.PLANNER_ROOT
   ? path.resolve(process.env.PLANNER_ROOT)
   : path.join(__dirname, '..');
 
-const HABITS = '02 Planner/Habits';
+const HABITS = '06 Planner/Habits';
 const STREAK_BODY = [
   '---',
   'type: planner-habit',
@@ -118,25 +118,25 @@ test('paused and archived habits never render, whatever the cadence', () => {
 });
 
 test('the planner shape parses; the My Life shape and a planner item do not collect', () => {
-  const p = `${HABITS}/Daily Scratchpad writing.md`;
+  const p = `${HABITS}/Daily notes writing.md`;
   const full = T.habitFromFrontmatter({
-    type: 'planner-habit', name: 'Daily Scratchpad writing', cadence: 'daily', status: 'active',
-    started_on: '2026-08-27', linked_note: '[[Daily Scratchpad writing]]', created_at: '2026-09-06T10:00:00.000Z',
+    type: 'planner-habit', name: 'Daily notes writing', cadence: 'daily', status: 'active',
+    started_on: '2026-08-27', linked_note: '[[Daily notes writing]]', created_at: '2026-09-06T10:00:00.000Z',
   }, p, '');
   assert.deepEqual(full, {
-    path: p, slug: 'Daily Scratchpad writing', name: 'Daily Scratchpad writing',
+    path: p, slug: 'Daily notes writing', name: 'Daily notes writing',
     cadence: 'daily', cadenceDays: null, monthDay: null, status: 'active', startedOn: '2026-08-27',
-    linkedNote: '[[Daily Scratchpad writing]]', linkedBasename: 'Daily Scratchpad writing', linkedTarget: 'Daily Scratchpad writing',
+    linkedNote: '[[Daily notes writing]]', linkedBasename: 'Daily notes writing', linkedTarget: 'Daily notes writing',
     logSchema: null, log: T.parseLogTable('', 'habit-log'),
   });
   assert.deepEqual(T.habitDays(full), T.WEEKDAY_CODES, 'daily shows every day');
   // the name falls back to the file name; the link resolves to a basename
   assert.equal(habit({ cadence: 'daily' }, '', `${HABITS}/Walk.md`).name, 'Walk');
-  assert.equal(habit({ cadence: 'daily', linked_note: '[[04 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedBasename, 'Walk');
+  assert.equal(habit({ cadence: 'daily', linked_note: '[[02 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedBasename, 'Walk');
   assert.equal(habit({ cadence: 'daily', linked_note: '[[Walk#Log]]' }, '').linkedBasename, 'Walk');
   // and the target keeps the folders the basename drops: the My Life note
   // and this one share a name, so only the target names one file (0.14.1)
-  assert.equal(habit({ cadence: 'daily', linked_note: '[[04 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedTarget, '04 Inner World/My Life/Habits/Walk');
+  assert.equal(habit({ cadence: 'daily', linked_note: '[[02 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedTarget, '02 Inner World/My Life/Habits/Walk');
   assert.equal(habit({ cadence: 'daily' }, '').linkedNote, null);
   assert.equal(T.wikilinkBasename('Walk'), 'Walk');
   assert.equal(T.wikilinkBasename(''), null);
@@ -203,7 +203,7 @@ test('checking writes a Y row under the existing sentinel and creates the sectio
   const row = T.logRowFor(T.parseLogTable(again, 'habit-log'), '2026-09-02');
   assert.deepEqual([row.marker, row.rest], ['Y', ['sick']]);
   // absent: the exact section the template writes
-  const bare = '---\ntype: planner-habit\ncadence: daily\n---\n\n# Daily Scratchpad writing\n';
+  const bare = '---\ntype: planner-habit\ncadence: daily\n---\n\n# Daily notes writing\n';
   const made = T.habitLogAfterCheck(bare, '2026-09-09', true);
   assert.equal(made, bare + '\n## Log\n<!-- habit-log: schema=streak -->\n| Date | Y/N | Note |\n| --- | --- | --- |\n| 2026-09-09 | Y |  |\n');
   assert.deepEqual(T.HABIT_LOG_SECTION, { heading: '## Log', schema: 'streak', header: ['Date', 'Y/N', 'Note'] });
@@ -300,22 +300,22 @@ test('a future day is disabled', () => {
   assert.equal(T.habitOccurrences([h], '2026-09-09', '2026-09-09')[0].disabled, false);
 });
 
-test('the settings: the planner Habits folder off the room, the import folder validated, the old key migrated', () => {
+test('the settings: the planner Habits folder off the folder, the import folder validated, the old key migrated', () => {
   const s = T.DEFAULT_SETTINGS;
   assert.equal(s.habitsEnabled, true);
-  assert.equal(s.habitsImportFolder, '04 Inner World/My Life/Habits');
+  assert.equal(s.habitsImportFolder, '02 Inner World/My Life/Habits');
   assert.equal(s.habitStreaks, true);
   assert.equal('habitsFolder' in s, false, 'the old key is not declared');
-  // the planner habits live under the room, wherever the room is
-  assert.equal(T.plannerPaths({}).habits, '02 Planner/Habits');
+  // the planner habits live under the folder, wherever the folder is
+  assert.equal(T.plannerPaths({}).habits, '06 Planner/Habits');
   assert.equal(T.plannerPaths({ plannerFolder: 'Week' }).habits, 'Week/Habits');
-  assert.equal(T.plannerPaths({}).isHabit('02 Planner/Habits/x.md'), true);
-  assert.equal(T.plannerPaths({}).isHabit('02 Planner/Habits2/x.md'), false, 'a boundary, not a prefix');
-  assert.equal(T.plannerPaths({}).isHabit('02 Planner/Habits'), false);
-  assert.equal(T.habitPathInside({}, '02 Planner/Habits/x.md'), true);
-  assert.equal(T.habitPathInside({ plannerFolder: 'Week' }, '02 Planner/Habits/x.md'), false);
+  assert.equal(T.plannerPaths({}).isHabit('06 Planner/Habits/x.md'), true);
+  assert.equal(T.plannerPaths({}).isHabit('06 Planner/Habits2/x.md'), false, 'a boundary, not a prefix');
+  assert.equal(T.plannerPaths({}).isHabit('06 Planner/Habits'), false);
+  assert.equal(T.habitPathInside({}, '06 Planner/Habits/x.md'), true);
+  assert.equal(T.habitPathInside({ plannerFolder: 'Week' }, '06 Planner/Habits/x.md'), false);
   assert.equal(T.habitPathInside({ plannerFolder: 'Week' }, 'Week/Habits/x.md'), true);
-  assert.equal(T.habitPathInside({}, '04 Inner World/My Life/Habits/x.md'), false, 'the My Life room is never a write target of the tab');
+  assert.equal(T.habitPathInside({}, '02 Inner World/My Life/Habits/x.md'), false, 'the My Life folder is never a write target of the tab');
   // the import folder, validated like the planner folder
   assert.deepEqual(T.normalizeHabitsFolder(' /My Habits/ '), { ok: true, folder: 'My Habits', error: null });
   assert.equal(T.normalizeHabitsFolder('').error, 'The My Life Habits folder cannot be empty.');
@@ -327,13 +327,13 @@ test('the settings: the planner Habits folder off the room, the import folder va
   assert.equal(T.habitsImportFolderOf({}), s.habitsImportFolder);
   assert.equal(T.importPathInside({ habitsImportFolder: 'Habits' }, 'Habits/x.md'), true);
   assert.equal(T.importPathInside({ habitsImportFolder: 'Habits' }, 'Habits2/x.md'), false, 'a boundary, not a prefix');
-  assert.equal(T.importPathInside({}, '02 Planner/Habits/x.md'), false);
+  assert.equal(T.importPathInside({}, '06 Planner/Habits/x.md'), false);
   // the migration: habitsFolder becomes habitsImportFolder, once, silently
-  const old = { plannerFolder: '02 Planner', habitsFolder: 'My Habits', habitStreaks: false };
+  const old = { plannerFolder: '06 Planner', habitsFolder: 'My Habits', habitStreaks: false };
   const m = T.migrateHabitSettings(old);
-  assert.deepEqual(m, { plannerFolder: '02 Planner', habitsImportFolder: 'My Habits', habitStreaks: false });
+  assert.deepEqual(m, { plannerFolder: '06 Planner', habitsImportFolder: 'My Habits', habitStreaks: false });
   assert.notEqual(m, old, 'a migrated object is a new object, so the load knows to write back');
-  const fresh = { plannerFolder: '02 Planner', habitsImportFolder: 'X' };
+  const fresh = { plannerFolder: '06 Planner', habitsImportFolder: 'X' };
   assert.equal(T.migrateHabitSettings(fresh), fresh, 'nothing to do: the same object back');
   assert.deepEqual(T.migrateHabitSettings({ habitsFolder: 'Old', habitsImportFolder: 'New' }), { habitsImportFolder: 'New' }, 'the new key wins when both exist');
   const adopted = T.adoptSettings({ habitsFolder: 'My Habits' }, null);
@@ -371,12 +371,12 @@ test('the HABITS tab: a fourth tab beside the board only; the row model', () => 
   assert.equal(T.habitLandsOn(habit({ cadence: 'monthly' }, ''), '2026-11-01'), true, 'and is read as the 1st');
 });
 
-test('SOURCE: the habit notes ride the room\'s one boundary; the check-in is body only; the tab is wired', () => {
+test('SOURCE: the habit notes ride the folder\'s one boundary; the check-in is body only; the tab is wired', () => {
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const boot = main.slice(main.indexOf('async onload()'), main.indexOf('paths() { return plannerPaths'));
-  assert.ok(/const watched = \(file\) => inside\(file\);/.test(boot), 'the room is the one watched boundary');
+  assert.ok(/const watched = \(file\) => inside\(file\);/.test(boot), 'the folder is the one watched boundary');
   assert.ok(/if \(this\.paths\(\)\.isHabit\(path\)\) return this\.refreshHabits\(\);/.test(boot), 'a change under Habits/ re-reads the cache before the paint');
-  assert.ok(!/habitPathInside\(this\.settings/.test(boot), 'no second boundary for the old room');
+  assert.ok(!/habitPathInside\(this\.settings/.test(boot), 'no second boundary for the old folder');
   assert.ok(/Promise\.all\(\[this\.refreshRoutines\(\), this\.refreshHabits\(\)\]\)\.then\(\(\) => this\.emitModelChanged\(\)\);/.test(boot), 'boot reads both before the first paint');
   assert.ok(/this\.addCommand\(\{ id: 'new-habit', name: 'New habit', callback: \(\) => this\.openNewHabit\(\) \}\);/.test(boot), 'the command');
   // ensureFolders makes the folder

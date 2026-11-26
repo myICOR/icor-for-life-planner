@@ -82,7 +82,7 @@ test('two-way sync has nowhere to push a manual item', () => {
 test('a manual item is indistinguishable from a synced one downstream', () => {
   const id = T.manualExternalId();
   const fm = T.manualItemFrontmatter('  Buy milk  ', id, '2026-08-30T10:00:00.000Z');
-  const item = T.itemFromFrontmatter(fm, '02 Planner/Manual/x.md', 'x');
+  const item = T.itemFromFrontmatter(fm, '06 Planner/Manual/x.md', 'x');
   assert.ok(item, 'a manual note must parse as a planner item');
   assert.equal(item.source, 'manual');
   assert.equal(item.id, id);
@@ -103,7 +103,7 @@ test('a manual item is indistinguishable from a synced one downstream', () => {
     planned_day: null, planned_half: null, planned_order: 0,
     weekly_goal: false, done_local: false,
   };
-  const syncedItem = T.itemFromFrontmatter(syncedFm, '02 Planner/Todoist/y.md', 'y');
+  const syncedItem = T.itemFromFrontmatter(syncedFm, '06 Planner/Todoist/y.md', 'y');
   assert.deepEqual(Object.keys(item).sort(), Object.keys(syncedItem).sort());
 });
 

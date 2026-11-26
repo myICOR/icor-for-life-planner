@@ -16,10 +16,10 @@ const T = require('./harness.cjs');
 const PluginClass = require(T.__mainPath);
 const { TFile, TFolder } = T.__obsidian;
 
-const MY = '04 Inner World/My Life/Habits';
-// The planner's own Habits room. A habit lives in both, under the same
+const MY = '02 Inner World/My Life/Habits';
+// The planner's own Habits folder. A habit lives in both, under the same
 // name, which is why both cross-links carry a folder (0.14.1).
-const PL = '02 Planner/Habits';
+const PL = '06 Planner/Habits';
 const LOG_BLOCK = [
   '<!-- habit-log: schema=streak -->',
   '| Date | Y/N | Note |',
@@ -77,8 +77,8 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
     { path: `${MY}/Done.md`, basename: 'Done', fm: { type: 'habit', planner_habit: '[[Done]]' } },
   ];
   const planner = [
-    T.habitFromFrontmatter({ type: 'planner-habit', name: 'Walk', cadence: 'daily', linked_note: '[[Walk]]' }, '02 Planner/Habits/Walk.md', ''),
-    T.habitFromFrontmatter({ type: 'planner-habit', name: 'Done', cadence: 'daily', linked_note: '[[Done]]' }, '02 Planner/Habits/Done.md', ''),
+    T.habitFromFrontmatter({ type: 'planner-habit', name: 'Walk', cadence: 'daily', linked_note: '[[Walk]]' }, '06 Planner/Habits/Walk.md', ''),
+    T.habitFromFrontmatter({ type: 'planner-habit', name: 'Done', cadence: 'daily', linked_note: '[[Done]]' }, '06 Planner/Habits/Done.md', ''),
   ];
   const plan = T.importPlan(notes, planner);
   assert.deepEqual(plan.map((c) => c.basename), ['Bills', 'Morning pages', 'Odd', 'Old', 'Rent', 'Walk', 'Weekday'], 'Done carries the back-link; the furniture, the essay and a stray planner note are not habits; Walk is listed although a planner note links to it, because its own frontmatter does not say so yet');
@@ -89,7 +89,7 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
     cadence: 'weekly', cadenceDays: ['mon', 'wed', 'fri'], monthDay: null, startedOn: '2026-08-27', status: 'active', linkedNote: `[[${MY}/Morning pages]]`,
     existingPlanner: null,
   });
-  assert.equal(by.Walk.existingPlanner, '02 Planner/Habits/Walk.md', 'the half-done note resumes into the planner note that links back');
+  assert.equal(by.Walk.existingPlanner, '06 Planner/Habits/Walk.md', 'the half-done note resumes into the planner note that links back');
   assert.equal(T.importDone({ planner_habit: '[[x]]' }), true);
   assert.equal(T.importDone({ planner_habit: '' }), false);
   assert.equal(T.importDone({ type: 'habit' }), false);
@@ -149,7 +149,7 @@ const SCAFFOLD_FM = [
   '---',
   'type: habit',
   'name: Morning pages',
-  '# schedule, cadence and the check-in log live on this habit\'s planner-habit note in 02 Planner/Habits/ (GL-1002)',
+  '# schedule, cadence and the check-in log live on this habit\'s planner-habit note in 06 Planner/Habits/ (GL-1002)',
   'cadence: weekly',
   'cadence_days:',
   '  - mon',
@@ -169,7 +169,7 @@ const SCAFFOLD_FM_AFTER = [
   '---',
   'type: habit',
   'name: Morning pages',
-  '# schedule, cadence and the check-in log live on this habit\'s planner-habit note in 02 Planner/Habits/ (GL-1002)',
+  '# schedule, cadence and the check-in log live on this habit\'s planner-habit note in 06 Planner/Habits/ (GL-1002)',
   '',
   'key_element: "[[Writing]]"',
   'tags:',
@@ -269,7 +269,7 @@ function importApp() {
     [`${MY}/Walk.md`]: { text: '---\ntype: habit\ncadence: daily\nsince: 2026-08-01\n---\n\n# Walk\n', fm: { type: 'habit', cadence: 'daily', since: '2026-08-01' } },
     [`${MY}/INDEX.md`]: { text: '', fm: { cadence: 'daily' } },
   };
-  const folders = new Set([MY, '02 Planner', '02 Planner/Habits']);
+  const folders = new Set([MY, '06 Planner', '06 Planner/Habits']);
   const calls = { process: [], frontmatter: [], create: [], notices: [] };
   const fileOf = (p) => { const f = new TFile(); f.path = p; f.basename = p.split('/').pop().replace(/\.md$/, ''); f.extension = 'md'; f.stat = { mtime: 1 }; return f; };
   const folderOf = (p) => { const f = new TFolder(); f.path = p; f.children = Object.keys(files).filter((k) => k.startsWith(`${p}/`) && !k.slice(p.length + 1).includes('/')).map(fileOf); return f; };
@@ -287,7 +287,7 @@ function importApp() {
     metadataCache: { getFileCache: (f) => ({ frontmatter: files[f.path] && files[f.path].fm }) },
   };
   const p = Object.create(PluginClass.prototype);
-  p.settings = { plannerFolder: '02 Planner', habitsImportFolder: MY };
+  p.settings = { plannerFolder: '06 Planner', habitsImportFolder: MY };
   p.app = app;
   p.habits = [];
   p._habitCache = new Map();
@@ -302,7 +302,7 @@ test('THE ASK: the import creates the planner note first, then edits the My Life
   const r = await p.importHabits(before);
   assert.deepEqual(r, { done: 2, skipped: 0, failed: [] });
   // the planner notes
-  assert.deepEqual(calls.create.map((c) => c.path), ['02 Planner/Habits/Morning pages.md', '02 Planner/Habits/Walk.md']);
+  assert.deepEqual(calls.create.map((c) => c.path), ['06 Planner/Habits/Morning pages.md', '06 Planner/Habits/Walk.md']);
   const planner = calls.create[0].content;
   assert.match(planner, /^type: planner-habit$/m);
   assert.match(planner, /^cadence: weekly$/m);
@@ -342,7 +342,7 @@ test('THE ASK: the import creates the planner note first, then edits the My Life
 test('the import refuses a candidate outside the import folder and reports a failure without stopping', async () => {
   const { p, calls } = importApp();
   const list = p.importCandidates();
-  const stray = { ...list[1], path: '02 Planner/Todoist/Walk.md' };
+  const stray = { ...list[1], path: '06 Planner/Todoist/Walk.md' };
   const r = await p.importHabits([stray, list[0]]);
   assert.deepEqual(r, { done: 1, skipped: 1, failed: [] });
   assert.deepEqual(calls.process, [`${MY}/Morning pages.md`, `${MY}/Morning pages.md`], 'the stray path is never processed; the good one gets its body and its frontmatter');
@@ -381,9 +381,11 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   assert.ok(modal.indexOf('IMPORT_EDITS_TEXT') < modal.indexOf('addToggle('), 'above, not below');
   const settings = main.slice(main.indexOf('class IcorPlannerSettingTab'));
   assert.ok(/\.setName\('Import from My Life'\)\s*\n\s*\.setDesc\(`\$\{IMPORT_EDITS_TEXT\} A note whose planner_habit already links to a planner habit note is skipped\.`\)/.test(settings), 'the same sentence under the button');
-  // the floor: trashFile is an API of 1.6.6
+  // the floor: trashFile is an API of 1.6.6 (since 0.17.0 the floor is 1.11.4,
+  // for the keychain; anything at or above 1.6.6 keeps trashFile)
   const manifest = JSON.parse(fs.readFileSync(require('node:path').join(__dirname, '..', 'manifest.json'), 'utf8'));
-  assert.equal(manifest.minAppVersion, '1.6.6');
+  const atLeast = (v, floor) => { const a = v.split('.').map(Number), b = floor.split('.').map(Number); for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); } return true; };
+  assert.ok(atLeast(manifest.minAppVersion, '1.6.6'), `minAppVersion ${manifest.minAppVersion} is below trashFile's 1.6.6`);
 });
 
 test('THE ASK: a run that stops after the body write resumes with the frontmatter step only, and makes no second planner note', async () => {
@@ -402,7 +404,7 @@ test('THE ASK: a run that stops after the body write resumes with the frontmatte
   assert.equal(files[`${MY}/Morning pages.md`].fm.cadence, 'weekly', 'the frontmatter was not');
   // the note is listed again, with the planner note that links back
   const again = p.importCandidates();
-  assert.deepEqual(again.map((c) => [c.basename, c.existingPlanner]), [['Morning pages', '02 Planner/Habits/Morning pages.md'], ['Walk', null]]);
+  assert.deepEqual(again.map((c) => [c.basename, c.existingPlanner]), [['Morning pages', '06 Planner/Habits/Morning pages.md'], ['Walk', null]]);
   const r2 = await p.importHabits(again.filter((c) => c.basename === 'Morning pages'));
   assert.deepEqual(r2, { done: 1, skipped: 0, failed: [] });
   assert.equal(calls.create.length, 1, 'no duplicate planner note');
@@ -427,7 +429,7 @@ test('THE ASK: a run that stops right after creating the planner note resumes wi
   assert.deepEqual(r2, { done: 1, skipped: 0, failed: [] });
   assert.equal(calls.create.length, 1, 'no duplicate planner note');
   assert.equal(files[`${MY}/Morning pages.md`].text, MY_NOTE_IMPORTED);
-  assert.equal(files['02 Planner/Habits/Morning pages.md'].text.split(LOG_BLOCK).length, 2, 'the planner note holds the block exactly once');
+  assert.equal(files['06 Planner/Habits/Morning pages.md'].text.split(LOG_BLOCK).length, 2, 'the planner note holds the block exactly once');
   assert.equal(files[`${MY}/Morning pages.md`].fm.planner_habit, `[[${PL}/Morning pages]]`);
 });
 
@@ -461,7 +463,7 @@ test('THE ASK: an absent month_day stays absent on import, is required by the di
   assert.doesNotMatch(T.habitTemplate({ name: 'Rent', cadence: 'monthly' }, { nowIso: NOW, lenient: true }), /month_day/, 'the note text carries no month_day line');
   assert.match(T.habitTemplate({ name: 'Rent', cadence: 'monthly', monthDay: 3 }, { nowIso: NOW, lenient: true }), /^month_day: 3$/m);
   // the reader: an absent day is the 1st on the board and an empty field in the tab
-  const read = T.habitFromFrontmatter(lenient, '02 Planner/Habits/Rent.md', '');
+  const read = T.habitFromFrontmatter(lenient, '06 Planner/Habits/Rent.md', '');
   assert.equal(read.monthDay, null);
   assert.equal(T.habitLandsOn(read, '2026-10-01'), true);
   assert.equal(T.habitLandsOn(read, '2026-10-02'), false);

@@ -113,7 +113,7 @@ test('THE ASK: the template writes every contract field, and only the field the 
   assert.match(T.habitTemplate({ name: 'Walk', cadence: 'daily', status: 'paused' }, { nowIso: NOW }), /^status: paused$/m);
   // and what the template writes, the reader reads back as the same habit
   const fm = T.habitFrontmatterOf({ name: 'Morning pages', cadence: 'weekly', cadenceDays: ['mon', 'fri'], startedOn: '2026-08-27', linkedNote: '[[Morning pages]]' }, { nowIso: NOW });
-  const h = T.habitFromFrontmatter(fm, '02 Planner/Habits/Morning pages.md', daily);
+  const h = T.habitFromFrontmatter(fm, '06 Planner/Habits/Morning pages.md', daily);
   assert.equal(h.cadence, 'weekly');
   assert.deepEqual(h.cadenceDays, ['mon', 'fri']);
   assert.equal(h.startedOn, '2026-08-27');
@@ -165,12 +165,12 @@ test('the dialog\'s checks speak in sentences; the import runs them lenient', ()
 });
 
 test('THE ASK: every write refuses a path outside the planner Habits folder before any file is looked up', async () => {
-  const { app, calls } = fakeApp({ '02 Planner/Habits/Walk.md': { text: '| Date | Y/N | Note |\n|---|---|---|\n', fm: { cadence: 'weekly', cadence_days: ['mon'] } } });
+  const { app, calls } = fakeApp({ '06 Planner/Habits/Walk.md': { text: '| Date | Y/N | Note |\n|---|---|---|\n', fm: { cadence: 'weekly', cadence_days: ['mon'] } } });
   let lookups = 0;
   const inner = app.vault.getAbstractFileByPath;
   app.vault.getAbstractFileByPath = (p) => { lookups += 1; return inner(p); };
-  const p = instance({ plannerFolder: '02 Planner' }, app);
-  const outside = ['04 Inner World/My Life/Habits/Walk.md', '02 Planner/Habits2/Walk.md', '02 Planner/Habits', '02 Planner/Todoist/Walk.md', '', null];
+  const p = instance({ plannerFolder: '06 Planner' }, app);
+  const outside = ['02 Inner World/My Life/Habits/Walk.md', '06 Planner/Habits2/Walk.md', '06 Planner/Habits', '06 Planner/Todoist/Walk.md', '', null];
   for (const path of outside) {
     await assert.rejects(p.toggleHabit(path, '2026-09-04', true), /outside the planner Habits folder/, String(path));
     await assert.rejects(p.setHabitDays(path, ['mon']), /outside the planner Habits folder/, String(path));
@@ -186,7 +186,7 @@ test('THE ASK: every write refuses a path outside the planner Habits folder befo
   assert.deepEqual(calls.trash, []);
   assert.deepEqual(calls.rename, []);
   // inside the folder each write goes through, and touches its field only
-  const inside = '02 Planner/Habits/Walk.md';
+  const inside = '06 Planner/Habits/Walk.md';
   await p.toggleHabit(inside, '2026-09-04', true);
   assert.deepEqual(calls.process, [inside]);
   // a renamed planner folder moves the boundary with it
@@ -206,20 +206,20 @@ test('each write method starts at the boundary, and the boundary is checked befo
     assert.equal(first(m), 'const file = this.habitFile(path);', m);
   }
   assert.equal(first('habitFile(path) {'), "if (!habitPathInside(this.settings, path)) throw new Error('habit note outside the planner Habits folder');");
-  // the import's one write outside the room is confined to the import folder
+  // the import's one write outside the folder is confined to the import folder
   const imp = main.slice(main.indexOf('async importHabits('), main.indexOf('/* ---- manual items'));
   assert.ok(/!importPathInside\(this\.settings, c\.path\)\) \{ result\.skipped\+\+; continue; \}/.test(imp), 'a candidate outside the import folder is skipped, not written');
 });
 
 test('THE ASK: the writes touch their own field only; the days need weekly, the day needs monthly', async () => {
   const files = {
-    '02 Planner/Habits/Walk.md': { text: '', fm: { type: 'planner-habit', name: 'Walk', cadence: 'weekly', cadence_days: ['mon'], status: 'active', tags: ['x'] } },
-    '02 Planner/Habits/Bills.md': { text: '', fm: { type: 'planner-habit', name: 'Bills', cadence: 'monthly', month_day: 1, status: 'active' } },
+    '06 Planner/Habits/Walk.md': { text: '', fm: { type: 'planner-habit', name: 'Walk', cadence: 'weekly', cadence_days: ['mon'], status: 'active', tags: ['x'] } },
+    '06 Planner/Habits/Bills.md': { text: '', fm: { type: 'planner-habit', name: 'Bills', cadence: 'monthly', month_day: 1, status: 'active' } },
   };
   const { app } = fakeApp(files);
-  const p = instance({ plannerFolder: '02 Planner' }, app);
-  const walk = '02 Planner/Habits/Walk.md';
-  const bills = '02 Planner/Habits/Bills.md';
+  const p = instance({ plannerFolder: '06 Planner' }, app);
+  const walk = '06 Planner/Habits/Walk.md';
+  const bills = '06 Planner/Habits/Bills.md';
   await p.setHabitDays(walk, ['fri', 'mon']);
   assert.deepEqual(files[walk].fm, { type: 'planner-habit', name: 'Walk', cadence: 'weekly', cadence_days: ['mon', 'fri'], status: 'active', tags: ['x'] });
   await assert.rejects(p.setHabitDays(bills, ['mon']), /only a weekly habit takes weekdays/);
@@ -241,24 +241,24 @@ test('THE ASK: the writes touch their own field only; the days need weekly, the 
 
 test('THE ASK: delete goes to the trash, rename goes through Obsidian\'s rename so links follow', async () => {
   const files = {
-    '02 Planner/Habits/Walk.md': { text: '', fm: { type: 'planner-habit', name: 'Walk', cadence: 'daily', status: 'active' } },
-    '02 Planner/Habits/Run.md': { text: '', fm: { type: 'planner-habit', name: 'Run', cadence: 'daily', status: 'active' } },
+    '06 Planner/Habits/Walk.md': { text: '', fm: { type: 'planner-habit', name: 'Walk', cadence: 'daily', status: 'active' } },
+    '06 Planner/Habits/Run.md': { text: '', fm: { type: 'planner-habit', name: 'Run', cadence: 'daily', status: 'active' } },
   };
   const { app, calls } = fakeApp(files);
-  const p = instance({ plannerFolder: '02 Planner' }, app);
+  const p = instance({ plannerFolder: '06 Planner' }, app);
   // rename: the name field, then the file; a taken name gets -2
-  assert.equal(await p.renameHabit('02 Planner/Habits/Walk.md', 'Long walk'), '02 Planner/Habits/Long walk.md');
-  assert.deepEqual(calls.rename, [['02 Planner/Habits/Walk.md', '02 Planner/Habits/Long walk.md']]);
-  assert.equal(files['02 Planner/Habits/Long walk.md'].fm.name, 'Long walk');
-  assert.equal(await p.renameHabit('02 Planner/Habits/Long walk.md', 'Run'), '02 Planner/Habits/Run-2.md');
+  assert.equal(await p.renameHabit('06 Planner/Habits/Walk.md', 'Long walk'), '06 Planner/Habits/Long walk.md');
+  assert.deepEqual(calls.rename, [['06 Planner/Habits/Walk.md', '06 Planner/Habits/Long walk.md']]);
+  assert.equal(files['06 Planner/Habits/Long walk.md'].fm.name, 'Long walk');
+  assert.equal(await p.renameHabit('06 Planner/Habits/Long walk.md', 'Run'), '06 Planner/Habits/Run-2.md');
   // a name whose safe form is the file name renames nothing
-  assert.equal(await p.renameHabit('02 Planner/Habits/Run.md', 'Run'), '02 Planner/Habits/Run.md');
+  assert.equal(await p.renameHabit('06 Planner/Habits/Run.md', 'Run'), '06 Planner/Habits/Run.md');
   assert.equal(calls.rename.length, 2);
-  await assert.rejects(p.renameHabit('02 Planner/Habits/Run.md', '  '), /Give the habit a name/);
+  await assert.rejects(p.renameHabit('06 Planner/Habits/Run.md', '  '), /Give the habit a name/);
   // delete: trashFile, never vault.delete
-  await p.deleteHabit('02 Planner/Habits/Run.md');
-  assert.deepEqual(calls.trash, ['02 Planner/Habits/Run.md']);
-  assert.equal(files['02 Planner/Habits/Run.md'], undefined);
+  await p.deleteHabit('06 Planner/Habits/Run.md');
+  assert.deepEqual(calls.trash, ['06 Planner/Habits/Run.md']);
+  assert.equal(files['06 Planner/Habits/Run.md'], undefined);
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const del = main.slice(main.indexOf('async deleteHabit('), main.indexOf('freeHabitPath(base) {'));
   assert.ok(/await this\.app\.fileManager\.trashFile\(file\);/.test(del));
@@ -269,20 +269,20 @@ test('THE ASK: delete goes to the trash, rename goes through Obsidian\'s rename 
 });
 
 test('create: the note lands under the folder with a safe name, is parsed at once, and a taken name gets -2', async () => {
-  const files = { '02 Planner/Habits/Walk.md': { text: '', fm: { type: 'planner-habit', name: 'Walk', cadence: 'daily', status: 'active' } } };
+  const files = { '06 Planner/Habits/Walk.md': { text: '', fm: { type: 'planner-habit', name: 'Walk', cadence: 'daily', status: 'active' } } };
   const { app, calls } = fakeApp(files);
-  const p = instance({ plannerFolder: '02 Planner' }, app);
+  const p = instance({ plannerFolder: '06 Planner' }, app);
   const path = await p.createHabit({ name: 'Walk: the long/one?', cadence: 'weekly', cadenceDays: ['sat'], startedOn: '2026-09-01' });
-  assert.equal(path, '02 Planner/Habits/Walk the long one.md');
+  assert.equal(path, '06 Planner/Habits/Walk the long one.md');
   assert.equal(calls.create[0].path, path);
   assert.match(calls.create[0].content, /^name: "Walk: the long\/one\?"$/m, 'the name keeps its characters; the file does not');
   assert.equal(p.habits.length, 1, 'in the cache before the metadata cache has seen it');
   assert.equal(p.habits[0].name, 'Walk: the long/one?');
   assert.deepEqual(p.habits[0].cadenceDays, ['sat']);
-  assert.equal(await p.createHabit({ name: 'Walk', cadence: 'daily' }), '02 Planner/Habits/Walk-2.md');
+  assert.equal(await p.createHabit({ name: 'Walk', cadence: 'daily' }), '06 Planner/Habits/Walk-2.md');
   await assert.rejects(p.createHabit({ name: '', cadence: 'daily' }), /Give the habit a name/);
   await assert.rejects(p.createHabit({ name: 'x', cadence: 'weekly', cadenceDays: [] }), /Pick at least one weekday/);
-  assert.ok(calls.folders.includes('02 Planner/Habits'), 'the folder is made first');
+  assert.ok(calls.folders.includes('06 Planner/Habits'), 'the folder is made first');
 });
 
 test('SOURCE: the tab is management, wired for keyboard, touch and mouse, with no browser dialog', () => {
@@ -356,7 +356,7 @@ test('SOURCE: created_at is the instant, started_on the local day; createHabit p
   assert.ok(/fm\.created_at = nowIso;/.test(fn), 'the instant stays');
   const create = main.slice(main.indexOf('  async createHabit('), main.indexOf('  freeHabitPath(') > 0 && main.indexOf('  freeHabitPath(') > main.indexOf('  async createHabit(') ? main.indexOf('  freeHabitPath(') : main.indexOf('  async importHabits('));
   assert.ok(/const today = todayStr\(\);\s*\n\s*const lenient = !!o\.lenient;/.test(create), 'the day is pinned once');
-  assert.ok(/const text = habitTemplate\(input, \{ nowIso, today, lenient, linkFolder, logBlock: o\.logBlock \}\);/.test(create), 'the template takes the pinned day and the room the linked note lives in');
+  assert.ok(/const text = habitTemplate\(input, \{ nowIso, today, lenient, linkFolder, logBlock: o\.logBlock \}\);/.test(create), 'the template takes the pinned day and the folder the linked note lives in');
   assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today, lenient, linkFolder \}\)/.test(create), 'and so does the cache entry');
   // the calendar-date fields across the writers: due comes from the source or
   // the note, planned_day from the board; no writer derives one from an instant

@@ -105,6 +105,8 @@ const target = process.env.PLANNER_MAIN
   : path.join(__dirname, '..', 'main.js');
 
 module.exports = require(target).__test;
+/* Obsidian's settings folder, as vault.configDir gives it in a default vault (onload sets it in the app). */
+module.exports.useConfigDir('.obsidian');
 module.exports.__mainPath = target;
 // The stub itself, so a test can flip what main.js sees (Platform.isDesktop
 // is the one a test needs today). Restore what you change.

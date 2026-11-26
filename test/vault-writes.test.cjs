@@ -5,7 +5,7 @@
  * title and the id; the id now passes safeBasename too, so the note is
  * confined to its folder whatever an API returns. And the habit and routine
  * write methods check their folder at the write itself, not only in the
- * caller: a path outside the habits room or the Routines folder is refused
+ * caller: a path outside the habits folder or the Routines folder is refused
  * before a file is looked up, so no vault.process or processFrontMatter
  * ever runs on it.
  *
@@ -47,15 +47,15 @@ test('THE ASK: a synced note name passes the id through safeBasename, and a plai
   const { app, calls } = recordingApp();
   app.vault.getAbstractFileByPath = () => null;
   const p = instance({ _shadow: {} }, app);
-  const folder = '02 Planner/Todoist';
+  const folder = '06 Planner/Todoist';
   await p.createItemFile(folder, 'todoist', { id: '8123456789', title: 'Buy milk', priority: 4 });
-  assert.equal(calls.create[0].path, '02 Planner/Todoist/Buy milk (todoist-8123456789).md', 'an ordinary id names the file exactly as it did');
+  assert.equal(calls.create[0].path, '06 Planner/Todoist/Buy milk (todoist-8123456789).md', 'an ordinary id names the file exactly as it did');
   await p.createItemFile(folder, 'clickup', { id: '../../evil#[x]|y', title: 'Slash/title', priority: 4 });
   const path = calls.create[1].path;
   assert.ok(path.startsWith(`${folder}/`), path);
   assert.equal(path.slice(folder.length + 1).includes('/'), false, 'no separator survives from either string');
   assert.doesNotMatch(path, /[\\:*?"<>|#^[\]{}]/, 'no illegal or Obsidian-hot character survives');
-  assert.equal(path, '02 Planner/Todoist/Slash title (clickup-.. .. evil x y).md');
+  assert.equal(path, '06 Planner/Todoist/Slash title (clickup-.. .. evil x y).md');
   // the frontmatter still carries the id the source uses, unchanged
   assert.match(calls.create[1].content, /^external_id: "\.\.\/\.\.\/evil#\[x\]\|y"$/m);
   // and the source line is the exact shape, so the name has no second path
@@ -82,8 +82,8 @@ test('THE ASK: the habit writes refuse a path outside the planner Habits folder 
   let lookups = 0;
   const inner = app.vault.getAbstractFileByPath;
   app.vault.getAbstractFileByPath = (path) => { lookups += 1; return inner(path); };
-  const p = instance({ plannerFolder: '02 Planner' }, app);
-  const outside = ['04 Inner World/My Life/Habits/Walk.md', '02 Planner/Habits2/Walk.md', '02 Planner/Habits', '02 Planner/Todoist/Walk.md', '', null];
+  const p = instance({ plannerFolder: '06 Planner' }, app);
+  const outside = ['02 Inner World/My Life/Habits/Walk.md', '06 Planner/Habits2/Walk.md', '06 Planner/Habits', '06 Planner/Todoist/Walk.md', '', null];
   for (const path of outside) {
     await assert.rejects(p.toggleHabit(path, '2026-09-04', true), /outside the planner Habits folder/, String(path));
     await assert.rejects(p.setHabitDays(path, ['mon']), /outside the planner Habits folder/, String(path));
@@ -94,7 +94,7 @@ test('THE ASK: the habit writes refuse a path outside the planner Habits folder 
   // inside the folder both writes go through, once each (the days need a
   // weekly habit, which the recording frontmatter says it is)
   app.fileManager.processFrontMatter = async (file, fn) => { calls.frontmatter.push(file); fn({ cadence: 'weekly' }); };
-  const inside = '02 Planner/Habits/Walk.md';
+  const inside = '06 Planner/Habits/Walk.md';
   await p.toggleHabit(inside, '2026-09-04', true);
   await p.setHabitDays(inside, ['mon', 'wed']);
   assert.equal(calls.process.length, 1);
@@ -111,8 +111,8 @@ test('THE ASK: the routine writes refuse a path outside the Routines folder befo
   let lookups = 0;
   const inner = app.vault.getAbstractFileByPath;
   app.vault.getAbstractFileByPath = (path) => { lookups += 1; return inner(path); };
-  const p = instance({ plannerFolder: '02 Planner' }, app);
-  const outside = ['02 Planner/Todoist/Task.md', '02 Planner/Routines', '02 Planner/Routines2/Morning.md', 'Other/Routines/Morning.md', '', null];
+  const p = instance({ plannerFolder: '06 Planner' }, app);
+  const outside = ['06 Planner/Todoist/Task.md', '06 Planner/Routines', '06 Planner/Routines2/Morning.md', 'Other/Routines/Morning.md', '', null];
   for (const path of outside) {
     await assert.rejects(p.processRoutine(path, (d) => d), /outside the planner folder/, String(path));
     await assert.rejects(p.toggleRoutineStep(path, '2026-09-04', 1, true, 3), /outside the planner folder/, String(path));
@@ -122,13 +122,13 @@ test('THE ASK: the routine writes refuse a path outside the Routines folder befo
   assert.equal(lookups, 0, 'a refused path is never looked up');
   assert.deepEqual(calls.process, []);
   assert.deepEqual(calls.frontmatter, []);
-  await p.skipRoutine('02 Planner/Routines/Morning launch.md', '2026-09-04');
-  await p.setRoutineActive('02 Planner/Routines/Morning launch.md', false);
+  await p.skipRoutine('06 Planner/Routines/Morning launch.md', '2026-09-04');
+  await p.setRoutineActive('06 Planner/Routines/Morning launch.md', false);
   assert.equal(calls.process.length, 1);
   assert.equal(calls.frontmatter.length, 1);
   // a renamed planner folder moves the boundary with it
   const moved = instance({ plannerFolder: 'Week' }, app);
-  await assert.rejects(moved.skipRoutine('02 Planner/Routines/Morning launch.md', '2026-09-04'), /outside the planner folder/);
+  await assert.rejects(moved.skipRoutine('06 Planner/Routines/Morning launch.md', '2026-09-04'), /outside the planner folder/);
   await moved.skipRoutine('Week/Routines/Morning launch.md', '2026-09-04');
   assert.equal(calls.process.length, 2);
 });

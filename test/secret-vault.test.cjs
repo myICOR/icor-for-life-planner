@@ -62,7 +62,7 @@ function loaded() {
       { name: 'Home', url: ICLOUD, color: 3, enabled: true, kind: 'ics' }, // no id: the migration gives it one
       { id: 'cal-off', name: 'Off', url: '', color: 1, enabled: true, kind: 'ics' },
     ],
-    plannerFolder: '02 Planner',
+    plannerFolder: '06 Planner',
     _shadow: { 'todoist:1': { due: null } },
   };
 }
@@ -343,7 +343,7 @@ test('secret-free after migration: the settings on disk and the cache note carry
     defs.push(...T.tagCalendarDefs(T.parseIcs(
       `BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:${feed.id}@x\nSUMMARY:Standup\nDTSTART;VALUE=DATE:20260907\nDTEND;VALUE=DATE:20260908\nEND:VEVENT\nEND:VCALENDAR\n`), feed));
   }
-  const content = T.buildCalendarCacheContent(defs, new Date(2026, 8, 4, 9, 0), '02 Planner');
+  const content = T.buildCalendarCacheContent(defs, new Date(2026, 8, 4, 9, 0), '06 Planner');
   for (const n of NEEDLES) assert.ok(!content.includes(n), `the cache carries: ${n}`);
   assert.deepEqual(Object.keys(defs[0]).filter((k) => /^feed/.test(k)).sort(), ['feedColor', 'feedId', 'feedName']);
 });

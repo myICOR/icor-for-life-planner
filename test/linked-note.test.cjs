@@ -17,7 +17,7 @@ const main = fs.readFileSync(T.__mainPath, 'utf8');
 function item(fm) {
   return T.itemFromFrontmatter(
     { type: 'planner-item', source: 'todoist', external_id: '1', title: 'x', ...fm },
-    '02 Planner/Todoist/x.md', 'x',
+    '06 Planner/Todoist/x.md', 'x',
   );
 }
 
@@ -46,7 +46,7 @@ test('the stored shape is always a wikilink, or nothing at all', () => {
 test('it is the same field name planner-habit already uses', () => {
   const habit = T.habitFromFrontmatter(
     { type: 'planner-habit', name: 'Morning pages', linked_note: '[[morning-pages]]' },
-    '02 Planner/Habits/morning-pages.md', '',
+    '06 Planner/Habits/morning-pages.md', '',
   );
   assert.equal(habit.linkedNote, '[[morning-pages]]');
   assert.ok(T.PLAN_OWNED_ITEM_FIELDS.includes('linked_note'));

@@ -43,7 +43,7 @@ const BODY = [
   '',
 ].join('\n');
 
-const routine = (fm, body, p) => T.parseRoutineNote(Object.assign({}, FM, fm || {}), body == null ? BODY : body, p || '02 Planner/Routines/Morning launch.md');
+const routine = (fm, body, p) => T.parseRoutineNote(Object.assign({}, FM, fm || {}), body == null ? BODY : body, p || '06 Planner/Routines/Morning launch.md');
 
 test('a routine note parses to steps and a per-day log', () => {
   const r = routine();
@@ -70,7 +70,7 @@ test('any other note is null, and nothing in sync can see a routine', () => {
   assert.equal(T.parseRoutineNote(null, BODY), null);
   // The item reader refuses the type, which is what keeps collectItems,
   // reconcile and the push path blind to routine notes.
-  assert.equal(T.itemFromFrontmatter(Object.assign({}, FM), '02 Planner/Routines/x.md', 'x'), null);
+  assert.equal(T.itemFromFrontmatter(Object.assign({}, FM), '06 Planner/Routines/x.md', 'x'), null);
 });
 
 test('a step box in the definition is never treated as state', () => {
@@ -248,7 +248,7 @@ test('the template writes every contract field', () => {
   for (const l of fmLines) { const m = /^([a-z_]+): (.*)$/.exec(l); fm[m[1]] = m[2]; }
   fm.weekdays = ['mon', 'tue', 'wed', 'thu', 'fri'];
   fm.active = true;
-  const r = T.parseRoutineNote(fm, text, '02 Planner/Routines/Morning launch.md');
+  const r = T.parseRoutineNote(fm, text, '06 Planner/Routines/Morning launch.md');
   assert.equal(r.steps.length, 3);
   assert.equal(r.log.found, true);
   assert.equal(r.log.rows.length, 0);

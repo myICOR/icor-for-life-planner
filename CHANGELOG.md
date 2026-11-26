@@ -6,6 +6,87 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.18.3] - 2026-11-23
+
+### Changed
+- The display name is now ICOR Planner (it was ICOR for Life - Planner). The plugin id stays `icor-for-life-planner`, so installed vaults, settings and hotkeys carry on unchanged.
+
+## [0.18.2] - 2026-11-23
+
+### Changed
+- **The Planner opens from the ribbon on the left.** The button under the
+  sidebar logo is gone (Tom, 2026-11-23: every plugin's launcher moves to
+  Obsidian's own ribbon). The calendar icon in the ribbon opens the board, as
+  does **Open weekly planner** in the command palette. Like any ribbon icon,
+  you can move or hide it in Settings, Appearance, Ribbon menu. The strip with
+  your next event above the logo is unchanged.
+
+## [0.18.1] - 2026-11-23
+
+Ready for the Obsidian community directory's review.
+
+### Fixed
+- **Keys always stay in Obsidian's keychain, and your words in a task note
+  are kept** (the 0.17.0 fixes below, now in this line too). The planner
+  needs Obsidian 1.11.4, the first with Obsidian's own keychain.
+- **A renamed settings folder is respected.** The planner used to assume
+  Obsidian's settings live in `.obsidian`; it now reads the folder from
+  Obsidian, for the folder check and for the `.gitignore` line.
+
+## [0.18.0] - 2026-11-23
+
+ICOR for Life 3.0 moves the planner from `02 Planner` to `06 Planner`, and
+Inner World from `04 Inner World` to `02 Inner World`. The planner follows.
+
+### Changed
+- **The planner folder is `06 Planner` by default.** If your settings still
+  say `02 Planner` and your vault still has that folder, the planner keeps
+  using it. Once the vault has `06 Planner` instead, the planner moves to it
+  on start and saves the setting. A folder you chose yourself is left as it
+  is, and `06 AI Team`, a 2.x folder with the same number, is never taken for
+  the planner.
+- **The My Life Habits folder the import reads is
+  `02 Inner World/My Life/Habits` by default.** The 2.x default stays while
+  your vault still has `04 Inner World`, and follows once the vault has
+  `02 Inner World`.
+- The README names the new folders.
+
+## [0.17.0] - 2026-11-20
+
+### Changed
+- **The env file's default place is `.icor-for-life/.env`.** The ICOR for Life
+  vault no longer has the `06 AI Team` folder, so the keys file moved to the
+  vault's hidden system folder, the same file ICOR for Life - Connect and AI
+  Chat read. Obsidian does not index a folder whose name starts with a dot, so
+  the planner reads and writes it through the vault adapter only, as before.
+  The system folder is made on the first save when it is missing. This only
+  matters if you chose the env file in Settings, Secrets; Obsidian's keychain
+  is still the default.
+- **Existing vaults keep working.** The old default path in `data.json` now
+  reads as the new one. While `.icor-for-life/.env` is missing and
+  `06 AI Team/AI Team Knowledge/.env` is there, the planner reads and writes
+  the old file. Once, at start, it offers to copy the file to the new place;
+  the settings tab keeps an "Old keys file" row with the same button. The copy
+  is byte for byte and is read back before it is used. The old file is never
+  deleted by itself: once the new file exists, the same row offers to move the
+  old one to the trash.
+- While the env file is selected, it is added to the vault's `.gitignore` too
+  (the file in use and the new place), the way Connect has always done.
+  No value is ever logged or shown; every new sentence names paths only.
+
+### Fixed
+- **Keys stay in Obsidian's keychain.** Planner now needs Obsidian 1.11.4 or
+  newer, the first with Obsidian's own keychain. On older versions it used to keep keys in
+  plain text without saying so. The env file is still there for a member who
+  chooses it in settings.
+- **Your words in a task note are never lost.** The note's text is the
+  task's description, and the source wins a conflict. When the description
+  changed at the source while you had written in the note, your words were
+  replaced without a copy. They now go to a note beside the task first,
+  named "<task> (your words, <day>)", and a notice says where. If that copy
+  cannot be written, the note is left as it is and the task waits for the
+  next sync.
+
 ## [0.16.3] - 2026-11-17
 
 ### Fixed

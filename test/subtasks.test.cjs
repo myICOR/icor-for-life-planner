@@ -22,7 +22,7 @@ const root = process.env.PLANNER_ROOT
   : path.join(__dirname, '..');
 
 const item = (o) => Object.assign({
-  path: `02 Planner/Todoist/${o.id}.md`, source: 'todoist', id: '1', title: `Task ${o.id}`,
+  path: `06 Planner/Todoist/${o.id}.md`, source: 'todoist', id: '1', title: `Task ${o.id}`,
   status: 'open', doneLocal: false, due: null, priority: 5, plannedDay: null, plannedHalf: null,
   plannedOrder: 0, weeklyGoal: false, recurring: false, dueString: null, reopenPending: false,
   parentId: null, occurrences: [],
@@ -51,8 +51,8 @@ test('a Todoist subtask keeps its parent id through frontmatter', () => {
 test('the index resolves children within one source only', () => {
   const tp = item({ id: 'p1', title: 'Todoist parent' });
   const tc = item({ id: 'c1', parentId: 'p1' });
-  const cp = item({ id: 'p1', source: 'clickup', path: '02 Planner/ClickUp/p1.md', title: 'ClickUp parent' });
-  const cc = item({ id: 'c9', source: 'clickup', path: '02 Planner/ClickUp/c9.md', parentId: 'p1' });
+  const cp = item({ id: 'p1', source: 'clickup', path: '06 Planner/ClickUp/p1.md', title: 'ClickUp parent' });
+  const cc = item({ id: 'c9', source: 'clickup', path: '06 Planner/ClickUp/c9.md', parentId: 'p1' });
   const stray = item({ id: 'c2', parentId: 'zzz' });
   const index = T.buildItemIndex([tp, tc, cp, cc, stray]);
   assert.equal(T.parentTitleFor(tc, index), 'Todoist parent');
