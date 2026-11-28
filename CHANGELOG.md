@@ -6,6 +6,11 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.19.0] - 2026-11-28
+
+### Changed
+- The Workbench layout: the planner's folder is `07 Planner` and the habits import reads `02 My Life/Habits`. A saved old default (`02 Planner` from 2.x, `06 Planner` from early 3.0; `04` or `02 Inner World/My Life/Habits`) stays while the vault still has that folder and follows once the vault has moved. A renamed planner folder is still adopted when it is the only one.
+
 ## [0.18.3] - 2026-11-23
 
 ### Changed

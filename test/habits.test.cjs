@@ -21,7 +21,7 @@ const root = process.env.PLANNER_ROOT
   ? path.resolve(process.env.PLANNER_ROOT)
   : path.join(__dirname, '..');
 
-const HABITS = '06 Planner/Habits';
+const HABITS = '07 Planner/Habits';
 const STREAK_BODY = [
   '---',
   'type: planner-habit',
@@ -132,11 +132,11 @@ test('the planner shape parses; the My Life shape and a planner item do not coll
   assert.deepEqual(T.habitDays(full), T.WEEKDAY_CODES, 'daily shows every day');
   // the name falls back to the file name; the link resolves to a basename
   assert.equal(habit({ cadence: 'daily' }, '', `${HABITS}/Walk.md`).name, 'Walk');
-  assert.equal(habit({ cadence: 'daily', linked_note: '[[02 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedBasename, 'Walk');
+  assert.equal(habit({ cadence: 'daily', linked_note: '[[02 My Life/Habits/Walk|the walk]]' }, '').linkedBasename, 'Walk');
   assert.equal(habit({ cadence: 'daily', linked_note: '[[Walk#Log]]' }, '').linkedBasename, 'Walk');
   // and the target keeps the folders the basename drops: the My Life note
   // and this one share a name, so only the target names one file (0.14.1)
-  assert.equal(habit({ cadence: 'daily', linked_note: '[[02 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedTarget, '02 Inner World/My Life/Habits/Walk');
+  assert.equal(habit({ cadence: 'daily', linked_note: '[[02 My Life/Habits/Walk|the walk]]' }, '').linkedTarget, '02 My Life/Habits/Walk');
   assert.equal(habit({ cadence: 'daily' }, '').linkedNote, null);
   assert.equal(T.wikilinkBasename('Walk'), 'Walk');
   assert.equal(T.wikilinkBasename(''), null);
@@ -303,19 +303,19 @@ test('a future day is disabled', () => {
 test('the settings: the planner Habits folder off the folder, the import folder validated, the old key migrated', () => {
   const s = T.DEFAULT_SETTINGS;
   assert.equal(s.habitsEnabled, true);
-  assert.equal(s.habitsImportFolder, '02 Inner World/My Life/Habits');
+  assert.equal(s.habitsImportFolder, '02 My Life/Habits');
   assert.equal(s.habitStreaks, true);
   assert.equal('habitsFolder' in s, false, 'the old key is not declared');
   // the planner habits live under the folder, wherever the folder is
-  assert.equal(T.plannerPaths({}).habits, '06 Planner/Habits');
+  assert.equal(T.plannerPaths({}).habits, '07 Planner/Habits');
   assert.equal(T.plannerPaths({ plannerFolder: 'Week' }).habits, 'Week/Habits');
-  assert.equal(T.plannerPaths({}).isHabit('06 Planner/Habits/x.md'), true);
-  assert.equal(T.plannerPaths({}).isHabit('06 Planner/Habits2/x.md'), false, 'a boundary, not a prefix');
-  assert.equal(T.plannerPaths({}).isHabit('06 Planner/Habits'), false);
-  assert.equal(T.habitPathInside({}, '06 Planner/Habits/x.md'), true);
-  assert.equal(T.habitPathInside({ plannerFolder: 'Week' }, '06 Planner/Habits/x.md'), false);
+  assert.equal(T.plannerPaths({}).isHabit('07 Planner/Habits/x.md'), true);
+  assert.equal(T.plannerPaths({}).isHabit('07 Planner/Habits2/x.md'), false, 'a boundary, not a prefix');
+  assert.equal(T.plannerPaths({}).isHabit('07 Planner/Habits'), false);
+  assert.equal(T.habitPathInside({}, '07 Planner/Habits/x.md'), true);
+  assert.equal(T.habitPathInside({ plannerFolder: 'Week' }, '07 Planner/Habits/x.md'), false);
   assert.equal(T.habitPathInside({ plannerFolder: 'Week' }, 'Week/Habits/x.md'), true);
-  assert.equal(T.habitPathInside({}, '02 Inner World/My Life/Habits/x.md'), false, 'the My Life folder is never a write target of the tab');
+  assert.equal(T.habitPathInside({}, '02 My Life/Habits/x.md'), false, 'the My Life folder is never a write target of the tab');
   // the import folder, validated like the planner folder
   assert.deepEqual(T.normalizeHabitsFolder(' /My Habits/ '), { ok: true, folder: 'My Habits', error: null });
   assert.equal(T.normalizeHabitsFolder('').error, 'The My Life Habits folder cannot be empty.');
@@ -327,13 +327,13 @@ test('the settings: the planner Habits folder off the folder, the import folder 
   assert.equal(T.habitsImportFolderOf({}), s.habitsImportFolder);
   assert.equal(T.importPathInside({ habitsImportFolder: 'Habits' }, 'Habits/x.md'), true);
   assert.equal(T.importPathInside({ habitsImportFolder: 'Habits' }, 'Habits2/x.md'), false, 'a boundary, not a prefix');
-  assert.equal(T.importPathInside({}, '06 Planner/Habits/x.md'), false);
+  assert.equal(T.importPathInside({}, '07 Planner/Habits/x.md'), false);
   // the migration: habitsFolder becomes habitsImportFolder, once, silently
-  const old = { plannerFolder: '06 Planner', habitsFolder: 'My Habits', habitStreaks: false };
+  const old = { plannerFolder: '07 Planner', habitsFolder: 'My Habits', habitStreaks: false };
   const m = T.migrateHabitSettings(old);
-  assert.deepEqual(m, { plannerFolder: '06 Planner', habitsImportFolder: 'My Habits', habitStreaks: false });
+  assert.deepEqual(m, { plannerFolder: '07 Planner', habitsImportFolder: 'My Habits', habitStreaks: false });
   assert.notEqual(m, old, 'a migrated object is a new object, so the load knows to write back');
-  const fresh = { plannerFolder: '06 Planner', habitsImportFolder: 'X' };
+  const fresh = { plannerFolder: '07 Planner', habitsImportFolder: 'X' };
   assert.equal(T.migrateHabitSettings(fresh), fresh, 'nothing to do: the same object back');
   assert.deepEqual(T.migrateHabitSettings({ habitsFolder: 'Old', habitsImportFolder: 'New' }), { habitsImportFolder: 'New' }, 'the new key wins when both exist');
   const adopted = T.adoptSettings({ habitsFolder: 'My Habits' }, null);

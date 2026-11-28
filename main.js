@@ -253,22 +253,23 @@ function legacyEnvFileFor(path) {
   return trimmed(path) === DEFAULT_ENV_FILE_PATH ? LEGACY_ENV_FILE_PATH : '';
 }
 
-// The defaults of an ICOR for Life 2.x vault, before 3.0 moved the planner
-// to 06 Planner and Inner World to 02 Inner World. data.json carries every
+// The defaults of older vaults: 2.x (02 Planner, 04 Inner World) and early
+// 3.0 (06 Planner, 02 Inner World), before the Workbench layout put the
+// planner in 07 Planner and My Life in 02 My Life. data.json carries every
 // default once anything is saved, so a member can hold these without having
-// chosen them. Each is kept while the vault still has its 2.x folder and
+// chosen them. Each is kept while the vault still has its old folder and
 // follows the vault once it has moved (detectPlannerFolder,
 // followHabitsImportFolder). Matched by full name, never by number: 06 AI
-// Team (2.x) and 06 Planner (3.0) share the 06.
-const PLANNER_FOLDER_2X = '02 Planner';
-const HABITS_IMPORT_FOLDER_2X = '04 Inner World/My Life/Habits';
+// Team (2.x), 06 Planner (early 3.0) and 06 Sources share the 06.
+const PLANNER_FOLDERS_OLD = ['02 Planner', '06 Planner'];
+const HABITS_IMPORT_FOLDERS_OLD = ['04 Inner World/My Life/Habits', '02 Inner World/My Life/Habits'];
 
 const DEFAULT_SETTINGS = {
   // Where the planner lives in the vault: its folder. Every path the
   // plugin reads or writes derives from this one value (plannerPaths); a
   // renamed folder is found on boot (detectPlannerFolder) instead of being
   // recreated empty beside the renamed one.
-  plannerFolder: '06 Planner',
+  plannerFolder: '07 Planner',
   todoistToken: '',
   clickupToken: '',
   clickupTeamId: '',
@@ -371,7 +372,7 @@ const DEFAULT_SETTINGS = {
   // the setting was called habitsFolder and named the folder the planner
   // read, and it is carried over on load (migrateHabitSettings).
   habitsEnabled: true,
-  habitsImportFolder: '02 Inner World/My Life/Habits',
+  habitsImportFolder: '02 My Life/Habits',
   habitStreaks: true,
 };
 
@@ -1130,10 +1131,10 @@ function plannerPaths(settings) {
 // Boot-time detection. Pure. The configured folder existing wins. Otherwise
 // exactly one top-level folder whose name ends in "planner" (any prefix,
 // any case) is adopted; several ask; none keeps the setting (ensureFolders
-// creates it), except the 2.x default, which becomes the 3.0 default for
-// now ('default': nothing saved, nothing said; the 2.x folder is gone or
-// was never made). So a saved 02 Planner stays while the vault has it and
-// follows to 06 Planner once the vault has moved.
+// creates it), except an old default, which becomes the current default for
+// now ('default': nothing saved, nothing said; the old folder is gone or
+// was never made). So a saved 02 Planner or 06 Planner stays while the
+// vault has it and follows to 07 Planner once the vault has moved.
 // Returns { action: 'keep' | 'adopt' | 'ask' | 'default', folder, candidates }.
 function detectPlannerFolder(topLevelFolderNames, configured) {
   const names = Array.isArray(topLevelFolderNames) ? topLevelFolderNames : [];
@@ -1141,18 +1142,18 @@ function detectPlannerFolder(topLevelFolderNames, configured) {
   const candidates = names.filter((n) => /(^|\s)planner$/i.test(String(n)));
   if (candidates.length === 1) return { action: 'adopt', folder: candidates[0], candidates };
   if (candidates.length > 1) return { action: 'ask', folder: configured, candidates };
-  if (configured === PLANNER_FOLDER_2X) return { action: 'default', folder: DEFAULT_SETTINGS.plannerFolder, candidates: [] };
+  if (PLANNER_FOLDERS_OLD.includes(configured)) return { action: 'default', folder: DEFAULT_SETTINGS.plannerFolder, candidates: [] };
   return { action: 'keep', folder: configured, candidates: [] };
 }
 
 // The My Life Habits folder for a saved one, once the vault is known. Pure.
-// The 2.x default stays while the vault still has its top folder
-// (04 Inner World); otherwise it becomes the 3.0 default, saved once the
+// An old default stays while the vault still has its top folder
+// (04 or 02 Inner World); otherwise it becomes the current default, saved once the
 // vault has the new top folder. Any other value is the member's and stays.
 // `exists(path)` says whether the vault has that folder.
 function followHabitsImportFolder(saved, exists) {
   const top = (p) => p.split('/')[0];
-  if (saved !== HABITS_IMPORT_FOLDER_2X || exists(top(HABITS_IMPORT_FOLDER_2X))) return { folder: saved, save: false };
+  if (!HABITS_IMPORT_FOLDERS_OLD.includes(saved) || exists(top(saved))) return { folder: saved, save: false };
   const folder = DEFAULT_SETTINGS.habitsImportFolder;
   return { folder, save: !!exists(top(folder)) };
 }
