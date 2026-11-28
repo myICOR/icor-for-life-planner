@@ -78,7 +78,7 @@ top of the tray under PINNED THIS WEEK and wear a WEEK chip on the board.
 
 ## The week note
 
-Beside the board there is one note per week, in `06 Planner/Weeks/`, and a tab
+Beside the board there is one note per week, in `07 Planner/Weeks/`, and a tab
 that reads and writes it. It holds two things.
 
 **Weekly priorities.** What you are trying to achieve this week, one line
@@ -118,9 +118,10 @@ you remove it.
 ## What it touches
 
 **Your vault.** Every task, event, routine and habit becomes a plain markdown
-note in `06 Planner/`. You can read and edit them without this plugin. A vault
-that still has the ICOR for Life 2.x folder `02 Planner` keeps using it until
-the vault moves to `06 Planner`; the planner folder is a setting.
+note in `07 Planner/`. You can read and edit them without this plugin. A vault
+that still has the ICOR for Life 2.x folder `02 Planner` (or `06 Planner` from
+early 3.0) keeps using it until the vault moves to `07 Planner`; the planner
+folder is a setting.
 
 **The services you connect, and only those.** With a key configured it talks
 to Todoist, ClickUp, your own IMAP host, the iCal addresses you paste, and
